@@ -6,10 +6,29 @@ function Test-ExtensionAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-ExtensionRuntimeWritable {
+    $runtimeBase = Join-Path $env:ProgramData 'Sub2API\extensions'
+    $probePath = $null
+    try {
+        New-Item -ItemType Directory -Path $runtimeBase -Force | Out-Null
+        $probePath = Join-Path $runtimeBase ('.write-probe-{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+        $stream = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Dispose()
+        [IO.File]::Delete($probePath)
+        return $true
+    }
+    catch {
+        if ($null -ne $probePath -and [IO.File]::Exists($probePath)) {
+            [IO.File]::Delete($probePath)
+        }
+        return $false
+    }
+}
+
 function Invoke-ExtensionElevated {
     param([Parameter(Mandatory = $true)][string]$ScriptPath)
 
-    if (Test-ExtensionAdministrator) {
+    if ((Test-ExtensionAdministrator) -or (Test-ExtensionRuntimeWritable)) {
         return $null
     }
 

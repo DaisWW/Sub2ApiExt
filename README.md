@@ -17,6 +17,8 @@ Sub2API 的独立扩展服务。本仓库不包含也不修改 Sub2API 上游源
 - Docker Desktop 和 Docker Compose；
 - 官方 Sub2API 容器已经运行，容器名为 `sub2api` 和 `sub2api-postgres`。
 
+安装器会先检查 `C:\ProgramData\Sub2API\extensions` 是否可写；只有当前用户权限不足时才弹出 UAC 管理员确认。
+
 部署全部扩展：
 
 ```bat
