@@ -278,10 +278,11 @@ function Wait-ExtensionContainer {
         try {
             $inspect = Get-ExtensionContainerInspect -Name $Name
             if ($inspect.State.Running) {
-                if ($null -eq $inspect.State.Health -or $inspect.State.Health.Status -eq 'healthy') {
+                $healthProperty = $inspect.State.PSObject.Properties['Health']
+                if ($null -eq $healthProperty -or $healthProperty.Value.Status -eq 'healthy') {
                     return
                 }
-                if ($inspect.State.Health.Status -eq 'unhealthy') {
+                if ($healthProperty.Value.Status -eq 'unhealthy') {
                     throw "$Name is unhealthy."
                 }
             } elseif ($inspect.State.Status -eq 'exited') {
