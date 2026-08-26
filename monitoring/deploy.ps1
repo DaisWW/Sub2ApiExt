@@ -75,6 +75,13 @@ Remove-ExtensionContainer -Name 'sub2api-monitor-check'
 Start-ExtensionCompose -RuntimeRoot $runtimeRoot
 Wait-ExtensionContainer -Name 'sub2api-monitoring'
 
+# Retire the original-workspace deployment only after the independent
+# ProgramData deployment is healthy, so two workers do not probe in parallel.
+if (Test-ExtensionContainerExists -Name 'sub2api-monitoring-standalone') {
+    Write-Host 'Removing legacy monitoring container...' -ForegroundColor Cyan
+    Remove-ExtensionContainer -Name 'sub2api-monitoring-standalone'
+}
+
 Write-Host ''
 Write-Host 'Monitoring deployment completed.' -ForegroundColor Green
 Write-Host "Dashboard: http://localhost:$port"

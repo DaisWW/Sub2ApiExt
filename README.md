@@ -44,6 +44,8 @@ C:\ProgramData\Sub2API\extensions\
 
 首次迁移会优先复制现有 rate-sync 容器使用的配置。以后从本仓库重复部署会保留 ProgramData 中的真实配置和 Docker 状态卷。
 
+如果检测到原工作目录部署的 `sub2api-monitoring-standalone`，安装器会先等待新监控容器健康，再移除旧容器，避免两个 Worker 并行探测。
+
 监控面板默认仅监听 `127.0.0.1:18090`。可在安装后的 `monitoring\.env` 中调整监听地址和端口，再从该目录执行 `docker compose up -d`。
 
 每个运行目录都会安装 `manage.bat`：

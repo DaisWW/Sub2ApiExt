@@ -74,6 +74,8 @@ deploy.bat
 
 安装器只读取现有 Sub2API 的 Docker 网络和 PostgreSQL 连接信息，不会重建主服务、数据库或 Redis。它会构建 `sub2api-ext-monitoring:local`，并把独立 Compose、设置及数据库运行环境安装到 `C:\ProgramData\Sub2API\extensions\monitoring`。账户凭据只在当前探测请求的内存中使用，不由监控服务另行持久化。
 
+如果存在原工作目录部署的 `sub2api-monitoring-standalone`，安装器会在新容器健康后移除旧容器，避免两个监控 Worker 同时运行。监控历史保存在 PostgreSQL，不随旧容器删除。
+
 部署完成后可在运行目录使用：
 
 ```bat
