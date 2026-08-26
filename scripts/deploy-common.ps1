@@ -224,9 +224,17 @@ function Grant-ExtensionRuntimeAccess {
     & icacls.exe $Path '/inheritance:r' '/grant:r' `
         '*S-1-5-18:(OI)(CI)F' `
         '*S-1-5-32-544:(OI)(CI)F' `
-        "${currentUser}:(OI)(CI)M" '/T' '/Q' | Out-Null
+        "${currentUser}:(OI)(CI)M" '/Q' | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Could not restrict access to $Path."
+    }
+
+    $children = @(Get-ChildItem -LiteralPath $Path -Force)
+    if ($children.Count -gt 0) {
+        & icacls.exe (Join-Path $Path '*') '/inheritance:e' '/T' '/C' '/Q' | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not restore inherited access below $Path."
+        }
     }
 }
 
