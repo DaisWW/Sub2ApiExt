@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0c1118">
+    <title>Pulse | Sub2API Monitor</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-lockup">
+          <span class="brand-mark">P</span>
+          <div>
+            <div class="brand-name">Pulse</div>
+            <div class="brand-subtitle">Sub2API monitor</div>
+          </div>
+          <span class="live-pill"><i></i> LIVE</span>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button" id="notifyButton" title="通知设置" aria-label="通知设置">◌</button>
+          <button class="icon-button" id="refreshButton" title="刷新" aria-label="刷新">↻</button>
+          <button class="probe-button" id="probeButton"><span>⌁</span> 立即探测</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="overview-row">
+          <div class="overview-copy">
+            <p class="eyebrow">SERVICE HEALTH</p>
+            <h1 id="overallTitle">正在读取状态</h1>
+            <p id="overallMeta" class="muted">等待第一次探测结果</p>
+          </div>
+          <div class="overview-controls">
+            <div class="segmented" role="tablist" aria-label="对象类型">
+              <button class="active" data-filter="all" role="tab">全部</button>
+              <button data-filter="group" role="tab">分组</button>
+              <button data-filter="account" role="tab">账户</button>
+            </div>
+            <label class="select-wrap">
+              <span class="sr-only">历史窗口</span>
+              <select id="windowSelect">
+                <option value="1">24 小时</option>
+                <option value="7" selected>7 天</option>
+                <option value="30">30 天</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="kpi-grid" id="kpiGrid" aria-live="polite"></section>
+
+        <section class="section-heading">
+          <div>
+            <p class="eyebrow">DISCOVERED TARGETS</p>
+            <h2>实时探测对象</h2>
+          </div>
+          <div class="section-meta" id="sectionMeta"></div>
+        </section>
+        <section class="target-grid" id="targetGrid" aria-live="polite">
+          <div class="loading-state">连接监控服务中<span class="loading-dots">...</span></div>
+        </section>
+      </main>
+
+      <aside class="alert-drawer" id="alertDrawer" aria-label="告警">
+        <div class="drawer-head">
+          <div>
+            <p class="eyebrow">ACTIVE SIGNALS</p>
+            <h2>告警</h2>
+          </div>
+          <button class="icon-button" id="closeAlerts" title="关闭告警" aria-label="关闭告警">×</button>
+        </div>
+        <div id="alertList" class="alert-list"></div>
+      </aside>
+      <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
+    </div>
+
+    <dialog id="historyDialog" class="history-dialog">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">PROBE HISTORY</p>
+          <h2 id="dialogTitle">历史记录</h2>
+        </div>
+        <button class="icon-button" id="closeDialog" title="关闭历史记录" aria-label="关闭历史记录">×</button>
+      </div>
+      <div class="history-summary" id="historySummary"></div>
+      <div class="history-table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>状态</th><th>首字/首字节</th><th>总耗时</th><th>结果</th></tr></thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
+    </dialog>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

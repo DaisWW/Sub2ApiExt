@@ -1,0 +1,218 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+)
+
+const (
+	defaultSub2APIURL        = "http://sub2api:8080"
+	defaultInterval          = "300s"
+	defaultStateFile         = "/data/state.json"
+	defaultSyncTarget        = "group"
+	defaultHistoryWindow     = "24h"
+	defaultMinHistoryCostUSD = 0.01
+)
+
+type fileConfig struct {
+	Sub2APIURL        string             `json:"sub2api_url"`
+	ProxyURL          string             `json:"proxy_url"`
+	ProxyFallbackURLs []string           `json:"proxy_fallback_urls"`
+	Interval          string             `json:"interval"`
+	SyncTarget        string             `json:"sync_target"`
+	SyncHosts         []string           `json:"sync_hosts"`
+	UsageBootstrap    bool               `json:"usage_bootstrap"`
+	HistoryWindow     string             `json:"history_window"`
+	MinHistoryCostUSD float64            `json:"min_history_cost_usd"`
+	DryRun            bool               `json:"dry_run"`
+	Confirmations     int                `json:"confirmations"`
+	StateFile         string             `json:"state_file"`
+	Factors           map[string]float64 `json:"factors"`
+}
+
+type Config struct {
+	Sub2APIURL        string
+	ProxyURL          string
+	ProxyFallbackURLs []string
+	AdminAPIKey       string
+	Interval          time.Duration
+	SyncTarget        string
+	SyncHosts         map[string]struct{}
+	UsageBootstrap    bool
+	HistoryWindow     time.Duration
+	MinHistoryCostUSD float64
+	DryRun            bool
+	Confirmations     int
+	StateFile         string
+	Factors           map[string]float64
+}
+
+func loadConfig(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置文件: %w", err)
+	}
+
+	var raw fileConfig
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("解析配置文件: %w", err)
+	}
+
+	if raw.Sub2APIURL == "" {
+		raw.Sub2APIURL = defaultSub2APIURL
+	}
+	if raw.Interval == "" {
+		raw.Interval = defaultInterval
+	}
+	if raw.SyncTarget == "" {
+		raw.SyncTarget = defaultSyncTarget
+	}
+	raw.SyncTarget = strings.ToLower(strings.TrimSpace(raw.SyncTarget))
+	if raw.SyncTarget != "group" && raw.SyncTarget != "account" {
+		return nil, fmt.Errorf("sync_target 必须是 group 或 account")
+	}
+	if raw.HistoryWindow == "" {
+		raw.HistoryWindow = defaultHistoryWindow
+	}
+	historyWindow, err := time.ParseDuration(raw.HistoryWindow)
+	if err != nil {
+		return nil, fmt.Errorf("history_window 无效: %w", err)
+	}
+	if historyWindow < time.Minute || historyWindow > 30*24*time.Hour {
+		return nil, fmt.Errorf("history_window 必须在 1m 到 720h 之间")
+	}
+	if raw.MinHistoryCostUSD <= 0 {
+		raw.MinHistoryCostUSD = defaultMinHistoryCostUSD
+	}
+	if math.IsNaN(raw.MinHistoryCostUSD) || math.IsInf(raw.MinHistoryCostUSD, 0) {
+		return nil, fmt.Errorf("min_history_cost_usd 必须是大于 0 的有限数字")
+	}
+	if raw.Confirmations == 0 {
+		raw.Confirmations = 2
+	}
+	if raw.StateFile == "" {
+		raw.StateFile = defaultStateFile
+	}
+
+	interval, err := time.ParseDuration(raw.Interval)
+	if err != nil {
+		return nil, fmt.Errorf("interval 无效: %w", err)
+	}
+	if interval < 10*time.Second {
+		return nil, fmt.Errorf("interval 不能小于 10s")
+	}
+	if raw.Confirmations < 1 || raw.Confirmations > 5 {
+		return nil, fmt.Errorf("confirmations 必须在 1 到 5 之间")
+	}
+	if err := validateHTTPURL(raw.Sub2APIURL, "sub2api_url"); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(raw.ProxyURL) != "" {
+		if err := validateProxyURL(raw.ProxyURL, "proxy_url"); err != nil {
+			return nil, err
+		}
+	}
+	proxyFallbackURLs := make([]string, 0, len(raw.ProxyFallbackURLs))
+	for index, proxyURL := range raw.ProxyFallbackURLs {
+		proxyURL = strings.TrimSpace(proxyURL)
+		if err := validateProxyURL(proxyURL, fmt.Sprintf("proxy_fallback_urls[%d]", index)); err != nil {
+			return nil, err
+		}
+		proxyFallbackURLs = append(proxyFallbackURLs, strings.TrimRight(proxyURL, "/"))
+	}
+
+	factors := make(map[string]float64, len(raw.Factors))
+	for value, factor := range raw.Factors {
+		host, err := normalizeFactorHost(value)
+		if err != nil {
+			return nil, err
+		}
+		if factor <= 0 || math.IsNaN(factor) || math.IsInf(factor, 0) {
+			return nil, fmt.Errorf("factors[%q] 必须是大于 0 的有限数字", value)
+		}
+		if _, exists := factors[host]; exists {
+			return nil, fmt.Errorf("factors 中的域名 %q 重复", host)
+		}
+		factors[host] = factor
+	}
+
+	syncHosts := make(map[string]struct{}, len(raw.SyncHosts))
+	for _, value := range raw.SyncHosts {
+		host, err := normalizeHost(value, "sync_hosts")
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := syncHosts[host]; exists {
+			return nil, fmt.Errorf("sync_hosts 中的域名 %q 重复", host)
+		}
+		syncHosts[host] = struct{}{}
+	}
+
+	return &Config{
+		Sub2APIURL:        strings.TrimRight(raw.Sub2APIURL, "/"),
+		ProxyURL:          strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
+		ProxyFallbackURLs: proxyFallbackURLs,
+		Interval:          interval,
+		SyncTarget:        raw.SyncTarget,
+		SyncHosts:         syncHosts,
+		UsageBootstrap:    raw.UsageBootstrap,
+		HistoryWindow:     historyWindow,
+		MinHistoryCostUSD: raw.MinHistoryCostUSD,
+		DryRun:            raw.DryRun,
+		Confirmations:     raw.Confirmations,
+		StateFile:         raw.StateFile,
+		Factors:           factors,
+	}, nil
+}
+
+func (c *Config) factorForBaseURL(baseURL string) (float64, string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return 0, "", fmt.Errorf("账号 base_url 必须是有效的 http/https URL")
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if factor, exists := c.Factors[host]; exists {
+		return factor, host, nil
+	}
+	return 1, host, nil
+}
+
+func normalizeFactorHost(value string) (string, error) {
+	return normalizeHost(value, "factors")
+}
+
+func normalizeHost(value, field string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || strings.Contains(value, "://") {
+		return "", fmt.Errorf("%s 中的值 %q 必须是域名，不要填写 URL", field, value)
+	}
+	parsed, err := url.Parse("https://" + value)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.Port() != "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%s 中的值 %q 必须是有效域名", field, value)
+	}
+	return strings.TrimSuffix(parsed.Hostname(), "."), nil
+}
+
+func validateHTTPURL(value, field string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("%s 必须是有效的 http/https URL", field)
+	}
+	return nil
+}
+
+func validateProxyURL(value, field string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s 必须是有效的 http/https 代理 URL", field)
+	}
+	return nil
+}

@@ -1,0 +1,6 @@
+.git
+*.md
+*.bat
+*.ps1
+*.env
+compose.runtime.yml

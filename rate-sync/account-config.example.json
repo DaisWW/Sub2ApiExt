@@ -1,0 +1,15 @@
+{
+  "interval": "900s",
+  "sync_target": "account",
+  "confirmations": 2,
+  "usage_bootstrap": true,
+  "sync_hosts": [
+    "www.codexapis.com",
+    "xixiapi.io",
+    "lucen.cc"
+  ],
+  "factors": {
+    "lucen.cc": 0.85,
+    "xixiapi.io": 0.85
+  }
+}

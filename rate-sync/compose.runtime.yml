@@ -1,0 +1,51 @@
+name: rate-sync
+
+services:
+  rate-sync:
+    image: sub2api-ext-rate-sync:local
+    container_name: sub2api-rate-sync
+    restart: unless-stopped
+    env_file:
+      - path: .runtime.env
+        required: true
+        format: raw
+    environment:
+      TZ: Asia/Shanghai
+      CONFIG_PATH: /app/config.json
+      RATE_SYNC_LOG_COLOR: auto
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - rate_sync_data:/data
+    networks:
+      - sub2api-network
+
+  rate-sync-account:
+    image: sub2api-ext-rate-sync:local
+    container_name: sub2api-rate-sync-account
+    restart: unless-stopped
+    env_file:
+      - path: .runtime.env
+        required: true
+        format: raw
+    environment:
+      TZ: Asia/Shanghai
+      CONFIG_PATH: /app/config.json
+      RATE_SYNC_LOG_COLOR: auto
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./account-config.json:/app/config.json:ro
+      - rate_sync_account_data:/data
+    networks:
+      - sub2api-network
+
+volumes:
+  rate_sync_data:
+  rate_sync_account_data:
+
+networks:
+  sub2api-network:
+    external: true
+    name: ${SUB2API_NETWORK:?SUB2API_NETWORK is required}

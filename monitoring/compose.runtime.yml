@@ -1,0 +1,29 @@
+name: sub2api-monitoring
+
+services:
+  monitoring:
+    image: sub2api-ext-monitoring:local
+    container_name: sub2api-monitoring
+    restart: unless-stopped
+    ports:
+      - "${MONITORING_BIND_HOST:-127.0.0.1}:${MONITORING_PORT:-18090}:8090"
+    env_file:
+      - path: database.runtime.env
+        required: true
+        format: raw
+      - path: settings.env
+        required: true
+        format: raw
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://127.0.0.1:8090/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+networks:
+  sub2api-network:
+    external: true
+    name: ${SUB2API_NETWORK:?SUB2API_NETWORK is required}

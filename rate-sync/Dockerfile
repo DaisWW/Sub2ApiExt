@@ -1,0 +1,22 @@
+ARG GO_IMAGE=docker.m.daocloud.io/library/golang:1.23-alpine
+ARG RUNTIME_IMAGE=docker.m.daocloud.io/library/alpine:3.21
+
+FROM ${GO_IMAGE} AS builder
+
+WORKDIR /src
+ENV GOPROXY=https://goproxy.io,direct
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go ./
+RUN CGO_ENABLED=0 GOOS=linux go test ./... && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/rate-sync .
+
+FROM ${RUNTIME_IMAGE}
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S rate-sync && adduser -S -G rate-sync rate-sync && \
+    mkdir -p /app /data && chown -R rate-sync:rate-sync /app /data
+COPY --from=builder /out/rate-sync /app/rate-sync
+
+USER rate-sync
+ENV CONFIG_PATH=/app/config.json
+ENTRYPOINT ["/app/rate-sync"]
