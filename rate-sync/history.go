@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	adaptiveMinRequests       int64   = 30
-	adaptiveMinStandardCostUSD        = 5.0
-	adaptiveMaxHistoryWindow           = 24 * time.Hour
+	adaptiveMinRequests        int64 = 30
+	adaptiveMinStandardCostUSD       = 5.0
+	adaptiveMaxHistoryWindow         = 24 * time.Hour
 )
 
 var adaptiveHistoryWindowOrder = []time.Duration{
@@ -37,7 +37,7 @@ func adaptiveHistoryWindows(maxWindow time.Duration) []time.Duration {
 		}
 	}
 	if len(windows) == 0 {
-		// Keep the configured lower bound useful in tests or custom deployments.
+		// 即使配置小于预设窗口，也保留用户配置的下限，便于测试和定制部署。
 		windows = append(windows, maxWindow)
 	}
 	return windows

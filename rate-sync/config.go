@@ -64,97 +64,43 @@ func loadConfig(path string) (*Config, error) {
 	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
 	}
+	return normalizeFileConfig(raw)
+}
 
-	if raw.Sub2APIURL == "" {
-		raw.Sub2APIURL = defaultSub2APIURL
+func normalizeFileConfig(raw fileConfig) (*Config, error) {
+	applyConfigDefaults(&raw)
+	if err := validateSyncTarget(raw.SyncTarget); err != nil {
+		return nil, err
 	}
-	if raw.Interval == "" {
-		raw.Interval = defaultInterval
-	}
-	if raw.SyncTarget == "" {
-		raw.SyncTarget = defaultSyncTarget
-	}
-	raw.SyncTarget = strings.ToLower(strings.TrimSpace(raw.SyncTarget))
-	if raw.SyncTarget != "group" && raw.SyncTarget != "account" {
-		return nil, fmt.Errorf("sync_target 必须是 group 或 account")
-	}
-	if raw.HistoryWindow == "" {
-		raw.HistoryWindow = defaultHistoryWindow
-	}
-	historyWindow, err := time.ParseDuration(raw.HistoryWindow)
+	historyWindow, err := parseHistoryWindow(raw.HistoryWindow)
 	if err != nil {
-		return nil, fmt.Errorf("history_window 无效: %w", err)
+		return nil, err
 	}
-	if historyWindow < time.Minute || historyWindow > 30*24*time.Hour {
-		return nil, fmt.Errorf("history_window 必须在 1m 到 720h 之间")
+	if err := validateMinHistoryCost(raw.MinHistoryCostUSD); err != nil {
+		return nil, err
 	}
-	if raw.MinHistoryCostUSD <= 0 {
-		raw.MinHistoryCostUSD = defaultMinHistoryCostUSD
-	}
-	if math.IsNaN(raw.MinHistoryCostUSD) || math.IsInf(raw.MinHistoryCostUSD, 0) {
-		return nil, fmt.Errorf("min_history_cost_usd 必须是大于 0 的有限数字")
-	}
-	if raw.Confirmations == 0 {
-		raw.Confirmations = 2
-	}
-	if raw.StateFile == "" {
-		raw.StateFile = defaultStateFile
-	}
-
-	interval, err := time.ParseDuration(raw.Interval)
+	interval, err := parseSyncInterval(raw.Interval)
 	if err != nil {
-		return nil, fmt.Errorf("interval 无效: %w", err)
+		return nil, err
 	}
-	if interval < 10*time.Second {
-		return nil, fmt.Errorf("interval 不能小于 10s")
-	}
-	if raw.Confirmations < 1 || raw.Confirmations > 5 {
-		return nil, fmt.Errorf("confirmations 必须在 1 到 5 之间")
+	if err := validateConfirmations(raw.Confirmations); err != nil {
+		return nil, err
 	}
 	if err := validateHTTPURL(raw.Sub2APIURL, "sub2api_url"); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(raw.ProxyURL) != "" {
-		if err := validateProxyURL(raw.ProxyURL, "proxy_url"); err != nil {
-			return nil, err
-		}
+	proxyFallbackURLs, err := normalizeProxyFallbacks(raw.ProxyURL, raw.ProxyFallbackURLs)
+	if err != nil {
+		return nil, err
 	}
-	proxyFallbackURLs := make([]string, 0, len(raw.ProxyFallbackURLs))
-	for index, proxyURL := range raw.ProxyFallbackURLs {
-		proxyURL = strings.TrimSpace(proxyURL)
-		if err := validateProxyURL(proxyURL, fmt.Sprintf("proxy_fallback_urls[%d]", index)); err != nil {
-			return nil, err
-		}
-		proxyFallbackURLs = append(proxyFallbackURLs, strings.TrimRight(proxyURL, "/"))
+	factors, err := normalizeFactors(raw.Factors)
+	if err != nil {
+		return nil, err
 	}
-
-	factors := make(map[string]float64, len(raw.Factors))
-	for value, factor := range raw.Factors {
-		host, err := normalizeFactorHost(value)
-		if err != nil {
-			return nil, err
-		}
-		if factor <= 0 || math.IsNaN(factor) || math.IsInf(factor, 0) {
-			return nil, fmt.Errorf("factors[%q] 必须是大于 0 的有限数字", value)
-		}
-		if _, exists := factors[host]; exists {
-			return nil, fmt.Errorf("factors 中的域名 %q 重复", host)
-		}
-		factors[host] = factor
+	syncHosts, err := normalizeSyncHosts(raw.SyncHosts)
+	if err != nil {
+		return nil, err
 	}
-
-	syncHosts := make(map[string]struct{}, len(raw.SyncHosts))
-	for _, value := range raw.SyncHosts {
-		host, err := normalizeHost(value, "sync_hosts")
-		if err != nil {
-			return nil, err
-		}
-		if _, exists := syncHosts[host]; exists {
-			return nil, fmt.Errorf("sync_hosts 中的域名 %q 重复", host)
-		}
-		syncHosts[host] = struct{}{}
-	}
-
 	return &Config{
 		Sub2APIURL:        strings.TrimRight(raw.Sub2APIURL, "/"),
 		ProxyURL:          strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
@@ -170,6 +116,124 @@ func loadConfig(path string) (*Config, error) {
 		StateFile:         raw.StateFile,
 		Factors:           factors,
 	}, nil
+}
+
+func applyConfigDefaults(raw *fileConfig) {
+	if raw.Sub2APIURL == "" {
+		raw.Sub2APIURL = defaultSub2APIURL
+	}
+	if raw.Interval == "" {
+		raw.Interval = defaultInterval
+	}
+	if raw.SyncTarget == "" {
+		raw.SyncTarget = defaultSyncTarget
+	}
+	raw.SyncTarget = strings.ToLower(strings.TrimSpace(raw.SyncTarget))
+	if raw.HistoryWindow == "" {
+		raw.HistoryWindow = defaultHistoryWindow
+	}
+	if raw.MinHistoryCostUSD <= 0 {
+		raw.MinHistoryCostUSD = defaultMinHistoryCostUSD
+	}
+	if raw.Confirmations == 0 {
+		raw.Confirmations = 2
+	}
+	if raw.StateFile == "" {
+		raw.StateFile = defaultStateFile
+	}
+}
+
+func validateSyncTarget(target string) error {
+	if target != "group" && target != "account" {
+		return fmt.Errorf("sync_target 必须是 group 或 account")
+	}
+	return nil
+}
+
+func parseHistoryWindow(value string) (time.Duration, error) {
+	historyWindow, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("history_window 无效: %w", err)
+	}
+	if historyWindow < time.Minute || historyWindow > 30*24*time.Hour {
+		return 0, fmt.Errorf("history_window 必须在 1m 到 720h 之间")
+	}
+	return historyWindow, nil
+}
+
+func parseSyncInterval(value string) (time.Duration, error) {
+	interval, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("interval 无效: %w", err)
+	}
+	if interval < 10*time.Second {
+		return 0, fmt.Errorf("interval 不能小于 10s")
+	}
+	return interval, nil
+}
+
+func validateMinHistoryCost(value float64) error {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("min_history_cost_usd 必须是大于 0 的有限数字")
+	}
+	return nil
+}
+
+func validateConfirmations(value int) error {
+	if value < 1 || value > 5 {
+		return fmt.Errorf("confirmations 必须在 1 到 5 之间")
+	}
+	return nil
+}
+
+func normalizeProxyFallbacks(proxyURL string, fallbackURLs []string) ([]string, error) {
+	if strings.TrimSpace(proxyURL) != "" {
+		if err := validateProxyURL(proxyURL, "proxy_url"); err != nil {
+			return nil, err
+		}
+	}
+	result := make([]string, 0, len(fallbackURLs))
+	for index, fallbackURL := range fallbackURLs {
+		fallbackURL = strings.TrimSpace(fallbackURL)
+		if err := validateProxyURL(fallbackURL, fmt.Sprintf("proxy_fallback_urls[%d]", index)); err != nil {
+			return nil, err
+		}
+		result = append(result, strings.TrimRight(fallbackURL, "/"))
+	}
+	return result, nil
+}
+
+func normalizeFactors(values map[string]float64) (map[string]float64, error) {
+	factors := make(map[string]float64, len(values))
+	for value, factor := range values {
+		host, err := normalizeFactorHost(value)
+		if err != nil {
+			return nil, err
+		}
+		if factor <= 0 || math.IsNaN(factor) || math.IsInf(factor, 0) {
+			return nil, fmt.Errorf("factors[%q] 必须是大于 0 的有限数字", value)
+		}
+		if _, exists := factors[host]; exists {
+			return nil, fmt.Errorf("factors 中的域名 %q 重复", host)
+		}
+		factors[host] = factor
+	}
+	return factors, nil
+}
+
+func normalizeSyncHosts(values []string) (map[string]struct{}, error) {
+	syncHosts := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		host, err := normalizeHost(value, "sync_hosts")
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := syncHosts[host]; exists {
+			return nil, fmt.Errorf("sync_hosts 中的域名 %q 重复", host)
+		}
+		syncHosts[host] = struct{}{}
+	}
+	return syncHosts, nil
 }
 
 func (c *Config) factorForBaseURL(baseURL string) (float64, string, error) {

@@ -4,8 +4,8 @@ Sub2API 的独立扩展服务。本仓库不包含也不修改 Sub2API 上游源
 
 ## 服务
 
-- `rate-sync`：根据账号价格和历史用量同步账号、分组倍率。
-- `monitoring`：探测账号和分组状态，提供独立监控面板。
+- `rate-sync`：同步账号倍率，并根据成功请求维护快慢成本记忆、动态调整分组倍率。
+- `monitoring`：探测账号和分组状态，提供健康、延迟、历史与 Tokens 用量面板。
 
 两个服务在编译时不依赖 Sub2API Go 源码。运行时会连接已经部署的 Sub2API Docker 网络、PostgreSQL 和 Admin API，因此升级 Sub2API 后仍需验证数据库结构及 API 兼容性。
 
@@ -20,8 +20,10 @@ Sub2API 的独立扩展服务。本仓库不包含也不修改 Sub2API 上游源
 部署全部扩展：
 
 ```bat
-deploy-all.bat
+一键部署.bat
 ```
+
+`deploy-all.bat` 是功能相同的英文文件名入口。每次执行都会从当前 Git 工程重新构建镜像并更新扩展容器。
 
 也可以分别运行：
 
@@ -39,6 +41,8 @@ C:\ProgramData\Sub2API\extensions\
 ```
 
 扩展容器的 Compose 工作目录、配置和密钥都位于该目录。部署完成后，Docker 启动和容器重启不再依赖本 Git 工作区。重新构建扩展新版本时仍需要本仓库源码，或使用以后发布到镜像仓库的预构建镜像。
+
+首次迁移会优先复制现有 rate-sync 容器使用的配置。以后从本仓库重复部署会保留 ProgramData 中的真实配置和 Docker 状态卷。
 
 监控面板默认仅监听 `127.0.0.1:18090`。可在安装后的 `monitoring\.env` 中调整监听地址和端口，再从该目录执行 `docker compose up -d`。
 

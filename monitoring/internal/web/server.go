@@ -3,30 +3,26 @@ package web
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/monitor"
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/store"
 )
 
-//go:embed assets/*
+//go:embed assets
 var assets embed.FS
 
 type Server struct {
 	service *monitor.Service
-	token   string
-	log     *slog.Logger
 }
 
-func New(service *monitor.Service, token string, logger *slog.Logger) *Server {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Server{service: service, token: strings.TrimSpace(token), log: logger}
+func New(service *monitor.Service) *Server {
+	return &Server{service: service}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -34,13 +30,14 @@ func (s *Server) Handler() http.Handler {
 	staticFS, _ := fs.Sub(assets, "assets")
 	mux.Handle("/", spaFiles(staticFS))
 	mux.HandleFunc("/healthz", s.health)
-	mux.HandleFunc("/api/v1/monitor/config", s.config)
 	mux.HandleFunc("/api/v1/monitor/dashboard", s.dashboard)
+	mux.HandleFunc("/api/v1/monitor/usage-ranking", s.usageRanking)
 	mux.HandleFunc("/api/v1/monitor/history", s.history)
 	mux.HandleFunc("/api/v1/monitor/alerts", s.alerts)
-	mux.HandleFunc("/api/v1/monitor/probe", s.probe)
-	mux.HandleFunc("/api/v1/monitor/alerts/", s.acknowledge)
-	return s.withSecurityHeaders(s.withAuth(mux))
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, "not found")
+	})
+	return s.withSecurityHeaders(readOnly(mux))
 }
 
 func spaFiles(files fs.FS) http.Handler {
@@ -68,10 +65,6 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "sub2api-monitoring"})
 }
 
-func (s *Server) config(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"auth_required": s.token != "", "interval_seconds": int(s.service.Interval() / time.Second)})
-}
-
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	dashboard, err := s.service.DashboardWindow(r.Context(), queryInt(r, "window", 0))
 	if err != nil {
@@ -81,14 +74,31 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dashboard)
 }
 
+func (s *Server) usageRanking(w http.ResponseWriter, r *http.Request) {
+	period := strings.TrimSpace(r.URL.Query().Get("period"))
+	if period == "" {
+		period = "24h"
+	}
+	ranking, err := s.service.UsageRanking(r.Context(), period, boundedQueryInt(r, "limit", 10, 1, 50))
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidUsagePeriod) {
+			writeError(w, http.StatusBadRequest, "period must be 1h, 24h, today, 7d, 15d, or 30d")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ranking)
+}
+
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(r.URL.Query().Get("target"))
 	if !validTargetKey(key) {
 		writeError(w, http.StatusBadRequest, "target must be account:<id> or group:<id>")
 		return
 	}
-	days := queryInt(r, "days", 7)
-	limit := queryInt(r, "limit", 240)
+	days := boundedQueryInt(r, "days", 7, 1, 90)
+	limit := boundedQueryInt(r, "limit", 240, 1, 1000)
 	items, err := s.service.History(r.Context(), key, days, limit)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
@@ -98,7 +108,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
-	items, err := s.service.Alerts(r.Context(), r.URL.Query().Get("unacknowledged") == "true", queryInt(r, "limit", 50))
+	items, err := s.service.Alerts(r.Context(), boundedQueryInt(r, "limit", 50, 1, 200))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -106,49 +116,12 @@ func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if !s.service.Trigger() {
-		writeError(w, http.StatusConflict, "a probe cycle is already running")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true})
-}
-
-func (s *Server) acknowledge(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 6 || parts[5] != "ack" {
-		writeError(w, http.StatusNotFound, "not found")
-		return
-	}
-	id, err := strconv.ParseInt(parts[4], 10, 64)
-	if err != nil || id <= 0 {
-		writeError(w, http.StatusBadRequest, "invalid alert id")
-		return
-	}
-	if err := s.service.AcknowledgeAlert(r.Context(), id); err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"acknowledged": true})
-}
-
-func (s *Server) withAuth(next http.Handler) http.Handler {
+func readOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		protectedAPI := strings.HasPrefix(r.URL.Path, "/api/v1/monitor/") && r.URL.Path != "/api/v1/monitor/config"
-		if s.token != "" && protectedAPI {
-			authorization := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-			if authorization != s.token {
-				writeError(w, http.StatusUnauthorized, "monitoring API token required")
-				return
-			}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeError(w, http.StatusMethodNotAllowed, "监控 Web 服务仅提供只读访问")
+			return
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -156,6 +129,8 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 
 func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
@@ -164,12 +139,12 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 }
 
 func validTargetKey(key string) bool {
-	if !(strings.HasPrefix(key, "account:") || strings.HasPrefix(key, "group:")) {
+	kind, value, found := strings.Cut(key, ":")
+	if !found || (kind != model.KindAccount && kind != model.KindGroup) {
 		return false
 	}
-	value := strings.TrimPrefix(strings.TrimPrefix(key, "account:"), "group:")
 	if value == "-1" {
-		return true
+		return kind == model.KindGroup
 	}
 	if value == "" {
 		return false
@@ -179,13 +154,24 @@ func validTargetKey(key string) bool {
 			return false
 		}
 	}
-	return true
+	return len(value) == 1 || value[0] != '0'
 }
 
 func queryInt(r *http.Request, name string, fallback int) int {
 	value, err := strconv.Atoi(r.URL.Query().Get(name))
 	if err != nil || value <= 0 {
 		return fallback
+	}
+	return value
+}
+
+func boundedQueryInt(r *http.Request, name string, fallback, minimum, maximum int) int {
+	value := queryInt(r, name, fallback)
+	if value < minimum {
+		return minimum
+	}
+	if value > maximum {
+		return maximum
 	}
 	return value
 }

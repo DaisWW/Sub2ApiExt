@@ -1,0 +1,125 @@
+export const $ = (selector) => document.querySelector(selector);
+
+export class LatestRequest {
+  #version = 0;
+
+  begin() {
+    this.#version += 1;
+    return this.#version;
+  }
+
+  isCurrent(version) {
+    return version === this.#version;
+  }
+
+  invalidate() {
+    this.#version += 1;
+  }
+}
+
+export async function api(path) {
+  const response = await fetch(path);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+export function escapeHTML(value) {
+  const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' };
+  return String(value ?? '').replace(/[&<>'"]/g, (character) => entities[character]);
+}
+
+const knownStatuses = new Set(['operational', 'degraded', 'failed', 'error', 'unknown', 'disabled']);
+
+export function normalizeStatus(status) {
+  const normalized = knownStatuses.has(status) ? status : 'unknown';
+  return normalized === 'degraded' ? 'operational' : normalized;
+}
+
+export function statusLabel(status) {
+  return {
+    operational: '正常',
+    failed: '失败',
+    error: '错误',
+    unknown: '等待探测',
+    disabled: '已暂停'
+  }[normalizeStatus(status)];
+}
+
+export function statusClass(status) {
+  return `status-${normalizeStatus(status)}`;
+}
+
+export function historyStatusClass(status) {
+  const normalized = normalizeStatus(status);
+  if (normalized === 'operational') return 'ok';
+  return 'bad';
+}
+
+export function availabilityClass(value) {
+  if (value >= 99) return 'good';
+  if (value >= 90) return 'warn';
+  return 'bad';
+}
+
+export function formatMs(value) {
+  if (value == null) return '—';
+  const milliseconds = Math.max(0, Math.round(value));
+  if (milliseconds < 60000) return `${milliseconds} ms`;
+  const totalSeconds = Math.round(milliseconds / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}分${seconds}秒`;
+}
+
+export function formatMedianMs(stats) {
+  return stats?.median_ms == null ? '—' : formatMs(stats.median_ms);
+}
+
+export function formatPct(value) {
+  return `${Number(value || 0).toFixed(2)}%`;
+}
+
+export function formatTime(value) {
+  if (!value) return '尚未探测';
+  return new Date(value).toLocaleString('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+export function formatTokens(value) {
+  const amount = Number(value || 0);
+  if (amount >= 1e9) return `${(amount / 1e9).toFixed(2)}B`;
+  if (amount >= 1e6) return `${(amount / 1e6).toFixed(2)}M`;
+  if (amount >= 1e3) return `${(amount / 1e3).toFixed(1)}K`;
+  return Math.round(amount).toLocaleString('zh-CN');
+}
+
+export function formatUSD(value) {
+  return `$${Number(value || 0).toFixed(4)}`;
+}
+
+export function formatCount(value) {
+  return Number(value || 0).toLocaleString('zh-CN');
+}
+
+export function activateToggle(selector, activeButton) {
+  document.querySelectorAll(selector).forEach((button) => {
+    const active = button === activeButton;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+export function toast(message, recovered = false) {
+  const node = document.createElement('div');
+  node.className = `toast ${recovered ? 'recovered' : ''}`;
+  node.textContent = message;
+  $('#toastStack').appendChild(node);
+  setTimeout(() => node.remove(), 5000);
+}

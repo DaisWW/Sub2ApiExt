@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 const (
 	KindAccount = "account"
@@ -14,8 +17,8 @@ const (
 	StatusDisabled    = "disabled"
 )
 
-// Account is the minimum account snapshot needed by the monitor. Credentials
-// are never returned by the HTTP layer and are not persisted by this service.
+// Account 是监控所需的最小账户快照。凭据不会由 HTTP 层返回，
+// 也不会被监控服务持久化。
 type Account struct {
 	ID             int64
 	Name           string
@@ -27,6 +30,7 @@ type Account struct {
 	GroupIDs       []int64
 	LastActivityAt *time.Time
 	RecentModel    string
+	ChatGPTAccount string
 	ProxyURL       string
 	ProxyError     string
 }
@@ -79,7 +83,7 @@ type ProbeResult struct {
 type MetricStats struct {
 	FastestMs *int     `json:"fastest_ms,omitempty"`
 	MedianMs  *float64 `json:"median_ms,omitempty"`
-	SlowestMs *int     `json:"slowest_ms,omitempty"`
+	P95Ms     *float64 `json:"p95_ms,omitempty"`
 }
 
 type TargetStats struct {
@@ -93,7 +97,15 @@ type TargetStats struct {
 
 type DashboardTarget struct {
 	Target
-	Stats TargetStats `json:"stats"`
+	Stats         TargetStats    `json:"stats"`
+	RecentSamples []StatusSample `json:"recent_samples"`
+}
+
+// StatusSample 是目标最近一次观测的紧凑状态，用于绘制状态轨迹。
+type StatusSample struct {
+	Status    string    `json:"status"`
+	CheckedAt time.Time `json:"checked_at"`
+	Source    string    `json:"source"`
 }
 
 type Summary struct {
@@ -107,6 +119,7 @@ type Summary struct {
 
 type Dashboard struct {
 	GeneratedAt  time.Time         `json:"generated_at"`
+	NextProbeAt  *time.Time        `json:"next_probe_at,omitempty"`
 	WindowDays   int               `json:"window_days"`
 	IntervalSec  int               `json:"interval_seconds"`
 	Summary      Summary           `json:"summary"`
@@ -114,16 +127,61 @@ type Dashboard struct {
 	ProbeRunning bool              `json:"probe_running"`
 }
 
+// UsageRanking 是由网关 usage_logs 生成的只读用量视图。
+// Token 数量保持整数，成本保持浮点数，浏览器无需推断单位。
+type UsageRanking struct {
+	GeneratedAt time.Time       `json:"generated_at"`
+	Period      string          `json:"period"`
+	PeriodLabel string          `json:"period_label"`
+	Bucket      string          `json:"bucket"`
+	StartAt     time.Time       `json:"start_at"`
+	EndAt       time.Time       `json:"end_at"`
+	Summary     UsageSummary    `json:"summary"`
+	Timeline    []UsageBucket   `json:"timeline"`
+	Groups      []UsageRankItem `json:"groups"`
+	Models      []UsageRankItem `json:"models"`
+}
+
+type UsageSummary struct {
+	Requests     int64   `json:"requests"`
+	TotalTokens  int64   `json:"total_tokens"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CacheTokens  int64   `json:"cache_tokens"`
+	CacheRead    int64   `json:"cache_read_tokens"`
+	TotalCost    float64 `json:"total_cost"`
+	Accounts     int64   `json:"accounts"`
+	Groups       int64   `json:"groups"`
+}
+
+type UsageBucket struct {
+	StartAt     time.Time `json:"start_at"`
+	Requests    int64     `json:"requests"`
+	TotalTokens int64     `json:"total_tokens"`
+	TotalCost   float64   `json:"total_cost"`
+}
+
+type UsageRankItem struct {
+	Kind         string  `json:"kind"`
+	ID           *int64  `json:"id,omitempty"`
+	Key          string  `json:"key"`
+	Name         string  `json:"name"`
+	Platform     string  `json:"platform,omitempty"`
+	Requests     int64   `json:"requests"`
+	TotalTokens  int64   `json:"total_tokens"`
+	TotalCost    float64 `json:"total_cost"`
+	SharePercent float64 `json:"share_percent"`
+}
+
 type Alert struct {
-	ID             int64      `json:"id"`
-	TargetKey      string     `json:"target_key"`
-	TargetName     string     `json:"target_name"`
-	Kind           string     `json:"kind"`
-	Status         string     `json:"status"`
-	Title          string     `json:"title"`
-	Message        string     `json:"message"`
-	CreatedAt      time.Time  `json:"created_at"`
-	AcknowledgedAt *time.Time `json:"acknowledged_at,omitempty"`
+	ID         int64     `json:"id"`
+	TargetKey  string    `json:"target_key"`
+	TargetName string    `json:"target_name"`
+	Kind       string    `json:"kind"`
+	Status     string    `json:"status"`
+	Title      string    `json:"title"`
+	Message    string    `json:"message"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type AlertPolicy struct {
@@ -132,29 +190,5 @@ type AlertPolicy struct {
 }
 
 func TargetKey(kind string, id int64) string {
-	return kind + ":" + formatID(id)
-}
-
-func formatID(id int64) string {
-	// Avoid strconv in the many call sites while keeping this model package
-	// independent from the persistence and HTTP layers.
-	if id == 0 {
-		return "0"
-	}
-	negative := id < 0
-	if negative {
-		id = -id
-	}
-	var buf [20]byte
-	pos := len(buf)
-	for id > 0 {
-		pos--
-		buf[pos] = byte('0' + id%10)
-		id /= 10
-	}
-	if negative {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
+	return kind + ":" + strconv.FormatInt(id, 10)
 }

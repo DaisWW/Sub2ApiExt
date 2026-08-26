@@ -1,5 +1,6 @@
 ARG GOLANG_IMAGE=docker.m.daocloud.io/library/golang:1.23-alpine
 ARG ALPINE_IMAGE=docker.m.daocloud.io/library/alpine:3.21
+ARG APK_MIRROR=https://mirrors.aliyun.com/alpine
 
 FROM ${GOLANG_IMAGE} AS build
 
@@ -16,7 +17,9 @@ RUN CGO_ENABLED=0 GOOS=linux go test ./... && \
     CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/sub2api-monitor ./cmd/server
 
 FROM ${ALPINE_IMAGE}
-RUN apk add --no-cache tzdata && \
+ARG APK_MIRROR
+RUN sed -i "s#https://dl-cdn.alpinelinux.org/alpine#${APK_MIRROR}#g" /etc/apk/repositories && \
+    apk add --no-cache tzdata && \
     addgroup -S monitor && adduser -S -G monitor monitor
 WORKDIR /app
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

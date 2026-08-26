@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,8 +22,9 @@ type Config struct {
 	RecoveryThreshold int
 	DefaultModel      string
 	AllowPrivateHost  bool
-	APIToken          string
 }
+
+const maxWindowDays = 90
 
 func Load() (Config, error) {
 	c := Config{
@@ -36,7 +39,6 @@ func Load() (Config, error) {
 		RecoveryThreshold: envInt("MONITORING_RECOVERY_THRESHOLD", 1),
 		DefaultModel:      envString("MONITORING_DEFAULT_MODEL", "gpt-4o-mini"),
 		AllowPrivateHost:  strings.EqualFold(envString("MONITORING_ALLOW_PRIVATE_HOSTS", "false"), "true"),
-		APIToken:          strings.TrimSpace(os.Getenv("MONITORING_API_TOKEN")),
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDatabaseURL()
@@ -47,8 +49,11 @@ func Load() (Config, error) {
 	if c.Interval < 15*time.Second {
 		return Config{}, fmt.Errorf("MONITORING_INTERVAL must be at least 15s")
 	}
-	if c.RequestTimeout <= 0 || c.ProbeConcurrency <= 0 || c.WindowDays <= 0 {
-		return Config{}, fmt.Errorf("monitoring timeout, concurrency, and window must be positive")
+	if c.RequestTimeout <= 0 || c.Retention <= 0 || c.ProbeConcurrency <= 0 {
+		return Config{}, fmt.Errorf("monitoring timeout, retention, and concurrency must be positive")
+	}
+	if c.WindowDays <= 0 || c.WindowDays > maxWindowDays {
+		return Config{}, fmt.Errorf("MONITORING_WINDOW_DAYS must be between 1 and %d", maxWindowDays)
 	}
 	if c.FailureThreshold <= 0 || c.RecoveryThreshold <= 0 {
 		return Config{}, fmt.Errorf("alert thresholds must be positive")
@@ -66,11 +71,14 @@ func buildDatabaseURL() string {
 	password := os.Getenv("DATABASE_PASSWORD")
 	dbname := envString("DATABASE_DBNAME", "sub2api")
 	sslmode := envString("DATABASE_SSLMODE", "disable")
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", urlEscape(user), urlEscape(password), host, port, urlEscape(dbname), urlEscape(sslmode))
-}
-
-func urlEscape(value string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(value, "%", "%25"), "@", "%40")
+	connectionURL := &url.URL{
+		Scheme:   "postgres",
+		Host:     net.JoinHostPort(strings.Trim(host, "[]"), port),
+		Path:     "/" + dbname,
+		User:     url.UserPassword(user, password),
+		RawQuery: url.Values{"sslmode": []string{sslmode}}.Encode(),
+	}
+	return connectionURL.String()
 }
 
 func envString(key, fallback string) string {

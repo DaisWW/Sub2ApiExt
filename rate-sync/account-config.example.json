@@ -1,7 +1,7 @@
 {
   "interval": "900s",
   "sync_target": "account",
-  "confirmations": 2,
+  "confirmations": 1,
   "usage_bootstrap": true,
   "sync_hosts": [
     "www.codexapis.com",

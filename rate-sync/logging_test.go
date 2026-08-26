@@ -70,7 +70,7 @@ func TestStatusLogWriterDoesNotDuplicateMarker(t *testing.T) {
 func TestStatusLogWriterDoesNotDecorateTableMarker(t *testing.T) {
 	var output strings.Builder
 	writer := &statusLogWriter{dst: &output}
-	line := "2026/08/26 09:21:14 [TABLE] 账号 | 分组 | 账户倍率\n"
+	line := "2026/08/26 09:21:14 [TABLE] 账户倍率同步（账号数=1）\n"
 	if _, err := writer.Write([]byte(line)); err != nil {
 		t.Fatal(err)
 	}

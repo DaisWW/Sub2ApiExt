@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"unicode"
 )
 
 const (
@@ -26,6 +25,8 @@ type syncReport struct {
 
 type syncReportRow struct {
 	key         string
+	accountID   int64
+	groupID     int64
 	accountName string
 	groupName   string
 	accountRate float64
@@ -50,6 +51,8 @@ func newSyncReport(target string, channels []Channel) *syncReport {
 		}
 		report.rows[key] = &syncReportRow{
 			key:         key,
+			accountID:   channel.AccountID,
+			groupID:     channel.Group.ID,
 			accountName: strings.TrimSpace(channel.AccountName),
 			groupName:   strings.TrimSpace(channel.Group.Name),
 			accountRate: channel.AccountRateMultiplier,
@@ -161,124 +164,6 @@ func reportStatusRank(status string) int {
 	}
 }
 
-func (r *syncReport) tableLines() []string {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	keys := append([]string(nil), r.order...)
-	if len(keys) == 0 {
-		return nil
-	}
-	headers := []string{"账号", "分组", "账户倍率", "分组倍率", "代理", "历史窗口/说明", "结果"}
-	rows := make([][]string, 0, len(keys))
-	for _, key := range keys {
-		row := r.rows[key]
-		if row == nil {
-			continue
-		}
-		evidence := row.window
-		if row.detail != "" {
-			if evidence != "" {
-				evidence += "；"
-			}
-			evidence += row.detail
-		}
-		rows = append(rows, []string{
-			tableCell(row.accountName),
-			tableCell(row.groupName),
-			fmt.Sprintf("%.4f", row.accountRate),
-			fmt.Sprintf("%.4f", row.groupRate),
-			tableCell(row.proxy),
-			tableCell(evidence),
-			tableCell(row.status),
-		})
-	}
-
-	widths := make([]int, len(headers))
-	for index, header := range headers {
-		widths[index] = displayWidth(header)
-	}
-	for _, row := range rows {
-		for index, cell := range row {
-			if width := displayWidth(cell); width > widths[index] {
-				widths[index] = width
-			}
-		}
-	}
-
-	lines := make([]string, 0, len(rows)+2)
-	lines = append(lines, formatTableRow(headers, widths, nil))
-	lines = append(lines, formatTableSeparator(widths))
-	for _, row := range rows {
-		lines = append(lines, formatTableRow(row, widths, map[int]bool{2: true, 3: true}))
-	}
-	return lines
-}
-
-func formatTableRow(cells []string, widths []int, rightAligned map[int]bool) string {
-	parts := make([]string, len(cells))
-	for index, cell := range cells {
-		padding := widths[index] - displayWidth(cell)
-		if rightAligned != nil && rightAligned[index] {
-			parts[index] = strings.Repeat(" ", padding) + cell
-		} else {
-			parts[index] = cell + strings.Repeat(" ", padding)
-		}
-	}
-	return strings.TrimRight(strings.Join(parts, "  "), " ")
-}
-
-func formatTableSeparator(widths []int) string {
-	parts := make([]string, len(widths))
-	for index, width := range widths {
-		parts[index] = strings.Repeat("-", width)
-	}
-	return strings.Join(parts, "  ")
-}
-
-func displayWidth(value string) int {
-	width := 0
-	for _, character := range value {
-		switch {
-		case character == '\t':
-			width += 4
-		case unicode.Is(unicode.Mn, character):
-			// Combining marks do not consume an extra terminal cell.
-		case isWideDisplayRune(character):
-			width += 2
-		default:
-			width++
-		}
-	}
-	return width
-}
-
-func isWideDisplayRune(character rune) bool {
-	return character >= 0x1100 && (character <= 0x115f ||
-		character == 0x2329 || character == 0x232a ||
-		(character >= 0x2e80 && character <= 0xa4cf && character != 0x303f) ||
-		(character >= 0xac00 && character <= 0xd7a3) ||
-		(character >= 0xf900 && character <= 0xfaff) ||
-		(character >= 0xfe10 && character <= 0xfe19) ||
-		(character >= 0xfe30 && character <= 0xfe6f) ||
-		(character >= 0xff00 && character <= 0xff60) ||
-		(character >= 0xffe0 && character <= 0xffe6) ||
-		(character >= 0x1f300 && character <= 0x1faff))
-}
-
-func tableCell(value string) string {
-	value = strings.TrimSpace(value)
-	value = strings.ReplaceAll(value, "|", "\\|")
-	value = strings.ReplaceAll(value, "\r", " ")
-	value = strings.ReplaceAll(value, "\n", " ")
-	if value == "" {
-		return "-"
-	}
-	return value
-}
-
 func (s *Syncer) logSyncReport(report *syncReport) {
 	if s == nil || s.logger == nil || report == nil {
 		return
@@ -287,8 +172,35 @@ func (s *Syncer) logSyncReport(report *syncReport) {
 	if len(lines) == 0 {
 		return
 	}
-	s.logger.Printf("[TABLE] 同步倍率汇总（目标=%s，绑定=%d）", report.target, len(report.rows))
+	title := "分组倍率同步"
+	countLabel := "分组数"
+	if report.target == "account" {
+		title = "账户倍率同步"
+		countLabel = "账号数"
+	}
+	s.logger.Printf("[TABLE] %s（%s=%d）", title, countLabel, report.summaryCount())
 	for _, line := range lines {
 		s.logger.Printf("[TABLE] %s", line)
 	}
+}
+
+func (r *syncReport) summaryCount() int {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := make(map[int64]struct{})
+	for _, key := range r.order {
+		row := r.rows[key]
+		if row == nil {
+			continue
+		}
+		if r.target == "account" {
+			seen[row.accountID] = struct{}{}
+		} else {
+			seen[row.groupID] = struct{}{}
+		}
+	}
+	return len(seen)
 }

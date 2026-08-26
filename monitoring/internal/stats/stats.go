@@ -1,27 +1,36 @@
 package stats
 
 import (
+	"math"
 	"sort"
 	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
-// Summarize converts raw successful samples into the compact metrics shown by
-// the dashboard. The median is interpolated for even-sized samples, which is
-// stable and matches PostgreSQL percentile_cont semantics.
+// Summarize 将原始样本转换为面板使用的紧凑指标，分位数语义与
+// PostgreSQL percentile_cont 保持一致。
 func Summarize(samples []int) model.MetricStats {
 	if len(samples) == 0 {
 		return model.MetricStats{}
 	}
 	values := append([]int(nil), samples...)
 	sort.Ints(values)
-	median := float64(values[len(values)/2])
-	if len(values)%2 == 0 {
-		median = float64(values[len(values)/2-1]+values[len(values)/2]) / 2
+	fastest := values[0]
+	median := percentile(values, 0.5)
+	p95 := percentile(values, 0.95)
+	return model.MetricStats{FastestMs: &fastest, MedianMs: &median, P95Ms: &p95}
+}
+
+func percentile(values []int, fraction float64) float64 {
+	position := float64(len(values)-1) * fraction
+	lower := int(math.Floor(position))
+	upper := int(math.Ceil(position))
+	if lower == upper {
+		return float64(values[lower])
 	}
-	fastest, slowest := values[0], values[len(values)-1]
-	return model.MetricStats{FastestMs: &fastest, MedianMs: &median, SlowestMs: &slowest}
+	weight := position - float64(lower)
+	return float64(values[lower])*(1-weight) + float64(values[upper])*weight
 }
 
 func StatusFromResults(results []model.ProbeResult) string {
@@ -54,10 +63,11 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 		if isHealthy {
 			healthy++
 		}
-		if result.LatencyMs != nil && isHealthy {
+		// 失败样本的实测延迟也参与分组统计，确保全失败分组仍能展示超时或响应耗时。
+		if result.LatencyMs != nil {
 			latency = append(latency, *result.LatencyMs)
 		}
-		if result.FirstByteMs != nil && isHealthy {
+		if result.FirstByteMs != nil {
 			firstByte = append(firstByte, *result.FirstByteMs)
 		}
 	}
@@ -84,9 +94,9 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 
 func groupMessage(total, healthy int) string {
 	if total == healthy {
-		return "all accounts healthy"
+		return "全部账户正常"
 	}
-	return formatCount(healthy) + "/" + formatCount(total) + " accounts healthy"
+	return formatCount(healthy) + "/" + formatCount(total) + " 个账户正常"
 }
 
 func formatCount(n int) string {

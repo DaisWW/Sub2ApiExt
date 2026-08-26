@@ -27,9 +27,8 @@ const (
 	ansiYellow = "\x1b[33;1m"
 )
 
-// statusLogWriter adds a short, stable status marker after the standard log
-// timestamp. Markers are always emitted; ANSI is optional because Docker log
-// collectors often preserve escape sequences instead of rendering them.
+// statusLogWriter 在标准日志时间戳后加入简短、稳定的状态标记。
+// 标记始终输出；ANSI 颜色可选，因为 Docker 日志收集器可能不会渲染转义序列。
 type statusLogWriter struct {
 	dst   io.Writer
 	color bool
@@ -117,7 +116,17 @@ func classifyLogLine(line string) logStatus {
 	) {
 		return logStatusFail
 	}
-	if containsAny(message, "暂不自动:", "校准跳过:", "本轮跳过", "保持当前", "回退到上游探测", "等待账户倍率同步") {
+	if containsAny(message,
+		"暂不自动:",
+		"校准跳过:",
+		"本轮跳过",
+		"保持当前",
+		"回退到上游探测",
+		"等待账户倍率同步",
+		"动态成本初始化等待",
+		"动态成本跳过",
+		"动态成本暂停",
+	) {
 		return logStatusSkip
 	}
 	if containsAny(message,
@@ -127,6 +136,9 @@ func classifyLogLine(line string) logStatus {
 		"已更新分组",
 		"已按历史成本更新分组",
 		"历史成本校准稳定",
+		"动态成本冻结",
+		"动态成本稳定",
+		"已按动态成本更新分组",
 		"本地倍率与本轮检测一致",
 		"检查成功:",
 	) {
@@ -182,7 +194,7 @@ func hasStatusMarker(line string) bool {
 }
 
 func logTimestampEnd(line string) int {
-	// log.LstdFlags format: 2009/01/23 01:23:23 followed by one space.
+	// log.LstdFlags 格式为“2009/01/23 01:23:23”并紧跟一个空格。
 	if len(line) >= 20 &&
 		line[4] == '/' && line[7] == '/' && line[10] == ' ' &&
 		line[13] == ':' && line[16] == ':' && line[19] == ' ' {
@@ -214,8 +226,7 @@ func logColorEnabled() bool {
 		return false
 	}
 
-	// Auto mode only colors an interactive terminal. Set RATE_SYNC_LOG_COLOR
-	// to always when a log viewer explicitly supports ANSI escape sequences.
+	// 自动模式只在交互式终端启用颜色；日志查看器明确支持 ANSI 时可设为 always。
 	if os.Getenv("FORCE_COLOR") != "" {
 		return true
 	}

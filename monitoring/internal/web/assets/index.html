@@ -9,6 +9,7 @@
   </head>
   <body>
     <div class="app-shell">
+      <div id="pageContent">
       <header class="topbar">
         <div class="brand-lockup">
           <span class="brand-mark">P</span>
@@ -19,9 +20,8 @@
           <span class="live-pill"><i></i> LIVE</span>
         </div>
         <div class="top-actions">
-          <button class="icon-button" id="notifyButton" title="通知设置" aria-label="通知设置">◌</button>
+          <button class="icon-button" id="notifyButton" title="查看告警" aria-label="查看告警" aria-controls="alertDrawer" aria-expanded="false">◌</button>
           <button class="icon-button" id="refreshButton" title="刷新" aria-label="刷新">↻</button>
-          <button class="probe-button" id="probeButton"><span>⌁</span> 立即探测</button>
         </div>
       </header>
 
@@ -33,50 +33,124 @@
             <p id="overallMeta" class="muted">等待第一次探测结果</p>
           </div>
           <div class="overview-controls">
-            <div class="segmented" role="tablist" aria-label="对象类型">
-              <button class="active" data-filter="all" role="tab">全部</button>
-              <button data-filter="group" role="tab">分组</button>
-              <button data-filter="account" role="tab">账户</button>
+            <div class="segmented" role="group" aria-label="对象类型">
+              <button class="active" data-filter="group" aria-pressed="true">分组</button>
+              <button data-filter="account" aria-pressed="false">账户</button>
             </div>
             <label class="select-wrap">
               <span class="sr-only">历史窗口</span>
               <select id="windowSelect">
-                <option value="1">24 小时</option>
-                <option value="7" selected>7 天</option>
+                <option value="1" selected>24 小时</option>
+                <option value="7">7 天</option>
                 <option value="30">30 天</option>
               </select>
             </label>
           </div>
         </section>
 
-        <section class="kpi-grid" id="kpiGrid" aria-live="polite"></section>
-
-        <section class="section-heading">
+        <section class="section-heading targets-heading">
           <div>
             <p class="eyebrow">DISCOVERED TARGETS</p>
             <h2>实时探测对象</h2>
           </div>
-          <div class="section-meta" id="sectionMeta"></div>
+          <div class="target-heading-meta">
+            <div class="probe-status" id="probeStatus" role="status" aria-live="polite">
+              <span class="probe-cooldown" aria-hidden="true"><span id="probeCountdown">--</span></span>
+              <span class="probe-status-copy">
+                <strong id="probeStatusText">等待探测</strong>
+                <span id="nextProbeText">正在同步周期</span>
+              </span>
+            </div>
+            <div class="section-meta" id="sectionMeta"></div>
+          </div>
         </section>
         <section class="target-grid" id="targetGrid" aria-live="polite">
           <div class="loading-state">连接监控服务中<span class="loading-dots">...</span></div>
         </section>
-      </main>
 
-      <aside class="alert-drawer" id="alertDrawer" aria-label="告警">
+        <section class="usage-section" id="usageSection" aria-labelledby="usageTitle" aria-busy="false">
+          <div class="section-heading usage-heading">
+            <div>
+              <p class="eyebrow">USAGE RANKING</p>
+              <h2 id="usageTitle">Tokens 用量排行榜</h2>
+            </div>
+            <div class="usage-controls">
+              <span class="section-meta" id="usageMeta"></span>
+              <label class="select-wrap">
+                <span class="sr-only">用量时间范围</span>
+                <select id="usagePeriodSelect">
+                  <option value="1h">最近 1 小时</option>
+                  <option value="24h" selected>最近 24 小时</option>
+                  <option value="today">今天</option>
+                  <option value="7d">最近 1 周</option>
+                  <option value="15d">最近半个月</option>
+                  <option value="30d">最近 1 个月</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="usage-kpi-grid" id="usageKpiGrid" aria-live="polite"></div>
+          <div class="usage-chart-grid">
+            <article class="chart-panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">MODEL SHARE</p><h3>模型占比</h3></div>
+                <div class="metric-toggle" role="group" aria-label="模型占比指标">
+                  <button class="active" data-share-kind="model" data-share-metric="tokens" aria-pressed="true">Tokens</button>
+                  <button data-share-kind="model" data-share-metric="cost" aria-pressed="false">成本</button>
+                </div>
+              </div>
+              <div class="donut-layout" id="modelDonutLayout"></div>
+            </article>
+            <article class="chart-panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">GROUP SHARE</p><h3>分组占比</h3></div>
+                <div class="metric-toggle" role="group" aria-label="分组占比指标">
+                  <button class="active" data-share-kind="group" data-share-metric="tokens" aria-pressed="true">Tokens</button>
+                  <button data-share-kind="group" data-share-metric="cost" aria-pressed="false">成本</button>
+                </div>
+              </div>
+              <div class="donut-layout" id="groupDonutLayout"></div>
+            </article>
+            <article class="chart-panel trend-panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">CONSUMPTION TREND</p><h3>消耗趋势</h3></div>
+                <div class="trend-heading-meta">
+                  <span class="panel-meta" id="usageTrendBucket">按小时</span>
+                  <div class="metric-toggle" role="group" aria-label="趋势指标">
+                    <button class="active" data-trend-metric="tokens" aria-pressed="true">Tokens</button>
+                    <button data-trend-metric="cost" aria-pressed="false">成本</button>
+                  </div>
+                </div>
+              </div>
+              <div class="trend-chart" id="usageTrendChart">
+                <div class="trend-y-axis" id="usageYAxis" aria-hidden="true"></div>
+                <div class="bar-chart-wrap"><div class="bar-chart" id="usageBarChart"></div></div>
+                <div class="chart-tooltip" id="usageTrendTooltip" role="tooltip" hidden></div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </main>
+      </div>
+
+      <div class="alert-backdrop" id="alertBackdrop" aria-hidden="true"></div>
+      <aside class="alert-drawer" id="alertDrawer" role="dialog" aria-modal="true" aria-labelledby="alertTitle" aria-hidden="true" inert>
         <div class="drawer-head">
           <div>
             <p class="eyebrow">ACTIVE SIGNALS</p>
-            <h2>告警</h2>
+            <h2 id="alertTitle">告警</h2>
           </div>
-          <button class="icon-button" id="closeAlerts" title="关闭告警" aria-label="关闭告警">×</button>
+          <div class="drawer-actions">
+            <span class="panel-meta" id="alertMeta" aria-live="polite"></span>
+            <button class="icon-button" id="closeAlerts" title="关闭告警" aria-label="关闭告警">×</button>
+          </div>
         </div>
         <div id="alertList" class="alert-list"></div>
       </aside>
       <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     </div>
 
-    <dialog id="historyDialog" class="history-dialog">
+    <dialog id="historyDialog" class="history-dialog" aria-labelledby="dialogTitle">
       <div class="dialog-head">
         <div>
           <p class="eyebrow">PROBE HISTORY</p>
@@ -87,12 +161,13 @@
       <div class="history-summary" id="historySummary"></div>
       <div class="history-table-wrap">
         <table>
-          <thead><tr><th>时间</th><th>状态</th><th>首字/首字节</th><th>总耗时</th><th>结果</th></tr></thead>
+          <caption class="sr-only">探测历史记录</caption>
+          <thead><tr><th scope="col">时间</th><th scope="col">状态</th><th scope="col">首字/首字节</th><th scope="col">总耗时</th></tr></thead>
           <tbody id="historyBody"></tbody>
         </table>
       </div>
     </dialog>
 
-    <script src="/app.js" defer></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

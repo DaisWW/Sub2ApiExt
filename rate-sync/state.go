@@ -8,11 +8,27 @@ import (
 	"path/filepath"
 )
 
-const currentStateVersion = 3
+const currentStateVersion = 4
 
 type State struct {
-	Version int                   `json:"version"`
-	Rules   map[string]*RuleState `json:"rules"`
+	Version       int                          `json:"version"`
+	Rules         map[string]*RuleState        `json:"rules"`
+	DynamicGroups map[int64]*DynamicGroupState `json:"dynamic_groups,omitempty"`
+}
+
+type DynamicGroupState struct {
+	Initialized      bool              `json:"initialized"`
+	LastUsageID      int64             `json:"last_usage_id"`
+	Fast             DynamicCostMemory `json:"fast"`
+	Slow             DynamicCostMemory `json:"slow"`
+	LastAccountRates map[int64]float64 `json:"last_account_rates,omitempty"`
+	PendingTarget    float64           `json:"pending_target,omitempty"`
+	HasPendingTarget bool              `json:"has_pending_target,omitempty"`
+}
+
+type DynamicCostMemory struct {
+	Denominator float64           `json:"denominator"`
+	AccountBase map[int64]float64 `json:"account_base,omitempty"`
 }
 
 type RuleState struct {
@@ -69,19 +85,26 @@ func (s StateStore) Load() (*State, error) {
 	if err := json.NewDecoder(io.LimitReader(file, 1024*1024)).Decode(&state); err != nil {
 		return nil, fmt.Errorf("解析状态文件: %w", err)
 	}
-	if state.Version == 2 {
-		state.Version = currentStateVersion
+	switch state.Version {
+	case 2:
 		for _, rule := range state.Rules {
 			if rule.Template != templateNewAPIRatio {
 				continue
 			}
 			rule.resetPriceKey()
 		}
-	} else if state.Version != currentStateVersion {
+		state.Version = currentStateVersion
+	case 3:
+		state.Version = currentStateVersion
+	case currentStateVersion:
+	default:
 		return newState(), nil
 	}
 	if state.Rules == nil {
 		state.Rules = make(map[string]*RuleState)
+	}
+	if state.DynamicGroups == nil {
+		state.DynamicGroups = make(map[int64]*DynamicGroupState)
 	}
 	return &state, nil
 }
@@ -106,7 +129,8 @@ func (s StateStore) Save(state *State) error {
 
 func newState() *State {
 	return &State{
-		Version: currentStateVersion,
-		Rules:   make(map[string]*RuleState),
+		Version:       currentStateVersion,
+		Rules:         make(map[string]*RuleState),
+		DynamicGroups: make(map[int64]*DynamicGroupState),
 	}
 }
