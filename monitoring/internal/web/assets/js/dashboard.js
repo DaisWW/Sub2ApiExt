@@ -87,6 +87,7 @@ export class DashboardPanel {
         $('#probeCountdown').textContent = '···';
         $('#probeStatusText').textContent = '正在巡检';
         $('#nextProbeText').textContent = '本轮进行中';
+        $('#nextProbeText').hidden = false;
         this.#countdownState = 'running';
         this.#countdownSeconds = null;
       }
@@ -98,6 +99,7 @@ export class DashboardPanel {
         $('#probeCountdown').textContent = '--';
         $('#probeStatusText').textContent = '等待调度';
         $('#nextProbeText').textContent = '正在同步周期';
+        $('#nextProbeText').hidden = false;
         this.#countdownState = 'idle';
         this.#countdownSeconds = null;
       }
@@ -111,6 +113,7 @@ export class DashboardPanel {
       $('#probeCountdown').textContent = formatCountdown(remaining);
       $('#probeStatusText').textContent = remaining ? '下次巡检' : '即将巡检';
       $('#nextProbeText').textContent = remaining ? `${remaining} 秒后` : '等待本轮开始';
+      $('#nextProbeText').hidden = Boolean(remaining);
       this.#countdownState = 'cooldown';
       this.#countdownSeconds = remaining;
     }
