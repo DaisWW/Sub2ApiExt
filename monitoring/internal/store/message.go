@@ -7,6 +7,7 @@ import (
 
 var httpStatusPattern = regexp.MustCompile(`(?i)\bHTTP\s+([1-5][0-9]{2})\b`)
 var groupHealthPattern = regexp.MustCompile(`\b([0-9]+)\s*/\s*([0-9]+)\s+accounts?\s+healthy\b`)
+var groupRoutePattern = regexp.MustCompile(`^当前路由可用：([0-9]+)\s*/\s*([0-9]+)\s+accounts?\s+healthy；异常\s*([0-9]+)，待验证\s*([0-9]+)；预计失败暴露\s*([0-9]+(?:\.[0-9]+)?)%$`)
 
 // sanitizeUpstreamMessage 将新旧告警统一成简短、可行动且不含上游细节的文案。
 func sanitizeUpstreamMessage(message string) string {
@@ -32,6 +33,9 @@ func sanitizeMessageBody(message string) string {
 	body := strings.TrimSpace(message)
 	if match := httpStatusPattern.FindStringSubmatch(body); len(match) == 2 {
 		return "HTTP " + match[1]
+	}
+	if match := groupRoutePattern.FindStringSubmatch(body); len(match) == 6 {
+		return "当前仍可用：" + match[1] + "/" + match[2] + " 个候选；异常 " + match[3] + "，待验证 " + match[4] + "；预计失败暴露 " + match[5] + "%"
 	}
 	lower := strings.ToLower(body)
 	switch {

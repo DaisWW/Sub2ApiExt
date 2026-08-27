@@ -145,7 +145,9 @@ export class DashboardPanel {
     const availabilityLabel = hasSamples ? `${samples} 次样本` : '暂无样本';
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
     const availabilityTone = hasSamples ? availabilityClass(stats.availability, status) : 'neutral';
-    const currentRate = item.kind === 'group' ? formatCurrentRate(item.rate_multiplier) : '';
+    const currentRate = formatCurrentRate(item.rate_multiplier);
+    const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
+    const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
     const groupNote = item.kind === 'group' && item.latest_message
       ? `<div class="target-note">${escapeHTML(item.latest_message)}</div>`
       : '';
@@ -160,7 +162,7 @@ export class DashboardPanel {
             ${groupNote}
           </div>
           <div class="target-head-meta">
-            ${currentRate ? `<span class="current-rate" title="当前分组倍率">当前倍率 ${currentRate}</span>` : ''}
+            ${currentRate ? `<span class="current-rate" title="${currentRateTitle}">${currentRateLabel} ${currentRate}</span>` : ''}
             <span class="status-badge ${statusClass(status)}">${statusLabel(status)}</span>
           </div>
         </div>

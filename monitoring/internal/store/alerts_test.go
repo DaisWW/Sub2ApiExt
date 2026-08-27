@@ -62,4 +62,7 @@ func TestSanitizeUpstreamMessageRemovesLegacyBody(t *testing.T) {
 	if got := sanitizeUpstreamMessage("分组 A 不可用：0/3 accounts healthy"); got != "分组 A 不可用：分组内健康账户 0/3" {
 		t.Fatalf("分组错误未归一化为 %q", got)
 	}
+	if got := sanitizeUpstreamMessage("当前路由可用：1/2 accounts healthy；异常 1，待验证 0；预计失败暴露 37.0%"); got != "当前仍可用：1/2 个候选；异常 1，待验证 0；预计失败暴露 37.0%" {
+		t.Fatalf("分组可用性文案未保留路由语义：%q", got)
+	}
 }

@@ -117,6 +117,8 @@ type TargetStats struct {
 
 type DashboardTarget struct {
 	Target
+	// RateMultiplier is the currently effective billing cost multiplier stored
+	// on the account or group, not an upstream sync candidate.
 	RateMultiplier *float64       `json:"rate_multiplier,omitempty"`
 	Stats          TargetStats    `json:"stats"`
 	RecentSamples  []StatusSample `json:"recent_samples"`

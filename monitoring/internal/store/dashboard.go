@@ -133,7 +133,10 @@ WITH bounds AS (
     FROM latest_evidence_inputs
 )
 SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t.probe_enabled,
-       CASE WHEN t.kind = 'group' THEN g.rate_multiplier::double precision END,
+       CASE
+           WHEN t.kind = 'group' THEN g.rate_multiplier::double precision
+           WHEN t.kind = 'account' THEN a.rate_multiplier::double precision
+       END,
        e.status, e.latency_ms, e.first_byte_ms, e.checked_at, e.source, e.message, e.failure_streak,
        COALESCE(s.samples,0), COALESCE(s.successful,0),
        s.first_fastest, s.first_median, s.first_p95,
@@ -141,6 +144,7 @@ SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t
        COALESCE(r.samples, '[]'::jsonb)
 FROM monitoring_targets t
 CROSS JOIN bounds
+LEFT JOIN accounts a ON t.kind = 'account' AND a.id = t.entity_id AND a.deleted_at IS NULL
 LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL
 LEFT JOIN latest_evidence e ON e.target_key = t.target_key
 LEFT JOIN stats s ON s.target_key = t.target_key
