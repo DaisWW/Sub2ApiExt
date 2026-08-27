@@ -34,13 +34,13 @@ export function escapeHTML(value) {
 const knownStatuses = new Set(['operational', 'degraded', 'failed', 'error', 'unknown', 'disabled']);
 
 export function normalizeStatus(status) {
-  const normalized = knownStatuses.has(status) ? status : 'unknown';
-  return normalized === 'degraded' ? 'operational' : normalized;
+  return knownStatuses.has(status) ? status : 'unknown';
 }
 
 export function statusLabel(status) {
   return {
     operational: '正常',
+    degraded: '降级',
     failed: '失败',
     error: '错误',
     unknown: '等待验证',
@@ -55,6 +55,7 @@ export function statusClass(status) {
 export function historyStatusClass(status) {
   const normalized = normalizeStatus(status);
   if (normalized === 'operational') return 'ok';
+  if (normalized === 'degraded') return 'warn';
   return 'bad';
 }
 

@@ -54,8 +54,8 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"PARTITION BY target_key, bucket_index",
 		"CASE WHEN source = 'history' THEN 0 ELSE 1 END",
 		"COALESCE(recent_ranked.status, 'unknown')",
-		"prior_samples AS MATERIALIZED",
-		"LEFT JOIN prior_ranked",
+		"mc.target_key = t.target_key",
+		"mc.checked_at < bounds.start_at",
 		"LEFT JOIN LATERAL",
 		"ORDER BY mc.checked_at DESC, mc.id DESC",
 		"targets.last_activity_at >= latest_checks.checked_at",
@@ -72,6 +72,9 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 	if strings.Contains(dashboardQuery, "MAX(latency_ms)") {
 		t.Fatal("dashboard query must not expose a single latency outlier as P95")
+	}
+	if strings.Contains(dashboardQuery, "prior_samples AS MATERIALIZED") {
+		t.Fatal("dashboard query must not scan all checks before the selected window")
 	}
 	if count := strings.Count(dashboardQuery, "FROM usage_logs ul"); count != 1 {
 		t.Fatalf("dashboard query scans usage_logs %d times, want one filtered source", count)

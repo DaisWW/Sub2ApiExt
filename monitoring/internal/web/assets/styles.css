@@ -189,6 +189,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .status-history { height: 7px; min-width: 120px; flex: 1; display: grid; grid-template-columns: repeat(24, minmax(2px, 1fr)); gap: 2px; }
 .status-history i { min-width: 0; border-radius: 2px; background: #334252; transition: opacity .15s ease; }
 .status-history i.ok { background: var(--mint); }
+.status-history i.warn { background: var(--amber); }
 .status-history i.bad { background: var(--red); }
 .status-history i.carried { opacity: .48; }
 .status-history i[title] { cursor: help; }

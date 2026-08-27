@@ -205,6 +205,7 @@ function renderStatusHistory(samples, windowDays) {
   const recent = samples.slice(-24);
   const empty = Array.from({ length: 24 - recent.length }, () => '<i aria-hidden="true"></i>');
   const items = recent.map((sample) => {
+    const degraded = sample.status === 'degraded';
     const successful = sample.status === 'operational' || sample.status === 'degraded';
     const failed = sample.status === 'failed' || sample.status === 'error';
     const carried = Boolean(sample.carried_from) && (failed || successful);
@@ -213,7 +214,7 @@ function renderStatusHistory(samples, windowDays) {
       : failed || successful
         ? `${formatTime(sample.checked_at)} · ${statusLabel(sample.status)} · ${sourceLabel(sample.source)}`
         : `${formatTime(sample.checked_at)} · 暂无采样`;
-    const tone = successful ? 'ok' : failed ? 'bad' : '';
+    const tone = degraded ? 'warn' : successful ? 'ok' : failed ? 'bad' : '';
     const classes = [tone, carried ? 'carried' : ''].filter(Boolean).join(' ');
     return `<i${classes ? ` class="${classes}"` : ''} role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
   });

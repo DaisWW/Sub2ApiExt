@@ -48,7 +48,7 @@ C:\ProgramData\Sub2API\extensions\
 
 如果检测到原工作目录部署的 `sub2api-monitoring-standalone`，安装器会先等待新监控容器健康，再移除旧容器，避免两个 Worker 并行探测。
 
-监控面板默认监听 `0.0.0.0:18090`，部署完成后可从同一局域网通过主机名或 IP 访问。部署脚本会尝试创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再从该目录执行 `docker compose up -d`。
+监控面板默认监听 `0.0.0.0:18090`，部署完成后可从同一局域网通过主机名或 IP 访问。部署脚本会校验或创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则，无法安全配置时会停止部署；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再重新运行部署脚本。
 
 每个运行目录都会安装 `manage.bat`：
 

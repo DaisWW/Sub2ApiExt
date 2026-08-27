@@ -308,8 +308,12 @@ function Wait-ExtensionContainer {
 function Test-ExtensionContainerExists {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    & docker container inspect $Name *> $null
-    return $LASTEXITCODE -eq 0
+    try {
+        $null = & docker container inspect $Name 2>$null 1>$null
+        return $LASTEXITCODE -eq 0
+    } catch {
+        return $false
+    }
 }
 
 function Remove-ExtensionContainer {
@@ -323,19 +327,38 @@ function Remove-ExtensionContainer {
 function Test-ExtensionLanFirewallRule {
     param(
         [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][bool]$Enabled,
         [string]$RuleName = 'Sub2APIExt-Monitoring-LAN'
     )
 
-	try {
-		$rule = @(Get-NetFirewallRule -Name $RuleName -ErrorAction Stop | Select-Object -First 1)
-		if ($rule.Count -eq 0 -or ([string]$rule[0].Enabled) -ne 'True') {
-			return $false
-		}
-        $portFilter = @($rule | Get-NetFirewallPortFilter -ErrorAction Stop | Select-Object -First 1)
-        if ($portFilter.Count -eq 0) {
+    try {
+        $rules = @(Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue)
+        if (-not $Enabled) {
+            return $rules.Count -eq 0 -or
+                @($rules | Where-Object { ([string]$_.Enabled) -ne 'False' }).Count -eq 0
+        }
+        if ($rules.Count -eq 0) {
             return $false
         }
-        return @($portFilter[0].LocalPort | ForEach-Object { [string]$_ }) -contains ([string]$Port)
+        foreach ($rule in $rules) {
+            if (([string]$rule.Enabled) -ne 'True' -or
+                    ([string]$rule.Direction) -ne 'Inbound' -or
+                    ([string]$rule.Action) -ne 'Allow' -or
+                    ([int]$rule.Profile) -ne 3) {
+                return $false
+            }
+            $portFilter = @($rule | Get-NetFirewallPortFilter -ErrorAction Stop)
+            $addressFilter = @($rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
+            $localPorts = @($portFilter.LocalPort | ForEach-Object { [string]$_ })
+            $remoteAddresses = @($addressFilter.RemoteAddress | ForEach-Object { [string]$_ })
+            if ($portFilter.Count -ne 1 -or ([string]$portFilter[0].Protocol) -ne 'TCP' -or
+                    $localPorts.Count -ne 1 -or $localPorts[0] -ne ([string]$Port) -or
+                    $addressFilter.Count -ne 1 -or $remoteAddresses.Count -ne 1 -or
+                    $remoteAddresses[0] -ne 'LocalSubnet') {
+                return $false
+            }
+        }
+        return $true
     } catch {
         return $false
     }
@@ -349,9 +372,9 @@ function Set-ExtensionLanFirewallRule {
     )
 
     try {
-        $rule = @(Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue | Select-Object -First 1)
+        $rules = @(Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue)
         if ($Enabled) {
-            if ($rule.Count -eq 0) {
+            if ($rules.Count -eq 0) {
                 New-NetFirewallRule `
                     -Name $RuleName `
                     -DisplayName 'Sub2API monitoring (LAN)' `
@@ -365,23 +388,31 @@ function Set-ExtensionLanFirewallRule {
                     -Description 'Allows Sub2APIExt monitoring access from the local network.' `
                     -ErrorAction Stop | Out-Null
             } else {
-                $rule | Set-NetFirewallRule `
+                $rules | Set-NetFirewallRule `
                     -Enabled True `
                     -Direction Inbound `
                     -Action Allow `
                     -Profile Domain,Private `
                     -ErrorAction Stop | Out-Null
-                $rule | Set-NetFirewallPortFilter `
+                $portFilters = @($rules | Get-NetFirewallPortFilter -ErrorAction Stop)
+                if ($portFilters.Count -eq 0) {
+                    throw "Firewall rule $RuleName has no port filter."
+                }
+                $portFilters | Set-NetFirewallPortFilter `
                     -Protocol TCP `
                     -LocalPort $Port `
                     -ErrorAction Stop | Out-Null
-                $rule | Set-NetFirewallAddressFilter `
+                $addressFilters = @($rules | Get-NetFirewallAddressFilter -ErrorAction Stop)
+                if ($addressFilters.Count -eq 0) {
+                    throw "Firewall rule $RuleName has no address filter."
+                }
+                $addressFilters | Set-NetFirewallAddressFilter `
                     -RemoteAddress LocalSubnet `
                     -ErrorAction Stop | Out-Null
             }
             Write-Host "Windows Firewall: allowing TCP $Port from the local network (Domain/Private profiles)." -ForegroundColor DarkGray
-        } elseif ($rule.Count -gt 0) {
-            $rule | Disable-NetFirewallRule -ErrorAction Stop | Out-Null
+        } elseif ($rules.Count -gt 0) {
+            $rules | Disable-NetFirewallRule -ErrorAction Stop | Out-Null
         }
         return $true
     } catch {

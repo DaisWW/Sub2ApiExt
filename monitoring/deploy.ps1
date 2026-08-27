@@ -10,16 +10,21 @@ $runtimeRoot = Get-ExtensionRuntimeRoot -Service 'monitoring'
 $composeEnvPath = Join-Path $runtimeRoot '.env'
 $existingComposeEnv = Read-ExtensionEnvFile -Path $composeEnvPath
 $bindHost = if ($existingComposeEnv['MONITORING_BIND_HOST']) {
-    $existingComposeEnv['MONITORING_BIND_HOST']
+    $existingComposeEnv['MONITORING_BIND_HOST'].Trim()
 } else {
     '0.0.0.0'
 }
-# Migrate the old installer-generated loopback default once. After this marker
-# exists, an operator's explicit bind-host override is preserved on redeploy.
-if (-not $existingComposeEnv.ContainsKey('MONITORING_DEPLOY_CONFIG_VERSION') -and $bindHost -eq '127.0.0.1') {
-    $bindHost = '0.0.0.0'
+if ($bindHost -eq 'localhost') {
+    $bindHost = '127.0.0.1'
 }
-$lanBind = $bindHost -notin @('127.0.0.1', '::1', 'localhost')
+[Net.IPAddress]$bindAddress = $null
+if ($bindHost -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -or
+        -not [Net.IPAddress]::TryParse($bindHost, [ref]$bindAddress) -or
+        $bindAddress.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+    throw "Invalid monitoring IPv4 bind address in ${composeEnvPath}: $bindHost"
+}
+$bindHost = $bindAddress.ToString()
+$lanBind = -not [Net.IPAddress]::IsLoopback($bindAddress)
 $port = if ($existingComposeEnv['MONITORING_PORT']) {
     $existingComposeEnv['MONITORING_PORT']
 } else {
@@ -28,9 +33,9 @@ $port = if ($existingComposeEnv['MONITORING_PORT']) {
 if ($port -notmatch '^\d+$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
     throw "Invalid monitoring port in ${composeEnvPath}: $port"
 }
-$needsLanFirewall = $lanBind -and -not (Test-ExtensionLanFirewallRule -Port ([int]$port))
+$needsFirewallChange = -not (Test-ExtensionLanFirewallRule -Port ([int]$port) -Enabled $lanBind)
 
-$elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath -Force:$needsLanFirewall
+$elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath -Force:$needsFirewallChange
 if ($null -ne $elevatedExit) {
     exit [int]$elevatedExit
 }
@@ -67,7 +72,6 @@ Write-ExtensionEnvFile -Path $composeEnvPath -Values ([ordered]@{
     SUB2API_NETWORK = $sub2api.Network
     MONITORING_BIND_HOST = $bindHost
     MONITORING_PORT = $port
-    MONITORING_DEPLOY_CONFIG_VERSION = '2'
 })
 Write-ExtensionEnvFile -Path (Join-Path $runtimeRoot 'database.runtime.env') -Values ([ordered]@{
     DATABASE_HOST = $sub2api.PostgresHost
@@ -81,12 +85,14 @@ Grant-ExtensionRuntimeAccess -Path $runtimeRoot
 
 # Replace the pre-Compose verification container from the original workspace.
 Remove-ExtensionContainer -Name 'sub2api-monitor-check'
+if ($needsFirewallChange) {
+    if (-not (Set-ExtensionLanFirewallRule -Port ([int]$port) -Enabled $lanBind) -or
+            -not (Test-ExtensionLanFirewallRule -Port ([int]$port) -Enabled $lanBind)) {
+        throw "Could not configure the Windows Firewall rule for monitoring TCP $port."
+    }
+}
 Start-ExtensionCompose -RuntimeRoot $runtimeRoot
 Wait-ExtensionContainer -Name 'sub2api-monitoring'
-
-if ($lanBind) {
-    [void](Set-ExtensionLanFirewallRule -Port ([int]$port) -Enabled $true)
-}
 
 # Retire the original-workspace deployment only after the independent
 # ProgramData deployment is healthy, so two workers do not probe in parallel.

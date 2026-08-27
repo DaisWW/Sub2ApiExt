@@ -71,22 +71,6 @@ WITH bounds AS (
 	           ORDER BY CASE WHEN source = 'history' THEN 0 ELSE 1 END, checked_at DESC
 	       ) AS position
 	FROM recent_bucketed
-), prior_samples AS MATERIALIZED (
-	SELECT mc.target_key, mc.status, mc.checked_at, mc.source
-	FROM monitoring_checks mc
-	CROSS JOIN bounds
-	WHERE mc.checked_at < bounds.start_at
-	  AND mc.status NOT IN ('unknown', 'disabled')
-	UNION ALL
-	SELECT targets.target_key, 'operational', targets.last_activity_at, 'history'
-	FROM monitoring_targets targets
-	CROSS JOIN bounds
-	WHERE targets.last_activity_at IS NOT NULL
-	  AND targets.last_activity_at < bounds.start_at
-), prior_ranked AS (
-	SELECT DISTINCT ON (target_key) target_key, status, checked_at, source
-	FROM prior_samples
-	ORDER BY target_key, checked_at DESC, CASE WHEN source = 'history' THEN 0 ELSE 1 END
 ), recent AS (
 	SELECT targets.target_key,
 	       jsonb_agg(jsonb_build_object(
@@ -151,10 +135,29 @@ SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t
 	       s.latency_fastest, s.latency_median, s.latency_p95,
 	       COALESCE(r.samples, '[]'::jsonb), p.status, p.checked_at, p.source
 FROM monitoring_targets t
+CROSS JOIN bounds
 LEFT JOIN latest_evidence e ON e.target_key = t.target_key
 LEFT JOIN stats s ON s.target_key = t.target_key
 LEFT JOIN recent r ON r.target_key = t.target_key
-LEFT JOIN prior_ranked p ON p.target_key = t.target_key
+LEFT JOIN LATERAL (
+	SELECT evidence.status, evidence.checked_at, evidence.source
+	FROM (
+		(
+			SELECT mc.status, mc.checked_at, mc.source
+			FROM monitoring_checks mc
+			WHERE mc.target_key = t.target_key
+			  AND mc.checked_at < bounds.start_at
+			  AND mc.status NOT IN ('unknown', 'disabled')
+			ORDER BY mc.checked_at DESC, mc.id DESC
+			LIMIT 1
+		)
+		UNION ALL
+		SELECT 'operational', t.last_activity_at, 'history'
+		WHERE t.last_activity_at IS NOT NULL AND t.last_activity_at < bounds.start_at
+	) evidence
+	ORDER BY evidence.checked_at DESC, CASE WHEN evidence.source = 'history' THEN 0 ELSE 1 END
+	LIMIT 1
+) p ON TRUE
 WHERE t.active = TRUE AND LOWER(TRIM(t.source_status)) = 'active'
 ORDER BY CASE WHEN t.kind = 'group' THEN 0 ELSE 1 END, t.name, t.entity_id`
 
@@ -236,10 +239,10 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	return target, target.ProbeEnabled && samples > 0, nil
 }
 
-func carryForwardStatusSamples(samples []model.StatusSample, priorSamples ...*model.StatusSample) {
+func carryForwardStatusSamples(samples []model.StatusSample, priorSample *model.StatusSample) {
 	var previous *model.StatusSample
-	if len(priorSamples) > 0 && priorSamples[0] != nil {
-		observed := *priorSamples[0]
+	if priorSample != nil {
+		observed := *priorSample
 		previous = &observed
 	}
 	for i := range samples {
