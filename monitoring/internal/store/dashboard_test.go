@@ -73,7 +73,7 @@ func TestApplyLatestTargetStateMarksUnroutableGroupFailed(t *testing.T) {
 
 func TestUnroutableActiveGroupContributesZeroAvailability(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{
-		Kind: model.KindGroup, SourceStatus: "active", ProbeEnabled: false,
+		Kind: model.KindGroup, SourceStatus: "active", ProbeEnabled: false, Status: model.StatusFailed,
 	}, Stats: model.TargetStats{Availability: 100}}
 	if !targetContributesAvailability(target) {
 		t.Fatal("unroutable active group must be included in availability denominator")

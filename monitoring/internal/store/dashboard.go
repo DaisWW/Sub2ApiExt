@@ -356,7 +356,7 @@ func addDashboardSummary(summary *model.Summary, target model.DashboardTarget) {
 		summary.Unknown++
 	}
 	if targetContributesAvailability(target) {
-		summary.Availability += target.Stats.Availability
+		summary.Availability += targetAvailabilityValue(target)
 	}
 }
 
@@ -365,6 +365,13 @@ func targetContributesAvailability(target model.DashboardTarget) bool {
 		return true
 	}
 	return target.ProbeEnabled && target.Stats.Samples > 0
+}
+
+func targetAvailabilityValue(target model.DashboardTarget) float64 {
+	if target.Kind == model.KindGroup && groupIsActive(target.SourceStatus) && !target.ProbeEnabled {
+		return 0
+	}
+	return target.Stats.Availability
 }
 
 func metricStats(fastest sql.NullInt64, median, p95 sql.NullFloat64) model.MetricStats {
