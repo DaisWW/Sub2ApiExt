@@ -89,6 +89,16 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .usage-kpi { min-height: 96px; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 15px 16px; }
 .usage-kpi-value { margin-top: 8px; font-size: 22px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .loading-state.usage-loading { min-height: 96px; }
+.cache-rate-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.cache-rate-panel { min-height: 0; }
+.cache-rate-list { display: grid; margin-top: 14px; }
+.cache-rate-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 14px; min-height: 58px; padding: 9px 0; border-top: 1px solid var(--line); }
+.cache-rate-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--soft); font-size: 13px; font-weight: 700; }
+.cache-rate-stat { display: grid; gap: 3px; min-width: max-content; text-align: right; }
+.cache-rate-stat span { color: var(--muted); font-size: 10px; }
+.cache-rate-stat strong { color: var(--soft); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cache-rate-hit strong { color: var(--mint); font-size: 15px; }
+.cache-rate-empty, .cache-rate-loading { min-height: 140px; }
 .usage-chart-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
 .chart-panel { min-width: 0; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 18px; }
 .trend-panel { grid-column: 1 / -1; }
@@ -287,6 +297,11 @@ td { color: var(--soft); }
   .overview-controls { justify-content: flex-start; margin-top: 22px; }
   .target-grid { grid-template-columns: 1fr; }
   .usage-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cache-rate-grid { grid-template-columns: 1fr; }
+  .cache-rate-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; min-height: 0; padding: 12px 0; }
+  .cache-rate-name { grid-column: 1 / -1; }
+  .cache-rate-stat { min-width: 0; text-align: left; }
+  .cache-rate-stat span { line-height: 1.3; }
   .usage-chart-grid { grid-template-columns: 1fr; }
   .usage-heading { align-items: flex-start; display: block; }
   .usage-controls { justify-content: flex-start; margin-top: 16px; }

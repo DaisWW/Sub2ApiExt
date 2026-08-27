@@ -54,6 +54,7 @@ func newUsageRanking(bounds usageBounds) model.UsageRanking {
 		StartAt:     bounds.start,
 		EndAt:       bounds.end,
 		Timeline:    []model.UsageBucket{},
+		Accounts:    []model.UsageRankItem{},
 		Groups:      []model.UsageRankItem{},
 		Models:      []model.UsageRankItem{},
 	}
@@ -74,6 +75,10 @@ func (s *Store) loadUsageOverview(ctx context.Context, result *model.UsageRankin
 func (s *Store) loadUsageRanks(ctx context.Context, result *model.UsageRanking, bounds usageBounds, limit int) error {
 	totalTokens := result.Summary.TotalTokens
 	var err error
+	result.Accounts, err = s.loadAccountUsageRanks(ctx, bounds, limit, totalTokens)
+	if err != nil {
+		return fmt.Errorf("load account usage ranks: %w", err)
+	}
 	result.Groups, err = s.loadGroupUsageRanks(ctx, bounds, limit, totalTokens)
 	if err != nil {
 		return fmt.Errorf("load group usage ranks: %w", err)

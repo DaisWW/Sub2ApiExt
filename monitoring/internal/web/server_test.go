@@ -72,11 +72,11 @@ func TestStaticResponsesSetContentSecurityPolicy(t *testing.T) {
 	if policy == "" {
 		t.Fatal("Content-Security-Policy header is missing")
 	}
-	if !strings.Contains(policy, "frame-ancestors *") {
-		t.Fatalf("CSP %q does not allow iframe embedding", policy)
+	if !strings.Contains(policy, "frame-ancestors 'none'") {
+		t.Fatalf("CSP %q does not deny iframe embedding", policy)
 	}
-	if frameOptions := response.Header().Get("X-Frame-Options"); frameOptions != "" {
-		t.Fatalf("got X-Frame-Options %q, want header omitted for iframe embedding", frameOptions)
+	if frameOptions := response.Header().Get("X-Frame-Options"); frameOptions != "DENY" {
+		t.Fatalf("got X-Frame-Options %q, want DENY", frameOptions)
 	}
 	if cacheControl := response.Header().Get("Cache-Control"); cacheControl != "no-store" {
 		t.Fatalf("got Cache-Control %q, want no-store", cacheControl)

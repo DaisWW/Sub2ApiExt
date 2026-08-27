@@ -71,6 +71,8 @@ export class UsagePanel {
     const summary = this.usage.summary || {};
     $('#usageMeta').textContent = `${this.usage.period_label || '用量窗口'} · ${formatTime(this.usage.generated_at)} 更新`;
     $('#usageKpiGrid').innerHTML = usageKPIs(summary).map(renderUsageKPI).join('');
+    renderCacheRates('accountCacheRateList', this.usage.accounts, '暂无账户缓存数据');
+    renderCacheRates('groupCacheRateList', this.usage.groups, '暂无分组缓存数据');
     this.#renderShares();
     this.#renderTrend();
   }
@@ -95,6 +97,8 @@ function setLoading(loading) {
   $('#usageSection').setAttribute('aria-busy', String(loading));
   if (!loading) return;
   $('#usageKpiGrid').innerHTML = '<div class="loading-state usage-loading">读取用量数据中...</div>';
+  $('#accountCacheRateList').innerHTML = '<div class="loading-state cache-rate-loading">读取缓存数据中...</div>';
+  $('#groupCacheRateList').innerHTML = '<div class="loading-state cache-rate-loading">读取缓存数据中...</div>';
   $('#usageMeta').textContent = '正在更新用量窗口…';
 }
 
@@ -114,6 +118,30 @@ function renderUsageKPI([label, value, note, color]) {
     <div class="usage-kpi-value ${color}">${value}</div>
     ${note ? `<div class="kpi-note">${note}</div>` : ''}
   </article>`;
+}
+
+function renderCacheRates(containerId, sourceItems, emptyText) {
+  const container = $('#' + containerId);
+  const items = Array.isArray(sourceItems) ? sourceItems : [];
+  if (!items.length) {
+    container.innerHTML = '<div class="empty-state cache-rate-empty">' + emptyText + '</div>';
+    return;
+  }
+  container.innerHTML = items.map(renderCacheRate).join('');
+}
+
+function renderCacheRate(item) {
+  const inputTokens = Math.max(0, Number(item?.input_tokens || 0));
+  const cacheReadTokens = Math.max(0, Number(item?.cache_read_tokens || 0));
+  const denominator = inputTokens + cacheReadTokens;
+  const hitRate = Math.min(100, Math.max(0, Number(item?.cache_hit_rate || 0)));
+  const name = item?.name || '未命名';
+  return '<div class="cache-rate-row">' +
+    '<div class="cache-rate-name" title="' + escapeHTML(name) + '">' + escapeHTML(name) + '</div>' +
+    '<div class="cache-rate-stat cache-rate-hit"><span>命中率</span><strong>' + hitRate.toFixed(2) + '%</strong></div>' +
+    '<div class="cache-rate-stat"><span>Cache Read</span><strong>' + formatTokens(cacheReadTokens) + '</strong></div>' +
+    '<div class="cache-rate-stat"><span>分母（输入 + 读取）</span><strong>' + formatTokens(denominator) + '</strong></div>' +
+  '</div>';
 }
 
 function renderShareDonut(containerId, sourceItems, total, emptyText, itemLabel, metric) {

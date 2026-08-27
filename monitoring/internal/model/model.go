@@ -155,6 +155,7 @@ type UsageRanking struct {
 	EndAt       time.Time       `json:"end_at"`
 	Summary     UsageSummary    `json:"summary"`
 	Timeline    []UsageBucket   `json:"timeline"`
+	Accounts    []UsageRankItem `json:"accounts"`
 	Groups      []UsageRankItem `json:"groups"`
 	Models      []UsageRankItem `json:"models"`
 }
@@ -186,6 +187,9 @@ type UsageRankItem struct {
 	Platform     string  `json:"platform,omitempty"`
 	Requests     int64   `json:"requests"`
 	TotalTokens  int64   `json:"total_tokens"`
+	InputTokens  int64   `json:"input_tokens"`
+	CacheRead    int64   `json:"cache_read_tokens"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
 	TotalCost    float64 `json:"total_cost"`
 	SharePercent float64 `json:"share_percent"`
 }
