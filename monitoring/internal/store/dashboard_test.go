@@ -54,6 +54,8 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"PARTITION BY target_key, bucket_index",
 		"CASE WHEN source = 'history' THEN 0 ELSE 1 END",
 		"COALESCE(recent_ranked.status, 'unknown')",
+		"prior_samples AS MATERIALIZED",
+		"LEFT JOIN prior_ranked",
 		"LEFT JOIN LATERAL",
 		"ORDER BY mc.checked_at DESC, mc.id DESC",
 		"targets.last_activity_at >= latest_checks.checked_at",
@@ -102,10 +104,15 @@ func TestCarryForwardStatusSamples(t *testing.T) {
 		{Status: model.StatusUnknown, CheckedAt: start.Add(5 * time.Hour)},
 	}
 
-	carryForwardStatusSamples(samples)
+	priorAt := start.Add(-time.Hour)
+	prior := &model.StatusSample{Status: model.StatusDegraded, CheckedAt: priorAt, Source: "aggregate"}
+	carryForwardStatusSamples(samples, prior)
 
-	if samples[0].Status != model.StatusUnknown || samples[0].CarriedFrom != nil {
-		t.Fatalf("leading unknown sample must stay empty: %+v", samples[0])
+	if samples[0].Status != model.StatusDegraded || samples[0].Source != "aggregate" {
+		t.Fatalf("leading sample did not carry the prior state: %+v", samples[0])
+	}
+	if samples[0].CarriedFrom == nil || !samples[0].CarriedFrom.Equal(priorAt) {
+		t.Fatalf("leading sample has wrong carried origin: %+v", samples[0])
 	}
 	if samples[1].CarriedFrom != nil {
 		t.Fatalf("observed sample must not be marked as carried: %+v", samples[1])
@@ -123,5 +130,13 @@ func TestCarryForwardStatusSamples(t *testing.T) {
 	}
 	if samples[5].CarriedFrom == nil || !samples[5].CarriedFrom.Equal(samples[4].CheckedAt) {
 		t.Fatalf("failed state has wrong carried origin: %+v", samples[5])
+	}
+}
+
+func TestCarryForwardStatusSamplesLeavesUnknownWithoutPriorState(t *testing.T) {
+	samples := []model.StatusSample{{Status: model.StatusUnknown, CheckedAt: time.Now().UTC()}}
+	carryForwardStatusSamples(samples, nil)
+	if samples[0].Status != model.StatusUnknown || samples[0].CarriedFrom != nil {
+		t.Fatalf("sample without any prior state must stay unknown: %+v", samples[0])
 	}
 }
