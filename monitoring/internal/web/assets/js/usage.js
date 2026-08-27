@@ -12,6 +12,7 @@ import {
 } from './shared.js';
 
 const donutColors = ['#77a9ef', '#54d6ae', '#e8b85f', '#c18df0', '#f27a82', '#8fd3ff', '#a4d17a', '#d8a0ff'];
+const minimumDonutPercent = 0.1;
 const usageMetrics = new Set(['tokens', 'cost', 'unit_cost']);
 
 export class UsagePanel {
@@ -252,16 +253,30 @@ function shareItems(sourceItems, summary, metric) {
       sliceValue: shareSliceValue(item, metric),
       totalCost: nonNegativeNumber(item?.total_cost)
     }));
-  const items = ranked.slice(0, 7);
+  const minimumSliceValue = sliceTotal * minimumDonutPercent / 100;
+  const items = ranked.slice(0, 7).filter((item) => item.sliceValue >= minimumSliceValue);
   const shown = items.reduce((sum, item) => sum + item.sliceValue, 0);
   const remainder = Math.max(sliceTotal - shown, 0);
+  const remainingCost = Math.max(
+    nonNegativeNumber(summary?.total_cost) - items.reduce((sum, item) => sum + item.totalCost, 0),
+    0
+  );
   if (remainder > 0) {
-    const value = metric === 'unit_cost'
-      ? costPerMillion(Math.max(nonNegativeNumber(summary?.total_cost) - items.reduce((sum, item) => sum + item.totalCost, 0), 0), remainder)
-      : remainder;
-    items.push({ name: '其他', value, sliceValue: remainder, totalCost: 0 });
+    const last = items[items.length - 1];
+    if (last && remainder < minimumSliceValue) {
+      last.sliceValue += remainder;
+      if (metric === 'unit_cost') {
+        last.totalCost += remainingCost;
+        last.value = costPerMillion(last.totalCost, last.sliceValue);
+      } else {
+        last.value += remainder;
+      }
+    } else {
+      const value = metric === 'unit_cost' ? costPerMillion(remainingCost, remainder) : remainder;
+      items.push({ name: '其他', value, sliceValue: remainder, totalCost: remainingCost });
+    }
   }
-  return items.filter((item) => item.sliceValue > 0);
+  return items;
 }
 
 function renderDonutSlice(item, index, percent, offset, total, metric) {
