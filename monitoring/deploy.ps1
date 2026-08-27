@@ -68,6 +68,67 @@ if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
     Copy-Item -LiteralPath $settingsSource -Destination $settingsPath
 }
 
+$settingsValues = Read-ExtensionEnvFile -Path $settingsPath
+$frameAncestors = [string]$settingsValues['MONITORING_FRAME_ANCESTORS']
+if ([string]::IsNullOrWhiteSpace($frameAncestors) -or $frameAncestors.Trim() -eq "'self'") {
+    $siteOrigins = @()
+    try {
+        $siteURLQuery = @'
+SELECT value
+FROM settings
+WHERE key IN ('frontend_url', 'api_base_url')
+  AND btrim(value) <> ''
+ORDER BY CASE key WHEN 'frontend_url' THEN 0 ELSE 1 END;
+'@
+        $siteURLs = @(Invoke-ExtensionDocker -Arguments @(
+            'exec', 'sub2api-postgres', 'psql',
+            '-U', $sub2api.PostgresUser,
+            '-d', $sub2api.PostgresDatabase,
+            '-At', '-c', $siteURLQuery
+        ) -Capture | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
+
+        foreach ($siteURL in $siteURLs) {
+            [Uri]$siteUri = $null
+            if ([Uri]::TryCreate($siteURL, [UriKind]::Absolute, [ref]$siteUri) -and
+                    ($siteUri.Scheme -eq 'http' -or $siteUri.Scheme -eq 'https') -and
+                    -not [string]::IsNullOrWhiteSpace($siteUri.Host) -and
+                    [string]::IsNullOrEmpty($siteUri.UserInfo)) {
+                $origin = $siteUri.GetLeftPart([UriPartial]::Authority).ToLowerInvariant()
+                if ($siteOrigins -notcontains $origin) {
+                    $siteOrigins += $origin
+                }
+                break
+            }
+        }
+    }
+    catch {
+        Write-Warning "Could not discover the Sub2API site origin. $($_.Exception.Message)"
+    }
+
+    if ($siteOrigins.Count -gt 0) {
+        $frameAncestors = (@("'self'") + $siteOrigins) -join ' '
+        $settingsLines = [Collections.Generic.List[string]]::new()
+        $updatedFrameAncestors = $false
+        foreach ($line in [IO.File]::ReadAllLines($settingsPath)) {
+            if ($line -match '^\s*MONITORING_FRAME_ANCESTORS=') {
+                $settingsLines.Add("MONITORING_FRAME_ANCESTORS=$frameAncestors")
+                $updatedFrameAncestors = $true
+            }
+            else {
+                $settingsLines.Add($line)
+            }
+        }
+        if (-not $updatedFrameAncestors) {
+            $settingsLines.Add("MONITORING_FRAME_ANCESTORS=$frameAncestors")
+        }
+        [IO.File]::WriteAllLines($settingsPath, $settingsLines, [Text.UTF8Encoding]::new($false))
+        Write-Host "Monitoring iframe: allowing $($siteOrigins -join ', ')." -ForegroundColor DarkGray
+    }
+    else {
+        Write-Warning 'Sub2API frontend_url/api_base_url is empty or invalid. Configure MONITORING_FRAME_ANCESTORS before embedding the monitoring page.'
+    }
+}
+
 Write-ExtensionEnvFile -Path $composeEnvPath -Values ([ordered]@{
     SUB2API_NETWORK = $sub2api.Network
     MONITORING_BIND_HOST = $bindHost

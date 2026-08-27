@@ -117,8 +117,9 @@ type TargetStats struct {
 
 type DashboardTarget struct {
 	Target
-	Stats         TargetStats    `json:"stats"`
-	RecentSamples []StatusSample `json:"recent_samples"`
+	RateMultiplier *float64       `json:"rate_multiplier,omitempty"`
+	Stats          TargetStats    `json:"stats"`
+	RecentSamples  []StatusSample `json:"recent_samples"`
 }
 
 // StatusSample 是目标最近一次观测的紧凑状态，用于绘制状态轨迹。
@@ -141,7 +142,6 @@ type Summary struct {
 type Dashboard struct {
 	GeneratedAt  time.Time         `json:"generated_at"`
 	NextProbeAt  *time.Time        `json:"next_probe_at,omitempty"`
-	WindowDays   int               `json:"window_days"`
 	IntervalSec  int               `json:"interval_seconds"`
 	Summary      Summary           `json:"summary"`
 	Targets      []DashboardTarget `json:"targets"`

@@ -164,13 +164,18 @@ func routeCriticalAccounts(snapshot model.Snapshot) map[int64]struct{} {
 			}
 			continue
 		}
-		primaryAccountPriority := group.Members[0].AccountPriority
-		primaryGroupPriority := group.Members[0].GroupPriority
-		for _, member := range group.Members {
-			if member.AccountPriority != primaryAccountPriority || member.GroupPriority != primaryGroupPriority {
-				break
+		primaryAccountPriority, primaryGroupPriority := 0, 0
+		for index, member := range group.Members {
+			if index == 0 || member.AccountPriority < primaryAccountPriority ||
+				(member.AccountPriority == primaryAccountPriority && member.GroupPriority < primaryGroupPriority) {
+				primaryAccountPriority = member.AccountPriority
+				primaryGroupPriority = member.GroupPriority
 			}
-			critical[member.AccountID] = struct{}{}
+		}
+		for _, member := range group.Members {
+			if member.AccountPriority == primaryAccountPriority && member.GroupPriority == primaryGroupPriority {
+				critical[member.AccountID] = struct{}{}
+			}
 		}
 	}
 	return critical
@@ -295,10 +300,11 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 }
 
 func (b *cycleBatch) groupMemberResults(group model.Group, accounts map[int64]model.Account) []model.ProbeResult {
-	results := make([]model.ProbeResult, 0, len(group.AccountIDs))
-	for _, accountID := range group.AccountIDs {
+	accountIDs := groupAccountIDs(group)
+	results := make([]model.ProbeResult, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
 		account, exists := accounts[accountID]
-		if !exists || account.Status != "active" || !account.Schedulable {
+		if !exists || !accountIsEnabled(account) {
 			continue
 		}
 		if result, exists := b.accountResults[accountID]; exists {
@@ -308,12 +314,38 @@ func (b *cycleBatch) groupMemberResults(group model.Group, accounts map[int64]mo
 	return results
 }
 
+func groupAccountIDs(group model.Group) []int64 {
+	accountIDs := make([]int64, 0, len(group.Members)+len(group.AccountIDs))
+	seen := make(map[int64]struct{}, cap(accountIDs))
+	for _, member := range group.Members {
+		if member.AccountID <= 0 {
+			continue
+		}
+		if _, exists := seen[member.AccountID]; exists {
+			continue
+		}
+		seen[member.AccountID] = struct{}{}
+		accountIDs = append(accountIDs, member.AccountID)
+	}
+	for _, accountID := range group.AccountIDs {
+		if accountID <= 0 {
+			continue
+		}
+		if _, exists := seen[accountID]; exists {
+			continue
+		}
+		seen[accountID] = struct{}{}
+		accountIDs = append(accountIDs, accountID)
+	}
+	return accountIDs
+}
+
 func eligibleGroup(group model.Group, accounts map[int64]model.Account) model.Group {
 	filtered := group
-	filtered.AccountIDs = make([]int64, 0, len(group.AccountIDs))
-	for _, accountID := range group.AccountIDs {
+	filtered.AccountIDs = make([]int64, 0, len(group.Members)+len(group.AccountIDs))
+	for _, accountID := range groupAccountIDs(group) {
 		account, exists := accounts[accountID]
-		if exists && account.Status == "active" && account.Schedulable {
+		if exists && accountIsEnabled(account) {
 			filtered.AccountIDs = append(filtered.AccountIDs, accountID)
 		}
 	}
@@ -321,7 +353,7 @@ func eligibleGroup(group model.Group, accounts map[int64]model.Account) model.Gr
 		filtered.Members = make([]model.GroupMember, 0, len(group.Members))
 		for _, member := range group.Members {
 			account, exists := accounts[member.AccountID]
-			if exists && account.Status == "active" && account.Schedulable {
+			if exists && accountIsEnabled(account) {
 				filtered.Members = append(filtered.Members, member)
 			}
 		}

@@ -48,8 +48,8 @@ func (s *Store) Prune(ctx context.Context, before time.Time) error {
 	return tx.Commit()
 }
 
-func (s *Store) History(ctx context.Context, key string, days, limit int) ([]model.ProbeResult, error) {
-	limit, days = normalizeHistoryRange(limit, days)
+func (s *Store) History(ctx context.Context, key string, limit int) ([]model.ProbeResult, error) {
+	limit = normalizeHistoryLimit(limit)
 	const query = `
 SELECT target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms,
        status_code, error_class, message, checked_at, source
@@ -57,25 +57,25 @@ FROM (
     SELECT target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms,
            status_code, error_class, message, checked_at, source
     FROM monitoring_checks
-    WHERE target_key = $1 AND checked_at >= NOW() - ($2::int * INTERVAL '1 day')
+    WHERE target_key = $1 AND checked_at >= NOW() - INTERVAL '24 hours'
     UNION ALL
 	SELECT 'account:' || account_id::text, 'account', account_id, group_id, 'operational',
 	           duration_ms, first_token_ms, NULL::integer, '', '真实请求历史', created_at, 'history'
 	FROM usage_logs
 	WHERE $1 = 'account:' || account_id::text
 	  AND actual_cost > 0
-	  AND created_at >= NOW() - ($2::int * INTERVAL '1 day')
+	  AND created_at >= NOW() - INTERVAL '24 hours'
     UNION ALL
 	SELECT 'group:' || COALESCE(group_id, -1)::text, 'group', COALESCE(group_id, -1), group_id, 'operational',
 	           duration_ms, first_token_ms, NULL::integer, '', '真实请求历史', created_at, 'history'
 	FROM usage_logs
 	WHERE $1 = 'group:' || COALESCE(group_id, -1)::text
 	  AND actual_cost > 0
-	  AND created_at >= NOW() - ($2::int * INTERVAL '1 day')
+	  AND created_at >= NOW() - INTERVAL '24 hours'
 ) combined
 ORDER BY checked_at DESC
-LIMIT $3`
-	rows, err := s.db.QueryContext(ctx, query, key, days, limit)
+LIMIT $2`
+	rows, err := s.db.QueryContext(ctx, query, key, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -83,14 +83,11 @@ LIMIT $3`
 	return scanProbeResults(rows)
 }
 
-func normalizeHistoryRange(limit, days int) (int, int) {
+func normalizeHistoryLimit(limit int) int {
 	if limit <= 0 || limit > 1000 {
 		limit = 240
 	}
-	if days <= 0 || days > 90 {
-		days = 7
-	}
-	return limit, days
+	return limit
 }
 
 func scanProbeResults(rows *sql.Rows) ([]model.ProbeResult, error) {

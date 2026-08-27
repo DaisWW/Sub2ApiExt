@@ -5,7 +5,7 @@ import { UsagePanel } from './js/usage.js';
 import { $, activateToggle } from './js/shared.js';
 
 let dashboard;
-const history = new HistoryDialog(() => dashboard.windowDays);
+const history = new HistoryDialog();
 dashboard = new DashboardPanel((target, name) => history.open(target, name));
 const usage = new UsagePanel();
 const alerts = new AlertCenter();
@@ -15,11 +15,6 @@ document.querySelectorAll('[data-filter]').forEach((button) => {
     activateToggle('[data-filter]', button);
     dashboard.setFilter(button.dataset.filter);
   });
-});
-
-$('#windowSelect').addEventListener('change', (event) => {
-  dashboard.setWindow(Number(event.target.value));
-  void dashboard.load();
 });
 
 $('#usagePeriodSelect').addEventListener('change', (event) => {

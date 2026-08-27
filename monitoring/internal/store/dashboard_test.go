@@ -98,18 +98,21 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"CASE WHEN kind = 'group' AND source = 'aggregate' THEN 0 ELSE 1 END",
 		"CASE WHEN source = 'probe' THEN 0 WHEN source = 'history' THEN 1 ELSE 2 END",
 		"COALESCE(recent_ranked.status, 'unknown')",
-		"mc.target_key = t.target_key",
-		"mc.checked_at < bounds.start_at",
 		"LEFT JOIN LATERAL",
 		"ORDER BY mc.checked_at DESC, mc.id DESC",
 		"targets.last_activity_at >= latest_checks.checked_at",
-		"($2::bigint * INTERVAL '1 second')",
+		"NOW() - INTERVAL '24 hours' AS start_at",
+		"EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds",
 		"latest_evidence",
 		"latest_evidence_inputs",
+		"COALESCE(alert_states.failure_streak, 0) AS failure_streak",
+		"LEFT JOIN monitoring_alert_states alert_states ON alert_states.target_key = targets.target_key",
+		"e.failure_streak",
+		"CASE WHEN t.kind = 'group' THEN g.rate_multiplier::double precision END",
+		"LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL",
 		"targets.kind = 'group'",
 		"latest_checks.source = 'aggregate'",
 		"latest_checks.status, '') IN ('degraded', 'failed', 'error')",
-		"evidence.source = 'aggregate'",
 	} {
 		if !strings.Contains(dashboardQuery, fragment) {
 			t.Fatalf("dashboard query missing %q", fragment)
@@ -119,7 +122,10 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		t.Fatal("dashboard query must not expose a single latency outlier as P95")
 	}
 	if strings.Contains(dashboardQuery, "prior_samples AS MATERIALIZED") {
-		t.Fatal("dashboard query must not scan all checks before the selected window")
+		t.Fatal("dashboard query must not scan checks before the fixed 24-hour window")
+	}
+	if strings.Contains(dashboardQuery, "INTERVAL '1 day'") || strings.Contains(dashboardQuery, "$") {
+		t.Fatal("dashboard query must not accept a configurable health window")
 	}
 	if count := strings.Count(dashboardQuery, "FROM usage_logs ul"); count != 1 {
 		t.Fatalf("dashboard query scans usage_logs %d times, want one filtered source", count)
@@ -132,15 +138,28 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 }
 
-func TestDashboardStaleSecondsHasAUsableMinimum(t *testing.T) {
-	if got := dashboardStaleSeconds(0); got != 1 {
-		t.Fatalf("zero stale duration = %d seconds, want minimum 1", got)
+func TestEffectiveDashboardStatusRequiresConfirmedAggregateFailures(t *testing.T) {
+	if got := effectiveDashboardStatus(model.KindGroup, model.StatusFailed, "aggregate", 1, 2); got != model.StatusDegraded {
+		t.Fatalf("single aggregate failure = %q, want degraded", got)
 	}
-	if got := dashboardStaleSeconds(1500 * time.Millisecond); got != 1 {
-		t.Fatalf("sub-second-rounded stale duration = %d seconds, want 1", got)
+	if got := effectiveDashboardStatus(model.KindGroup, model.StatusError, "aggregate", 1, 2); got != model.StatusDegraded {
+		t.Fatalf("single aggregate error = %q, want degraded", got)
 	}
-	if got := dashboardStaleSeconds(2 * time.Minute); got != 120 {
-		t.Fatalf("two-minute stale duration = %d seconds, want 120", got)
+	if got := effectiveDashboardStatus(model.KindGroup, model.StatusFailed, "aggregate", 2, 2); got != model.StatusFailed {
+		t.Fatalf("confirmed aggregate failure = %q, want failed", got)
+	}
+	if got := effectiveDashboardStatus(model.KindAccount, model.StatusFailed, "aggregate", 1, 2); got != model.StatusFailed {
+		t.Fatalf("account failure must not be downgraded = %q", got)
+	}
+	if got := effectiveDashboardStatus(model.KindGroup, model.StatusFailed, "probe", 1, 2); got != model.StatusFailed {
+		t.Fatalf("non-aggregate group failure must not be downgraded = %q", got)
+	}
+}
+
+func TestPendingAggregateFailureMessageClarifiesUnconfirmedState(t *testing.T) {
+	message := pendingAggregateFailureMessage(sql.NullString{String: "0/2 accounts healthy", Valid: true})
+	if message != "最近一次分组检查失败：分组内健康账户 0/2；等待下一轮确认" {
+		t.Fatalf("pending aggregate message = %q", message)
 	}
 }
 
@@ -155,15 +174,13 @@ func TestCarryForwardStatusSamples(t *testing.T) {
 		{Status: model.StatusUnknown, CheckedAt: start.Add(5 * time.Hour)},
 	}
 
-	priorAt := start.Add(-time.Hour)
-	prior := &model.StatusSample{Status: model.StatusDegraded, CheckedAt: priorAt, Source: "aggregate"}
-	carryForwardStatusSamples(samples, prior)
+	carryForwardStatusSamples(samples)
 
-	if samples[0].Status != model.StatusDegraded || samples[0].Source != "aggregate" {
-		t.Fatalf("leading sample did not carry the prior state: %+v", samples[0])
+	if samples[0].Status != model.StatusUnknown || samples[0].Source != "" {
+		t.Fatalf("leading sample without an in-window observation must stay unknown: %+v", samples[0])
 	}
-	if samples[0].CarriedFrom == nil || !samples[0].CarriedFrom.Equal(priorAt) {
-		t.Fatalf("leading sample has wrong carried origin: %+v", samples[0])
+	if samples[0].CarriedFrom != nil {
+		t.Fatalf("leading unknown sample must not be marked as carried: %+v", samples[0])
 	}
 	if samples[1].CarriedFrom != nil {
 		t.Fatalf("observed sample must not be marked as carried: %+v", samples[1])
@@ -186,7 +203,7 @@ func TestCarryForwardStatusSamples(t *testing.T) {
 
 func TestCarryForwardStatusSamplesLeavesUnknownWithoutPriorState(t *testing.T) {
 	samples := []model.StatusSample{{Status: model.StatusUnknown, CheckedAt: time.Now().UTC()}}
-	carryForwardStatusSamples(samples, nil)
+	carryForwardStatusSamples(samples)
 	if samples[0].Status != model.StatusUnknown || samples[0].CarriedFrom != nil {
 		t.Fatalf("sample without any prior state must stay unknown: %+v", samples[0])
 	}

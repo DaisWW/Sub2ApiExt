@@ -18,15 +18,12 @@ type Config struct {
 	RequestTimeout    time.Duration
 	Retention         time.Duration
 	ProbeConcurrency  int
-	WindowDays        int
 	FailureThreshold  int
 	RecoveryThreshold int
 	DefaultModel      string
 	AllowPrivateHost  bool
 	FrameAncestors    string
 }
-
-const maxWindowDays = 90
 
 func Load() (Config, error) {
 	frameAncestors, err := parseFrameAncestors(envString("MONITORING_FRAME_ANCESTORS", "'self'"))
@@ -40,7 +37,6 @@ func Load() (Config, error) {
 		RequestTimeout:    envDuration("MONITORING_REQUEST_TIMEOUT", 30*time.Second),
 		Retention:         envDuration("MONITORING_RETENTION", 30*24*time.Hour),
 		ProbeConcurrency:  envInt("MONITORING_PROBE_CONCURRENCY", 8),
-		WindowDays:        envInt("MONITORING_WINDOW_DAYS", 7),
 		FailureThreshold:  envInt("MONITORING_FAILURE_THRESHOLD", 2),
 		RecoveryThreshold: envInt("MONITORING_RECOVERY_THRESHOLD", 1),
 		DefaultModel:      envString("MONITORING_DEFAULT_MODEL", "gpt-4o-mini"),
@@ -58,9 +54,6 @@ func Load() (Config, error) {
 	}
 	if c.RequestTimeout <= 0 || c.Retention <= 0 || c.ProbeConcurrency <= 0 {
 		return Config{}, fmt.Errorf("monitoring timeout, retention, and concurrency must be positive")
-	}
-	if c.WindowDays <= 0 || c.WindowDays > maxWindowDays {
-		return Config{}, fmt.Errorf("MONITORING_WINDOW_DAYS must be between 1 and %d", maxWindowDays)
 	}
 	if c.FailureThreshold <= 0 || c.RecoveryThreshold <= 0 {
 		return Config{}, fmt.Errorf("alert thresholds must be positive")

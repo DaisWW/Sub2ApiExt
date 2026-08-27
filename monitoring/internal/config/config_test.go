@@ -42,14 +42,6 @@ func TestLoadRejectsNonPositiveRetention(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsWindowBeyondHistoryLimit(t *testing.T) {
-	t.Setenv("DATABASE_HOST", "db.example.test")
-	t.Setenv("MONITORING_WINDOW_DAYS", "91")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected window beyond history limit to be rejected")
-	}
-}
-
 func TestParseFrameAncestorsAcceptsOriginsAndNormalizesDuplicates(t *testing.T) {
 	got, err := parseFrameAncestors("'self', HTTPS://Dashboard.Example:8443/ https://dashboard.example:8443")
 	if err != nil {

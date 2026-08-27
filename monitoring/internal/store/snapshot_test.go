@@ -74,6 +74,15 @@ func TestBuildSnapshotRequiresAnEnabledChannelForGroupRouting(t *testing.T) {
 	}
 }
 
+func TestAccountStatusesAreNormalizedForMonitoringTargets(t *testing.T) {
+	for _, status := range []string{" ACTIVE ", "Error"} {
+		account := model.Account{Status: status, Schedulable: true}
+		if !accountIsMonitored(account) || !accountHistoryEligible(account) {
+			t.Fatalf("status %q was not recognized as a monitored account", status)
+		}
+	}
+}
+
 func TestFilterGroupMembersPreservesConfiguredPriority(t *testing.T) {
 	accounts := map[int64]*model.Account{
 		1: {ID: 1, Priority: 30, Status: "active", Schedulable: true},
@@ -106,7 +115,7 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 		"INTERVAL '24 hours'",
 		"channel_groups",
 		"JOIN channels",
-		"c.status = 'active'",
+		"LOWER(TRIM(c.status)) = 'active'",
 		"last_probe.error_class",
 		"last_probe.status_code",
 		"failure_streak",

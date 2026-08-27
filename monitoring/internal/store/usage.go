@@ -97,7 +97,7 @@ func parseUsagePeriod(value string) (usagePeriod, error) {
 	}
 	switch key {
 	case "1h":
-		return usagePeriod{key: key, label: "最近 1 小时", bucket: "hour", duration: time.Hour}, nil
+		return usagePeriod{key: key, label: "最近 1 小时", bucket: "minute", duration: time.Hour}, nil
 	case "24h":
 		return usagePeriod{key: key, label: "最近 24 小时", bucket: "hour", duration: 24 * time.Hour}, nil
 	case "today":
@@ -168,6 +168,9 @@ SELECT COUNT(*)::bigint,
 
 func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]model.UsageBucket, error) {
 	step := "1 hour"
+	if bounds.bucket == "minute" {
+		step = "1 minute"
+	}
 	if bounds.bucket == "day" {
 		step = "1 day"
 	}

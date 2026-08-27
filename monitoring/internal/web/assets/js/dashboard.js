@@ -17,7 +17,6 @@ import {
 export class DashboardPanel {
   dashboard = null;
   filter = 'group';
-  windowDays = 1;
   #requests = new LatestRequest();
   #openHistory;
   #nextProbeAt = 0;
@@ -37,14 +36,10 @@ export class DashboardPanel {
     this.render();
   }
 
-  setWindow(days) {
-    this.windowDays = days;
-  }
-
   async load() {
     const requestId = this.#requests.begin();
     try {
-      const dashboard = await api(`/api/v1/monitor/dashboard?window=${this.windowDays}`);
+      const dashboard = await api('/api/v1/monitor/dashboard');
       if (!this.#requests.isCurrent(requestId)) return;
       this.dashboard = dashboard;
       this.render();
@@ -69,7 +64,7 @@ export class DashboardPanel {
   #renderOverview() {
     const summary = this.dashboard.summary || {};
     $('#overallTitle').textContent = summary.targets ? '服务状态' : '等待探测数据';
-    $('#overallMeta').textContent = `${summary.targets || 0} 个对象 · ${windowLabel(this.windowDays)}统计 · 最近更新 ${formatTime(this.dashboard.generated_at)}`;
+    $('#overallMeta').textContent = `${summary.targets || 0} 个对象 · 24 小时统计 · 最近更新 ${formatTime(this.dashboard.generated_at)}`;
     this.#probeRunning = Boolean(this.dashboard.probe_running);
     this.#intervalSeconds = Math.max(0, Number(this.dashboard.interval_seconds || 0));
     const nextProbeAt = new Date(this.dashboard.next_probe_at || '');
@@ -150,6 +145,7 @@ export class DashboardPanel {
     const availabilityLabel = hasSamples ? `${samples} 次样本` : '暂无样本';
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
     const availabilityTone = hasSamples ? availabilityClass(stats.availability, status) : 'neutral';
+    const currentRate = item.kind === 'group' ? formatCurrentRate(item.rate_multiplier) : '';
     const groupNote = item.kind === 'group' && item.latest_message
       ? `<div class="target-note">${escapeHTML(item.latest_message)}</div>`
       : '';
@@ -157,26 +153,29 @@ export class DashboardPanel {
       <article class="target-card target-${status}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
         role="button" tabindex="0" aria-label="查看 ${escapeHTML(item.name)} 的历史记录">
         <div class="target-head">
-          <div>
+          <div class="target-copy">
             <div class="target-kind">${item.kind === 'group' ? 'GROUP' : 'ACCOUNT'}</div>
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
             <div class="target-platform">${escapeHTML(item.platform || 'mixed')}${item.stale ? `<span class="stale-label">● ${escapeHTML(staleLabel(item, status))}</span>` : ''}</div>
             ${groupNote}
           </div>
-          <span class="status-badge ${statusClass(status)}">${statusLabel(status)}</span>
+          <div class="target-head-meta">
+            ${currentRate ? `<span class="current-rate" title="当前分组倍率">当前倍率 ${currentRate}</span>` : ''}
+            <span class="status-badge ${statusClass(status)}">${statusLabel(status)}</span>
+          </div>
         </div>
         <div class="availability">
-          <span class="availability-label">${windowLabel(this.windowDays)}窗口观测通过率 · ${availabilityLabel}</span>
+          <span class="availability-label">24 小时窗口观测通过率 · ${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
         </div>
         <div class="metrics">
-          ${renderMetric('首字中位数', formatMedianMs(firstByte), '所选范围内成功样本的首字/首字节中位数')}
+          ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 24 小时成功样本的首字/首字节中位数')}
           ${renderMetric('最快', formatMs(latency.fastest_ms))}
           ${renderMetric('中位数', formatMedianMs(latency))}
           ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值')}
         </div>
         <div class="card-foot">
-          ${renderStatusHistory(item.recent_samples || [], this.windowDays)}
+          ${renderStatusHistory(item.recent_samples || [])}
           <span>最近验证 · ${source} · ${formatTime(item.last_checked_at)}</span>
         </div>
       </article>`;
@@ -201,7 +200,13 @@ function formatCountdown(seconds) {
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-function renderStatusHistory(samples, windowDays) {
+function formatCurrentRate(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const rate = Number(value);
+  return Number.isFinite(rate) ? rate.toFixed(4) : '';
+}
+
+function renderStatusHistory(samples) {
   const recent = samples.slice(-24);
   const empty = Array.from({ length: 24 - recent.length }, () => '<i aria-hidden="true"></i>');
   const items = recent.map((sample) => {
@@ -218,7 +223,7 @@ function renderStatusHistory(samples, windowDays) {
     const classes = [tone, carried ? 'carried' : ''].filter(Boolean).join(' ');
     return `<i${classes ? ` class="${classes}"` : ''} role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
   });
-  return `<div class="status-history" aria-label="${windowLabel(windowDays)}内 24 段状态轨迹">${empty.concat(items).join('')}</div>`;
+  return `<div class="status-history" aria-label="24 小时内 24 段状态轨迹">${empty.concat(items).join('')}</div>`;
 }
 
 function renderMetric(label, value, help = '') {
@@ -228,12 +233,8 @@ function renderMetric(label, value, help = '') {
 
 function sourceLabel(source) {
   if (source === 'history') return '真实请求';
-  if (source === 'aggregate') return '分组聚合';
+  if (source === 'aggregate') return '分组候选检查';
   return source ? '主动探测' : '暂无来源';
-}
-
-function windowLabel(days) {
-  return Number(days) === 1 ? '24 小时' : `${days} 天`;
 }
 
 function staleLabel(item, status) {

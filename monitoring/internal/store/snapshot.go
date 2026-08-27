@@ -43,7 +43,7 @@ WITH recent_account_usage AS MATERIALIZED (
     SELECT DISTINCT cg.group_id
     FROM channel_groups cg
     JOIN channels c ON c.id = cg.channel_id
-    WHERE c.status = 'active'
+    WHERE LOWER(TRIM(c.status)) = 'active'
 )
 SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.credentials,
        a.updated_at,
@@ -331,7 +331,7 @@ func accountIsEnabled(account model.Account) bool {
 
 // accountIsMonitored 保留启用账户和错误账户；错误账户仅用于恢复探测，不进入启用统计。
 func accountIsMonitored(account model.Account) bool {
-	return account.Status == "error" || accountIsEnabled(account)
+	return strings.EqualFold(strings.TrimSpace(account.Status), "error") || accountIsEnabled(account)
 }
 
 func filterIDs(values []int64, allowed map[int64]struct{}) []int64 {
@@ -425,7 +425,8 @@ func credentialString(credentials map[string]any, key string) string {
 }
 
 func accountHistoryEligible(account model.Account) bool {
-	return account.Status == "active" || account.Status == "error"
+	status := strings.TrimSpace(account.Status)
+	return strings.EqualFold(status, "active") || strings.EqualFold(status, "error")
 }
 
 func groupIsActive(status string) bool {

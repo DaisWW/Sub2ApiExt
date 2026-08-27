@@ -260,6 +260,38 @@ func TestRouteCriticalAccountsIncludesEntirePrimaryTier(t *testing.T) {
 	}
 }
 
+func TestRouteCriticalAccountsFindsPrimaryTierInUnsortedMembers(t *testing.T) {
+	snapshot := model.Snapshot{Groups: []model.Group{{
+		ID: 31, ProbeEnabled: true,
+		Members: []model.GroupMember{
+			{AccountID: 3, AccountPriority: 2, GroupPriority: 1},
+			{AccountID: 2, AccountPriority: 1, GroupPriority: 2},
+			{AccountID: 1, AccountPriority: 1, GroupPriority: 2},
+			{AccountID: 4, AccountPriority: 1, GroupPriority: 3},
+		},
+	}}}
+	critical := routeCriticalAccounts(snapshot)
+	for _, accountID := range []int64{1, 2} {
+		if _, ok := critical[accountID]; !ok {
+			t.Fatalf("unsorted primary-tier account %d was not selected", accountID)
+		}
+	}
+	for _, accountID := range []int64{3, 4} {
+		if _, ok := critical[accountID]; ok {
+			t.Fatalf("fallback account %d was selected as route critical", accountID)
+		}
+	}
+}
+
+func TestProbeEligibilityNormalizesAccountStatus(t *testing.T) {
+	if !probeEligible(model.Account{Status: " ACTIVE ", Schedulable: true}) {
+		t.Fatal("normalized active account should be probe eligible")
+	}
+	if !probeEligible(model.Account{Status: " ERROR "}) {
+		t.Fatal("normalized error account should be probe eligible")
+	}
+}
+
 func TestNewCycleBatchDoesNotTreatDisabledProbeAsEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	updated := now.Add(-2 * time.Hour)
@@ -305,6 +337,47 @@ func TestAggregateGroupsSkipsCachedOnlyCycle(t *testing.T) {
 	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
 	if len(batch.observations) != 0 || len(batch.persisted) != 0 {
 		t.Fatalf("纯缓存轮次不应生成分组观测：%+v", batch)
+	}
+}
+
+func TestAggregateGroupsUsesMembersWhenAccountIDsAreMissing(t *testing.T) {
+	now := time.Now().UTC()
+	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
+		1: {TargetKey: "account:1", Kind: model.KindAccount, EntityID: 1, Status: model.StatusOperational, Source: "probe", CheckedAt: now},
+	}}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{{ID: 1, Status: "active", Schedulable: true}},
+		Groups:   []model.Group{{ID: 16, Status: "active", ProbeEnabled: true, Members: []model.GroupMember{{AccountID: 1}}}},
+	}
+
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.observations) != 1 || batch.observations[0].Status != model.StatusOperational {
+		t.Fatalf("Members-only group did not aggregate its result: %+v", batch.observations)
+	}
+	if len(batch.persisted) != 1 || batch.persisted[0].TargetKey != "group:16" {
+		t.Fatalf("Members-only aggregate was not persisted: %+v", batch.persisted)
+	}
+}
+
+func TestAggregateGroupsPersistsAllKnownProbeFailures(t *testing.T) {
+	now := time.Now().UTC()
+	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
+		1: {TargetKey: "account:1", Kind: model.KindAccount, EntityID: 1, Status: model.StatusFailed, Source: "probe", CheckedAt: now},
+		2: {TargetKey: "account:2", Kind: model.KindAccount, EntityID: 2, Status: model.StatusError, Source: "probe", CheckedAt: now},
+	}}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{
+			{ID: 1, Status: "active", Schedulable: true},
+			{ID: 2, Status: "active", Schedulable: true},
+		},
+		Groups: []model.Group{{ID: 17, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1, 2}, Members: []model.GroupMember{
+			{AccountID: 1}, {AccountID: 2},
+		}}},
+	}
+
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusFailed || batch.persisted[0].Message != "0/2 accounts healthy" {
+		t.Fatalf("all failed candidates did not persist a failed aggregate: %+v", batch.persisted)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,11 +75,8 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	return s.runCycle(ctx)
 }
 
-func (s *Service) DashboardWindow(ctx context.Context, days int) (model.Dashboard, error) {
-	if days <= 0 || days > 90 {
-		days = s.cfg.WindowDays
-	}
-	dashboard, err := s.store.Dashboard(ctx, days, s.cfg.Interval*2, int(s.cfg.Interval/time.Second))
+func (s *Service) Dashboard(ctx context.Context) (model.Dashboard, error) {
+	dashboard, err := s.store.Dashboard(ctx, s.cfg.Interval*2, int(s.cfg.Interval/time.Second), s.cfg.FailureThreshold)
 	if err != nil {
 		return model.Dashboard{}, err
 	}
@@ -100,8 +98,8 @@ func (s *Service) nextProbeAt() *time.Time {
 	return &next
 }
 
-func (s *Service) History(ctx context.Context, key string, days, limit int) ([]model.ProbeResult, error) {
-	return s.store.History(ctx, key, days, limit)
+func (s *Service) History(ctx context.Context, key string, limit int) ([]model.ProbeResult, error) {
+	return s.store.History(ctx, key, limit)
 }
 
 func (s *Service) UsageRanking(ctx context.Context, period string, limit int) (model.UsageRanking, error) {
@@ -113,5 +111,17 @@ func (s *Service) Alerts(ctx context.Context, limit int) ([]model.Alert, error) 
 }
 
 func probeEligible(account model.Account) bool {
-	return account.Status == "error" || (account.Status == "active" && account.Schedulable)
+	return accountIsError(account) || accountIsEnabled(account)
+}
+
+func accountIsActive(account model.Account) bool {
+	return strings.EqualFold(strings.TrimSpace(account.Status), "active")
+}
+
+func accountIsError(account model.Account) bool {
+	return strings.EqualFold(strings.TrimSpace(account.Status), "error")
+}
+
+func accountIsEnabled(account model.Account) bool {
+	return accountIsActive(account) && account.Schedulable
 }

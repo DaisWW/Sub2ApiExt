@@ -50,6 +50,8 @@ C:\ProgramData\Sub2API\extensions\
 
 监控面板默认监听 `0.0.0.0:18090`，部署完成后可从同一局域网通过主机名或 IP 访问。部署脚本会校验或创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则，无法安全配置时会停止部署；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再重新运行部署脚本。
 
+监控首次部署时会从 Sub2API 的 `frontend_url`（为空时回退 `api_base_url`）自动生成 iframe 来源白名单；已有 `MONITORING_FRAME_ANCESTORS` 自定义配置会保留。部署脚本不会自动创建“渠道监控”菜单，菜单入口仍需在 Sub2API 中手动配置。
+
 每个运行目录都会安装 `manage.bat`：
 
 ```bat

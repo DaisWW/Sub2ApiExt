@@ -71,7 +71,7 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	dashboard, err := s.service.DashboardWindow(r.Context(), queryInt(r, "window", 0))
+	dashboard, err := s.service.Dashboard(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -102,9 +102,8 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "target must be account:<id> or group:<id>")
 		return
 	}
-	days := boundedQueryInt(r, "days", 7, 1, 90)
 	limit := boundedQueryInt(r, "limit", 240, 1, 1000)
-	items, err := s.service.History(r.Context(), key, days, limit)
+	items, err := s.service.History(r.Context(), key, limit)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return

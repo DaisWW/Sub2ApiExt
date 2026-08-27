@@ -12,10 +12,9 @@ import (
 
 const dashboardQuery = `
 WITH bounds AS (
-    SELECT NOW() - ($1::int * INTERVAL '1 day') AS start_at,
+    SELECT NOW() - INTERVAL '24 hours' AS start_at,
            NOW() AS end_at,
-           NOW() - ($2::bigint * INTERVAL '1 second') AS stale_at,
-           EXTRACT(EPOCH FROM ($1::int * INTERVAL '1 day')) / 24 AS bucket_seconds
+           EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds
 ), active_accounts AS MATERIALIZED (
 	SELECT id
 	FROM accounts
@@ -108,6 +107,7 @@ WITH bounds AS (
     SELECT targets.target_key, targets.kind, targets.last_activity_at,
            latest_checks.status, latest_checks.latency_ms, latest_checks.first_byte_ms,
            latest_checks.checked_at, latest_checks.source, latest_checks.message,
+           COALESCE(alert_states.failure_streak, 0) AS failure_streak,
            CASE WHEN targets.last_activity_at IS NOT NULL
                       AND NOT (
                           targets.kind = 'group'
@@ -120,6 +120,7 @@ WITH bounds AS (
     FROM monitoring_targets targets
     CROSS JOIN bounds
     LEFT JOIN latest_checks ON latest_checks.target_key = targets.target_key
+    LEFT JOIN monitoring_alert_states alert_states ON alert_states.target_key = targets.target_key
 ), latest_evidence AS (
     SELECT target_key,
            CASE WHEN history_wins THEN 'operational' ELSE status END AS status,
@@ -127,73 +128,51 @@ WITH bounds AS (
            CASE WHEN history_wins THEN NULL ELSE first_byte_ms END AS first_byte_ms,
            CASE WHEN history_wins THEN last_activity_at ELSE checked_at END AS checked_at,
            CASE WHEN history_wins THEN 'history' ELSE source END AS source,
-           CASE WHEN history_wins THEN '近期真实请求' ELSE message END AS message
+           CASE WHEN history_wins THEN '近期真实请求' ELSE message END AS message,
+           failure_streak
     FROM latest_evidence_inputs
 )
 SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t.probe_enabled,
-       e.status, e.latency_ms, e.first_byte_ms, e.checked_at, e.source, e.message,
+       CASE WHEN t.kind = 'group' THEN g.rate_multiplier::double precision END,
+       e.status, e.latency_ms, e.first_byte_ms, e.checked_at, e.source, e.message, e.failure_streak,
        COALESCE(s.samples,0), COALESCE(s.successful,0),
-	       s.first_fastest, s.first_median, s.first_p95,
-	       s.latency_fastest, s.latency_median, s.latency_p95,
-	       COALESCE(r.samples, '[]'::jsonb), p.status, p.checked_at, p.source
+       s.first_fastest, s.first_median, s.first_p95,
+       s.latency_fastest, s.latency_median, s.latency_p95,
+       COALESCE(r.samples, '[]'::jsonb)
 FROM monitoring_targets t
 CROSS JOIN bounds
+LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL
 LEFT JOIN latest_evidence e ON e.target_key = t.target_key
 LEFT JOIN stats s ON s.target_key = t.target_key
 LEFT JOIN recent r ON r.target_key = t.target_key
-LEFT JOIN LATERAL (
-	SELECT evidence.status, evidence.checked_at, evidence.source
-	FROM (
-		(
-			SELECT mc.status, mc.checked_at, mc.source
-			FROM monitoring_checks mc
-			WHERE mc.target_key = t.target_key
-			  AND mc.checked_at < bounds.start_at
-			  AND mc.status NOT IN ('unknown', 'disabled')
-			ORDER BY mc.checked_at DESC, mc.id DESC
-			LIMIT 1
-		)
-		UNION ALL
-		SELECT 'operational', t.last_activity_at, 'history'
-		WHERE t.last_activity_at IS NOT NULL AND t.last_activity_at < bounds.start_at
-	) evidence
-	ORDER BY CASE WHEN t.kind = 'group'
-	                       AND evidence.source = 'aggregate'
-	                       AND evidence.status IN ('degraded', 'failed', 'error')
-	                  THEN 0 ELSE 1 END,
-	         evidence.checked_at DESC,
-	         CASE WHEN evidence.source = 'probe' THEN 0 WHEN evidence.source = 'history' THEN 1 ELSE 2 END
-	LIMIT 1
-) p ON TRUE
 WHERE t.active = TRUE AND LOWER(TRIM(t.source_status)) = 'active'
 ORDER BY CASE WHEN t.kind = 'group' THEN 0 ELSE 1 END, t.name, t.entity_id`
 
-func (s *Store) Dashboard(ctx context.Context, windowDays int, staleAfter time.Duration, intervalSec int) (model.Dashboard, error) {
-	rows, err := s.db.QueryContext(ctx, dashboardQuery, windowDays, dashboardStaleSeconds(staleAfter))
+func (s *Store) Dashboard(ctx context.Context, staleAfter time.Duration, intervalSec int, failureThreshold ...int) (model.Dashboard, error) {
+	rows, err := s.db.QueryContext(ctx, dashboardQuery)
 	if err != nil {
 		return model.Dashboard{}, fmt.Errorf("load dashboard: %w", err)
 	}
 	defer rows.Close()
-	return buildDashboard(rows, windowDays, staleAfter, intervalSec)
+	return buildDashboard(rows, staleAfter, intervalSec, normalizeFailureThreshold(failureThreshold...))
 }
 
-func dashboardStaleSeconds(staleAfter time.Duration) int64 {
-	seconds := int64(staleAfter / time.Second)
-	if seconds < 1 {
-		return 1
+func normalizeFailureThreshold(values ...int) int {
+	if len(values) > 0 && values[0] > 0 {
+		return values[0]
 	}
-	return seconds
+	return 2
 }
 
-func buildDashboard(rows *sql.Rows, windowDays int, staleAfter time.Duration, intervalSec int) (model.Dashboard, error) {
+func buildDashboard(rows *sql.Rows, staleAfter time.Duration, intervalSec, failureThreshold int) (model.Dashboard, error) {
 	now := time.Now().UTC()
 	dashboard := model.Dashboard{
-		GeneratedAt: now, WindowDays: windowDays, IntervalSec: intervalSec,
+		GeneratedAt: now, IntervalSec: intervalSec,
 		Targets: []model.DashboardTarget{},
 	}
 	availabilityTargets := 0
 	for rows.Next() {
-		target, hasAvailability, err := scanDashboardTarget(rows, now, staleAfter)
+		target, hasAvailability, err := scanDashboardTarget(rows, now, staleAfter, failureThreshold)
 		if err != nil {
 			return model.Dashboard{}, err
 		}
@@ -212,46 +191,72 @@ func buildDashboard(rows *sql.Rows, windowDays int, staleAfter time.Duration, in
 	return dashboard, nil
 }
 
-func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration) (model.DashboardTarget, bool, error) {
+func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration, failureThreshold int) (model.DashboardTarget, bool, error) {
 	var target model.DashboardTarget
 	var latestStatus, latestSource, latestMessage sql.NullString
 	var latestLatency, latestFirst sql.NullInt64
 	var latestAt sql.NullTime
+	var latestFailureStreak int
 	var samples, successful int
 	var firstFastest, latencyFastest sql.NullInt64
 	var firstMedian, firstP95, latencyMedian, latencyP95 sql.NullFloat64
 	var recentJSON []byte
-	var priorStatus, priorSource sql.NullString
-	var priorAt sql.NullTime
+	var currentRate sql.NullFloat64
 	if err := rows.Scan(
 		&target.Key, &target.Kind, &target.EntityID, &target.Name, &target.Platform,
 		&target.SourceStatus, &target.ProbeEnabled,
+		&currentRate,
 		&latestStatus, &latestLatency,
-		&latestFirst, &latestAt, &latestSource, &latestMessage, &samples, &successful,
+		&latestFirst, &latestAt, &latestSource, &latestMessage, &latestFailureStreak, &samples, &successful,
 		&firstFastest, &firstMedian, &firstP95, &latencyFastest,
-		&latencyMedian, &latencyP95, &recentJSON, &priorStatus, &priorAt, &priorSource,
+		&latencyMedian, &latencyP95, &recentJSON,
 	); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("scan dashboard: %w", err)
 	}
+	if currentRate.Valid {
+		value := currentRate.Float64
+		target.RateMultiplier = &value
+	}
 	applyLatestTargetStateWithMessage(&target, latestStatus, latestSource, latestMessage, latestLatency, latestFirst, latestAt, now, staleAfter)
+	if latestStatus.Valid && latestSource.Valid {
+		originalStatus := target.Status
+		target.Status = effectiveDashboardStatus(target.Kind, originalStatus, target.LatestSource, latestFailureStreak, failureThreshold)
+		if originalStatus != target.Status && target.Kind == model.KindGroup && target.LatestSource == "aggregate" {
+			target.LatestMessage = pendingAggregateFailureMessage(latestMessage)
+		}
+	}
 	target.Stats = targetStats(samples, successful, firstFastest, firstMedian, firstP95, latencyFastest, latencyMedian, latencyP95)
 	if err := json.Unmarshal(recentJSON, &target.RecentSamples); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("decode recent samples: %w", err)
 	}
-	var prior *model.StatusSample
-	if priorStatus.Valid && priorAt.Valid {
-		prior = &model.StatusSample{Status: priorStatus.String, CheckedAt: priorAt.Time.UTC(), Source: priorSource.String}
-	}
-	carryForwardStatusSamples(target.RecentSamples, prior)
+	carryForwardStatusSamples(target.RecentSamples)
 	return target, targetContributesAvailability(target), nil
 }
 
-func carryForwardStatusSamples(samples []model.StatusSample, priorSample *model.StatusSample) {
-	var previous *model.StatusSample
-	if priorSample != nil {
-		observed := *priorSample
-		previous = &observed
+func effectiveDashboardStatus(kind, status, source string, failureStreak, failureThreshold int) string {
+	if kind != model.KindGroup || source != "aggregate" ||
+		(status != model.StatusFailed && status != model.StatusError) {
+		return status
 	}
+	if failureStreak < normalizeFailureThreshold(failureThreshold) {
+		return model.StatusDegraded
+	}
+	return status
+}
+
+func pendingAggregateFailureMessage(message sql.NullString) string {
+	detail := ""
+	if message.Valid {
+		detail = sanitizeUpstreamMessage(message.String)
+	}
+	if detail == "" {
+		return "最近一次分组检查失败，等待下一轮确认"
+	}
+	return "最近一次分组检查失败：" + detail + "；等待下一轮确认"
+}
+
+func carryForwardStatusSamples(samples []model.StatusSample) {
+	var previous *model.StatusSample
 	for i := range samples {
 		sample := &samples[i]
 		switch sample.Status {

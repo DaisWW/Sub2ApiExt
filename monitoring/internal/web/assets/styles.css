@@ -198,6 +198,9 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .target-card:hover { border-color: #50647b; background: var(--surface-raised); transform: translateY(-2px); }
 .target-card:focus-visible { border-color: var(--blue); background: var(--surface-raised); }
 .target-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.target-copy { min-width: 0; }
+.target-head-meta { flex: 0 0 auto; display: flex; align-items: flex-end; gap: 7px; flex-direction: column; }
+.current-rate { color: var(--soft); font-size: 11px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .target-kind { color: var(--muted); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
 .target-name { margin: 5px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 700; }
 .target-platform { margin-top: 5px; color: var(--muted); font-size: 12px; }

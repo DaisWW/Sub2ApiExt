@@ -159,7 +159,10 @@ function renderUsageKPI([label, value, note, color]) {
 
 function renderUsageCards(sourceItems, emptyText, kind) {
   const container = $('#usageEntityCardList');
-  const items = Array.isArray(sourceItems) ? sourceItems : [];
+  const items = (Array.isArray(sourceItems) ? sourceItems : [])
+    .slice()
+    .sort((left, right) => String(left.name || '').trim().localeCompare(String(right.name || '').trim(), 'zh-CN')
+      || String(left.key).localeCompare(String(right.key), 'zh-CN'));
   if (!items.length) {
     container.innerHTML = '<div class="empty-state usage-entity-empty">' + emptyText + '</div>';
     return;
@@ -376,7 +379,7 @@ function renderUsageBars(timeline, bucket, metric, period) {
   const values = metric === 'unit_cost'
     ? points.flatMap((item) => pointChannels(item).map((channel) => trendValue(channel, metric)))
     : points.map((item) => trendValue(item, metric));
-  $('#usageTrendBucket').textContent = bucket === 'day' ? '按天' : '按小时';
+  $('#usageTrendBucket').textContent = trendBucketLabel(bucket);
   chart.style.setProperty('--point-count', String(Math.max(points.length, 1)));
   chart.style.setProperty('--point-width', `${metric === 'unit_cost' ? Math.max(42, channels.length * 12 + 14) : 42}px`);
   chart.classList.toggle('is-empty', !points.length || values.every((value) => value <= 0));
@@ -500,15 +503,22 @@ function channelColor(index) {
 
 function bucketLabels(value, bucket) {
   const date = new Date(value);
-  const short = bucket === 'hour'
-    ? `${String(date.getHours()).padStart(2, '0')}:00`
+  const hasTime = bucket === 'minute' || bucket === 'hour';
+  const short = hasTime
+    ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
     : `${date.getMonth() + 1}/${date.getDate()}`;
   const full = date.toLocaleString('zh-CN', {
     month: 'numeric', day: 'numeric',
-    hour: bucket === 'hour' ? '2-digit' : undefined,
-    minute: bucket === 'hour' ? '2-digit' : undefined
+    hour: hasTime ? '2-digit' : undefined,
+    minute: hasTime ? '2-digit' : undefined
   });
   return { short, full };
+}
+
+function trendBucketLabel(bucket) {
+  if (bucket === 'minute') return '按分钟';
+  if (bucket === 'day') return '按天';
+  return '按小时';
 }
 
 function formatTrendTick(value, metric) {

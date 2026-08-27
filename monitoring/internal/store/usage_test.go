@@ -19,10 +19,26 @@ func TestCacheHitRate(t *testing.T) {
 }
 
 func TestParseUsagePeriod(t *testing.T) {
-	for _, value := range []string{"1h", "24h", "today", "7d", "15d", "30d", "24H "} {
-		period, err := parseUsagePeriod(value)
+	cases := []struct {
+		value  string
+		bucket string
+	}{
+		{value: "1h", bucket: "minute"},
+		{value: "24h", bucket: "hour"},
+		{value: "today", bucket: "hour"},
+		{value: "7d", bucket: "day"},
+		{value: "15d", bucket: "day"},
+		{value: "30d", bucket: "day"},
+		{value: "24H ", bucket: "hour"},
+	}
+	for _, test := range cases {
+		period, err := parseUsagePeriod(test.value)
 		if err != nil || period.key == "" {
-			t.Errorf("parseUsagePeriod(%q) 返回 period=%+v, err=%v", value, period, err)
+			t.Errorf("parseUsagePeriod(%q) 返回 period=%+v, err=%v", test.value, period, err)
+			continue
+		}
+		if period.bucket != test.bucket {
+			t.Errorf("parseUsagePeriod(%q) bucket = %q, want %q", test.value, period.bucket, test.bucket)
 		}
 	}
 	if _, err := parseUsagePeriod("90d"); !errors.Is(err, ErrInvalidUsagePeriod) {
