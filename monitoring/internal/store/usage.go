@@ -162,6 +162,7 @@ SELECT COUNT(*)::bigint,
 	}
 	summary.CacheTokens = cacheCreate + cacheRead
 	summary.CacheRead = cacheRead
+	summary.CostPerMillionTokens = costPerMillionTokens(summary.TotalCost, summary.TotalTokens)
 	return nil
 }
 
@@ -179,6 +180,7 @@ func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]mo
 	    ) AS start_at
 	), usage AS (
 	    SELECT date_trunc('%s', ul.created_at) AS start_at,
+	           COALESCE(NULLIF(BTRIM(c.name), ''), '未归属渠道') AS channel_name,
 	           COUNT(*)::bigint AS requests,
 	           COALESCE(SUM(ul.input_tokens::bigint + ul.output_tokens::bigint + ul.cache_creation_tokens::bigint + ul.cache_read_tokens::bigint), 0)::bigint AS total_tokens,
 	           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
@@ -190,13 +192,14 @@ func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]mo
 	    JOIN groups g ON g.id = ul.group_id
 	                 AND g.deleted_at IS NULL
 	                 AND LOWER(TRIM(g.status)) = 'active'
+	    LEFT JOIN channels c ON c.id = ul.channel_id
 	    WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
-	    GROUP BY 1
+	    GROUP BY 1, 2
 	)
-SELECT buckets.start_at, COALESCE(usage.requests, 0), COALESCE(usage.total_tokens, 0), COALESCE(usage.total_cost, 0)
+SELECT buckets.start_at, COALESCE(usage.channel_name, ''), COALESCE(usage.requests, 0), COALESCE(usage.total_tokens, 0), COALESCE(usage.total_cost, 0)
 FROM buckets
 LEFT JOIN usage USING (start_at)
-ORDER BY buckets.start_at`, bounds.bucket, bounds.bucket, step, bounds.bucket)
+ORDER BY buckets.start_at, usage.channel_name`, bounds.bucket, bounds.bucket, step, bounds.bucket)
 	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end)
 	if err != nil {
 		return nil, err
@@ -204,12 +207,34 @@ ORDER BY buckets.start_at`, bounds.bucket, bounds.bucket, step, bounds.bucket)
 	defer rows.Close()
 	items := make([]model.UsageBucket, 0)
 	for rows.Next() {
-		var item model.UsageBucket
-		if err := rows.Scan(&item.StartAt, &item.Requests, &item.TotalTokens, &item.TotalCost); err != nil {
+		var startAt time.Time
+		var channel model.UsageChannelBucket
+		if err := rows.Scan(&startAt, &channel.Name, &channel.Requests, &channel.TotalTokens, &channel.TotalCost); err != nil {
 			return nil, err
 		}
-		item.StartAt = item.StartAt.UTC()
-		items = append(items, item)
+		startAt = startAt.UTC()
+		if len(items) == 0 || !items[len(items)-1].StartAt.Equal(startAt) {
+			items = append(items, model.UsageBucket{StartAt: startAt, Channels: []model.UsageChannelBucket{}})
+		}
+		item := &items[len(items)-1]
+		item.Requests += channel.Requests
+		item.TotalTokens += channel.TotalTokens
+		item.TotalCost += channel.TotalCost
+		if channel.Name == "" {
+			continue
+		}
+		channel.CostPerMillionTokens = costPerMillionTokens(channel.TotalCost, channel.TotalTokens)
+		item.Channels = append(item.Channels, channel)
+	}
+	for index := range items {
+		items[index].CostPerMillionTokens = costPerMillionTokens(items[index].TotalCost, items[index].TotalTokens)
 	}
 	return items, rows.Err()
+}
+
+func costPerMillionTokens(totalCost float64, totalTokens int64) float64 {
+	if totalTokens <= 0 {
+		return 0
+	}
+	return totalCost * 1_000_000 / float64(totalTokens)
 }

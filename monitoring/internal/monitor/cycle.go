@@ -18,7 +18,10 @@ type cycleBatch struct {
 	verifiedAccounts int
 }
 
-const recoveryProbeInterval = 15 * time.Minute
+const (
+	recoveryProbeInterval    = 15 * time.Minute
+	successEvidenceFreshness = 24 * time.Hour
+)
 
 type accountEvidence struct {
 	status    string
@@ -69,24 +72,34 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 		persisted:      make([]model.ProbeResult, 0, len(snapshot.Accounts)+len(snapshot.Groups)),
 	}
 	probeAccounts := make([]model.Account, 0, len(snapshot.Accounts))
+	criticalAccounts := routeCriticalAccounts(snapshot)
 	for _, account := range snapshot.Accounts {
 		if !probeEligible(account) {
 			continue
 		}
 		evidence := latestAccountEvidence(account)
 		if evidence.valid && successfulEvidence(evidence.status) {
-			if shouldObserveHistoryRecovery(account, evidence, now, interval) {
-				batch.addPassiveAccount(account)
-			} else {
-				batch.addCachedEvidence(account.ID, evidence)
+			if evidenceFresh(evidence, now, successEvidenceFreshness) {
+				if shouldObserveHistoryRecovery(account, evidence, now, interval) {
+					batch.addPassiveAccount(account)
+				} else {
+					batch.addCachedEvidence(account.ID, evidence)
+				}
+				batch.verifiedAccounts++
+				continue
 			}
-			batch.verifiedAccounts++
+			if _, critical := criticalAccounts[account.ID]; !critical || !probe.SupportsAccount(account) {
+				batch.addCachedUnknown(account.ID, evidence.checkedAt)
+				batch.deferredAccounts++
+				continue
+			}
+			probeAccounts = append(probeAccounts, account)
 			continue
 		}
 		if !probe.SupportsAccount(account) {
 			continue
 		}
-		probeInterval := max(interval, recoveryProbeInterval)
+		probeInterval := probeRetryDelay(account, interval)
 		if evidence.valid && evidence.checkedAt != nil && !probeDue(evidence.checkedAt, now, probeInterval) {
 			batch.addCachedEvidence(account.ID, evidence)
 			batch.deferredAccounts++
@@ -95,6 +108,72 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 		probeAccounts = append(probeAccounts, account)
 	}
 	return batch, probeAccounts
+}
+
+func evidenceFresh(evidence accountEvidence, now time.Time, freshness time.Duration) bool {
+	return evidence.checkedAt != nil && !evidence.checkedAt.Add(freshness).Before(now)
+}
+
+func probeRetryInterval(account model.Account, interval time.Duration) time.Duration {
+	retry := recoveryProbeInterval
+	if configurationFailure(account) {
+		retry = 24 * time.Hour
+	} else {
+		switch {
+		case account.ProbeFailureStreak >= 4:
+			retry = 24 * time.Hour
+		case account.ProbeFailureStreak == 3:
+			retry = 6 * time.Hour
+		case account.ProbeFailureStreak == 2:
+			retry = time.Hour
+		}
+	}
+	return max(interval, retry)
+}
+
+func probeRetryDelay(account model.Account, interval time.Duration) time.Duration {
+	base := probeRetryInterval(account, interval)
+	accountID := account.ID
+	if accountID < 0 {
+		accountID = -accountID
+	}
+	jitterPercent := accountID % 11
+	return base + time.Duration(jitterPercent)*base/100
+}
+
+func configurationFailure(account model.Account) bool {
+	if account.LastProbeStatusCode != nil && (*account.LastProbeStatusCode == 401 || *account.LastProbeStatusCode == 403) {
+		return true
+	}
+	switch account.LastProbeErrorClass {
+	case "configuration", "missing_credential":
+		return true
+	default:
+		return false
+	}
+}
+
+func routeCriticalAccounts(snapshot model.Snapshot) map[int64]struct{} {
+	critical := make(map[int64]struct{})
+	for _, group := range snapshot.Groups {
+		if !group.ProbeEnabled || len(group.Members) == 0 {
+			if group.ProbeEnabled {
+				for _, accountID := range group.AccountIDs {
+					critical[accountID] = struct{}{}
+				}
+			}
+			continue
+		}
+		primaryAccountPriority := group.Members[0].AccountPriority
+		primaryGroupPriority := group.Members[0].GroupPriority
+		for _, member := range group.Members {
+			if member.AccountPriority != primaryAccountPriority || member.GroupPriority != primaryGroupPriority {
+				break
+			}
+			critical[member.AccountID] = struct{}{}
+		}
+	}
+	return critical
 }
 
 func latestAccountEvidence(account model.Account) accountEvidence {
@@ -170,6 +249,20 @@ func (b *cycleBatch) addCachedEvidence(accountID int64, evidence accountEvidence
 	}
 }
 
+func (b *cycleBatch) addCachedUnknown(accountID int64, checkedAt *time.Time) {
+	if checkedAt == nil {
+		return
+	}
+	b.accountResults[accountID] = model.ProbeResult{
+		TargetKey: model.TargetKey(model.KindAccount, accountID),
+		Kind:      model.KindAccount,
+		EntityID:  accountID,
+		Status:    model.StatusUnknown,
+		CheckedAt: *checkedAt,
+		Source:    "cache",
+	}
+}
+
 func (b *cycleBatch) addProbeResults(results []model.ProbeResult) {
 	for _, result := range results {
 		b.persisted = append(b.persisted, result)
@@ -195,7 +288,7 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 			model.TargetKey(model.KindGroup, group.ID), aggregationGroup, memberResults, now,
 		)
 		b.observations = append(b.observations, result)
-		if containsProbe(memberResults) {
+		if containsPersistableObservation(memberResults) {
 			b.persisted = append(b.persisted, result)
 		}
 	}
@@ -294,6 +387,15 @@ func targetNames(snapshot model.Snapshot) map[string]string {
 	return names
 }
 
+func containsPersistableObservation(results []model.ProbeResult) bool {
+	for _, result := range results {
+		if result.Source == "probe" || result.Source == "history" {
+			return true
+		}
+	}
+	return false
+}
+
 func containsProbe(results []model.ProbeResult) bool {
 	for _, result := range results {
 		if result.Source == "probe" {
@@ -304,10 +406,5 @@ func containsProbe(results []model.ProbeResult) bool {
 }
 
 func containsFreshObservation(results []model.ProbeResult) bool {
-	for _, result := range results {
-		if result.Source == "probe" || result.Source == "history" {
-			return true
-		}
-	}
-	return false
+	return containsPersistableObservation(results)
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -46,5 +47,39 @@ func TestLoadRejectsWindowBeyondHistoryLimit(t *testing.T) {
 	t.Setenv("MONITORING_WINDOW_DAYS", "91")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected window beyond history limit to be rejected")
+	}
+}
+
+func TestParseFrameAncestorsAcceptsOriginsAndNormalizesDuplicates(t *testing.T) {
+	got, err := parseFrameAncestors("'self', HTTPS://Dashboard.Example:8443/ https://dashboard.example:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "'self' https://dashboard.example:8443" {
+		t.Fatalf("normalized frame ancestors = %q", got)
+	}
+}
+
+func TestParseFrameAncestorsRejectsWildcardAndNonOriginValues(t *testing.T) {
+	for _, value := range []string{"*", "https://*.example.com", "https://example.com/path", "javascript:alert(1)", "//example.com"} {
+		if _, err := parseFrameAncestors(value); err == nil {
+			t.Errorf("parseFrameAncestors(%q) unexpectedly succeeded", value)
+		}
+	}
+}
+
+func TestLoadUsesFrameAncestorsConfiguration(t *testing.T) {
+	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("MONITORING_FRAME_ANCESTORS", "https://dashboard.example.test")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FrameAncestors != "https://dashboard.example.test" {
+		t.Fatalf("frame ancestors = %q", c.FrameAncestors)
+	}
+	t.Setenv("MONITORING_FRAME_ANCESTORS", "*")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "wildcard") {
+		t.Fatalf("wildcard configuration error = %v", err)
 	}
 }

@@ -67,14 +67,19 @@ WITH aggregated AS (
            ROW_NUMBER() OVER (ORDER BY total_tokens DESC, total_cost DESC, group_id) AS token_rank,
            ROW_NUMBER() OVER (ORDER BY total_cost DESC, total_tokens DESC, group_id) AS cost_rank,
            ROW_NUMBER() OVER (
+               ORDER BY CASE WHEN total_tokens > 0 THEN total_cost * 1000000 / total_tokens ELSE 0 END DESC,
+                        total_cost DESC, group_id
+           ) AS unit_cost_rank,
+           ROW_NUMBER() OVER (
                ORDER BY input_tokens + cache_read_tokens DESC, cache_read_tokens DESC, group_id
            ) AS cache_context_rank
       FROM aggregated
 )
 SELECT group_id, name, platform, requests, total_tokens, input_tokens, cache_read_tokens, total_cost
   FROM ranked
- WHERE token_rank <= $3 OR cost_rank <= $3 OR cache_context_rank <= $3
- ORDER BY token_rank, cost_rank, cache_context_rank`
+ WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3 OR cache_context_rank <= $3
+ ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
+          token_rank, cost_rank, unit_cost_rank, cache_context_rank`
 	return s.loadDimensionRanks(ctx, query, model.KindGroup, bounds, limit, totalTokens)
 }
 
@@ -98,13 +103,18 @@ WITH aggregated AS (
 ), ranked AS (
     SELECT aggregated.*,
            ROW_NUMBER() OVER (ORDER BY total_tokens DESC, total_cost DESC, name) AS token_rank,
-           ROW_NUMBER() OVER (ORDER BY total_cost DESC, total_tokens DESC, name) AS cost_rank
-      FROM aggregated
+           ROW_NUMBER() OVER (ORDER BY total_cost DESC, total_tokens DESC, name) AS cost_rank,
+           ROW_NUMBER() OVER (
+               ORDER BY CASE WHEN total_tokens > 0 THEN total_cost * 1000000 / total_tokens ELSE 0 END DESC,
+                        total_cost DESC, name
+           ) AS unit_cost_rank
+       FROM aggregated
 )
 SELECT name, requests, total_tokens, total_cost
   FROM ranked
- WHERE token_rank <= $3 OR cost_rank <= $3
- ORDER BY token_rank, cost_rank`
+ WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3
+ ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank),
+          token_rank, cost_rank, unit_cost_rank`
 	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end, limit)
 	if err != nil {
 		return nil, err
@@ -151,6 +161,7 @@ func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, boun
 func applyUsageShares(items []model.UsageRankItem, totalTokens int64) {
 	for index := range items {
 		items[index].CacheHitRate = cacheHitRate(items[index].InputTokens, items[index].CacheRead)
+		items[index].CostPerMillionTokens = costPerMillionTokens(items[index].TotalCost, items[index].TotalTokens)
 		if totalTokens > 0 {
 			items[index].SharePercent = float64(items[index].TotalTokens) * 100 / float64(totalTokens)
 		}

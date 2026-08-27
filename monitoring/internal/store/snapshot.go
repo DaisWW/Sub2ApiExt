@@ -34,28 +34,39 @@ WITH recent_account_usage AS MATERIALIZED (
       AND ul.created_at >= NOW() - INTERVAL '24 hours'
     GROUP BY ul.group_id, ul.account_id
 ), latest_account_probe AS MATERIALIZED (
-    SELECT DISTINCT ON (mc.target_key) mc.target_key, mc.checked_at, mc.status
+    SELECT DISTINCT ON (mc.target_key) mc.target_key, mc.checked_at, mc.status,
+           mc.error_class, mc.status_code
     FROM monitoring_checks mc
     WHERE mc.source = 'probe' AND mc.target_key LIKE 'account:%'
     ORDER BY mc.target_key, mc.checked_at DESC, mc.id DESC
+), active_channel_groups AS MATERIALIZED (
+    SELECT DISTINCT cg.group_id
+    FROM channel_groups cg
+    JOIN channels c ON c.id = cg.channel_id
+    WHERE c.status = 'active'
 )
 SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.credentials,
        a.updated_at,
        a.proxy_id, p.protocol, p.host, p.port, p.username, p.password, p.status,
        recent.created_at, recent.model,
-       last_probe.checked_at, last_probe.status,
+       last_probe.checked_at, last_probe.status, last_probe.error_class, last_probe.status_code,
+       COALESCE(alert_state.failure_streak, 0), alert_state.updated_at,
        ag.priority, COALESCE(member_usage.request_count, 0),
-       g.id, g.name, g.platform, g.status
+       g.id, g.name, g.platform, g.status,
+       active_channel.group_id IS NOT NULL
 FROM accounts a
 LEFT JOIN proxies p ON p.id = a.proxy_id AND p.deleted_at IS NULL
 LEFT JOIN recent_account_usage recent ON recent.account_id = a.id
 LEFT JOIN latest_account_probe last_probe
        ON last_probe.target_key = 'account:' || a.id::text
+LEFT JOIN monitoring_alert_states alert_state
+       ON alert_state.target_key = 'account:' || a.id::text
 LEFT JOIN account_groups ag ON ag.account_id = a.id
 LEFT JOIN recent_group_usage member_usage
        ON member_usage.group_id = ag.group_id
       AND member_usage.account_id = a.id
 LEFT JOIN groups g ON g.id = ag.group_id AND g.deleted_at IS NULL
+LEFT JOIN active_channel_groups active_channel ON active_channel.group_id = g.id
 WHERE a.deleted_at IS NULL
 ORDER BY a.id, g.id`
 
@@ -67,10 +78,14 @@ type snapshotRow struct {
 	proxyPassword, proxyStatus            sql.NullString
 	proxyPort                             sql.NullInt64
 	updatedAt, lastActivity, lastProbe    sql.NullTime
-	lastProbeStatus                       sql.NullString
+	lastProbeStatus, lastProbeErrorClass  sql.NullString
+	lastProbeStatusCode                   sql.NullInt64
+	probeFailureStreak                    sql.NullInt64
+	alertStateUpdatedAt                   sql.NullTime
 	recentModel                           sql.NullString
 	groupPriority, groupRequestCount      sql.NullInt64
 	schedulable                           bool
+	groupHasActiveChannel                 bool
 	credentials                           []byte
 	groupName, groupPlatform, groupStatus sql.NullString
 }
@@ -106,8 +121,10 @@ func (r *snapshotRow) scan(rows *sql.Rows) error {
 		&r.updatedAt,
 		&r.proxyID, &r.proxyProtocol, &r.proxyHost, &r.proxyPort, &r.proxyUser, &r.proxyPassword,
 		&r.proxyStatus, &r.lastActivity, &r.recentModel, &r.lastProbe,
-		&r.lastProbeStatus, &r.groupPriority, &r.groupRequestCount, &r.groupID, &r.groupName,
-		&r.groupPlatform, &r.groupStatus,
+		&r.lastProbeStatus, &r.lastProbeErrorClass, &r.lastProbeStatusCode, &r.probeFailureStreak,
+		&r.alertStateUpdatedAt,
+		&r.groupPriority, &r.groupRequestCount, &r.groupID, &r.groupName,
+		&r.groupPlatform, &r.groupStatus, &r.groupHasActiveChannel,
 	)
 }
 
@@ -157,6 +174,14 @@ func (r snapshotRow) account() (*model.Account, error) {
 		account.LastProbeAt = &value
 	}
 	account.LastProbeStatus = strings.TrimSpace(r.lastProbeStatus.String)
+	account.LastProbeErrorClass = strings.TrimSpace(r.lastProbeErrorClass.String)
+	if r.lastProbeStatusCode.Valid {
+		value := int(r.lastProbeStatusCode.Int64)
+		account.LastProbeStatusCode = &value
+	}
+	if alertStateCurrent(r.alertStateUpdatedAt, r.updatedAt) {
+		account.ProbeFailureStreak = nullInt(r.probeFailureStreak)
+	}
 	if r.recentModel.Valid {
 		account.RecentModel = strings.TrimSpace(r.recentModel.String)
 	}
@@ -165,6 +190,16 @@ func (r snapshotRow) account() (*model.Account, error) {
 		applyProxy(account, r)
 	}
 	return account, nil
+}
+
+func alertStateCurrent(stateUpdatedAt, accountUpdatedAt sql.NullTime) bool {
+	if !stateUpdatedAt.Valid {
+		return false
+	}
+	if !accountUpdatedAt.Valid {
+		return true
+	}
+	return !stateUpdatedAt.Time.Before(accountUpdatedAt.Time)
 }
 
 func applyProxy(account *model.Account, row snapshotRow) {
@@ -190,9 +225,11 @@ func linkGroup(row snapshotRow, account *model.Account, groups map[int64]*model.
 		group = &model.Group{
 			ID: row.groupID.Int64, Name: row.groupName.String,
 			Platform: row.groupPlatform.String, Status: row.groupStatus.String,
+			HasActiveChannel: row.groupHasActiveChannel,
 		}
 		groups[group.ID] = group
 	}
+	group.HasActiveChannel = group.HasActiveChannel || row.groupHasActiveChannel
 	if !containsID(group.AccountIDs, account.ID) {
 		group.AccountIDs = append(group.AccountIDs, account.ID)
 	}
@@ -273,7 +310,7 @@ func buildSnapshot(accounts map[int64]*model.Account, groups map[int64]*model.Gr
 }
 
 func groupProbeEnabled(group model.Group, accounts map[int64]*model.Account) bool {
-	if !groupIsActive(group.Status) {
+	if !groupIsActive(group.Status) || !group.HasActiveChannel {
 		return false
 	}
 	for _, accountID := range group.AccountIDs {

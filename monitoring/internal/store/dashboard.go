@@ -59,16 +59,19 @@ WITH bounds AS (
 ), bucket_positions AS (
 	SELECT generate_series(0, 23)::int AS bucket_index
 ), recent_bucketed AS (
-	SELECT samples.target_key, samples.status, samples.checked_at, samples.source,
+	SELECT samples.target_key, targets.kind, samples.status, samples.checked_at, samples.source,
 	       LEAST(23, FLOOR(EXTRACT(EPOCH FROM (samples.checked_at - bounds.start_at)) / bounds.bucket_seconds)::int) AS bucket_index
 	FROM samples
+	JOIN monitoring_targets targets ON targets.target_key = samples.target_key
 	CROSS JOIN bounds
 	WHERE samples.status NOT IN ('unknown','disabled')
 ), recent_ranked AS (
 	SELECT target_key, status, checked_at, source, bucket_index,
 	       ROW_NUMBER() OVER (
 	           PARTITION BY target_key, bucket_index
-	           ORDER BY CASE WHEN source = 'history' THEN 0 ELSE 1 END, checked_at DESC
+	           ORDER BY CASE WHEN kind = 'group' AND source = 'aggregate' THEN 0 ELSE 1 END,
+	                    checked_at DESC,
+	                    CASE WHEN source = 'probe' THEN 0 WHEN source = 'history' THEN 1 ELSE 2 END
 	       ) AS position
 	FROM recent_bucketed
 ), recent AS (
@@ -108,9 +111,8 @@ WITH bounds AS (
            CASE WHEN targets.last_activity_at IS NOT NULL
                       AND NOT (
                           targets.kind = 'group'
+                          AND latest_checks.source = 'aggregate'
                           AND COALESCE(latest_checks.status, '') IN ('degraded', 'failed', 'error')
-                          AND latest_checks.checked_at IS NOT NULL
-                          AND latest_checks.checked_at >= bounds.stale_at
                       )
                       AND (latest_checks.checked_at IS NULL
                            OR targets.last_activity_at >= latest_checks.checked_at)
@@ -155,7 +157,12 @@ LEFT JOIN LATERAL (
 		SELECT 'operational', t.last_activity_at, 'history'
 		WHERE t.last_activity_at IS NOT NULL AND t.last_activity_at < bounds.start_at
 	) evidence
-	ORDER BY evidence.checked_at DESC, CASE WHEN evidence.source = 'history' THEN 0 ELSE 1 END
+	ORDER BY CASE WHEN t.kind = 'group'
+	                       AND evidence.source = 'aggregate'
+	                       AND evidence.status IN ('degraded', 'failed', 'error')
+	                  THEN 0 ELSE 1 END,
+	         evidence.checked_at DESC,
+	         CASE WHEN evidence.source = 'probe' THEN 0 WHEN evidence.source = 'history' THEN 1 ELSE 2 END
 	LIMIT 1
 ) p ON TRUE
 WHERE t.active = TRUE AND LOWER(TRIM(t.source_status)) = 'active'
@@ -236,7 +243,7 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 		prior = &model.StatusSample{Status: priorStatus.String, CheckedAt: priorAt.Time.UTC(), Source: priorSource.String}
 	}
 	carryForwardStatusSamples(target.RecentSamples, prior)
-	return target, target.ProbeEnabled && samples > 0, nil
+	return target, targetContributesAvailability(target), nil
 }
 
 func carryForwardStatusSamples(samples []model.StatusSample, priorSample *model.StatusSample) {
@@ -287,8 +294,15 @@ func applyLatestTargetStateWithMessage(
 ) {
 	target.Status = model.StatusUnknown
 	if !target.ProbeEnabled {
-		target.Status = model.StatusDisabled
-	} else if status.Valid {
+		if target.Kind == model.KindGroup && groupIsActive(target.SourceStatus) {
+			target.Status = model.StatusFailed
+			target.LatestMessage = "无启用渠道或可调度候选"
+		} else {
+			target.Status = model.StatusDisabled
+		}
+		return
+	}
+	if status.Valid {
 		target.Status = status.String
 	}
 	if checkedAt.Valid {
@@ -341,9 +355,16 @@ func addDashboardSummary(summary *model.Summary, target model.DashboardTarget) {
 	default:
 		summary.Unknown++
 	}
-	if target.ProbeEnabled && target.Stats.Samples > 0 {
+	if targetContributesAvailability(target) {
 		summary.Availability += target.Stats.Availability
 	}
+}
+
+func targetContributesAvailability(target model.DashboardTarget) bool {
+	if target.Kind == model.KindGroup && groupIsActive(target.SourceStatus) && !target.ProbeEnabled {
+		return true
+	}
+	return target.ProbeEnabled && target.Stats.Samples > 0
 }
 
 func metricStats(fastest sql.NullInt64, median, p95 sql.NullFloat64) model.MetricStats {

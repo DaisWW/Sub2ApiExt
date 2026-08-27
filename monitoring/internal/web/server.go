@@ -18,11 +18,16 @@ import (
 var assets embed.FS
 
 type Server struct {
-	service *monitor.Service
+	service        *monitor.Service
+	frameAncestors string
 }
 
-func New(service *monitor.Service) *Server {
-	return &Server{service: service}
+func New(service *monitor.Service, frameAncestors ...string) *Server {
+	policy := "'self'"
+	if len(frameAncestors) > 0 {
+		policy = normalizeFrameAncestors(frameAncestors[0])
+	}
+	return &Server{service: service, frameAncestors: policy}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -130,11 +135,31 @@ func readOnly(next http.Handler) http.Handler {
 func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors *")
+		frameAncestors := s.frameAncestors
+		if frameAncestors == "" {
+			frameAncestors = "'self'"
+		}
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors "+frameAncestors)
+		if frameAncestors == "'self'" {
+			w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
+}
+
+func normalizeFrameAncestors(value string) string {
+	tokens := strings.Fields(value)
+	if len(tokens) == 0 {
+		return "'self'"
+	}
+	for _, token := range tokens {
+		if token == "*" || strings.ContainsAny(token, ";\r\n") {
+			return "'self'"
+		}
+	}
+	return strings.Join(tokens, " ")
 }
 
 func validTargetKey(key string) bool {

@@ -43,6 +43,48 @@ func TestApplyLatestTargetStateSanitizesGroupMessage(t *testing.T) {
 	}
 }
 
+func TestApplyLatestTargetStateMarksUnroutableGroupFailed(t *testing.T) {
+	now := time.Now().UTC()
+	group := model.DashboardTarget{Target: model.Target{
+		Kind: model.KindGroup, SourceStatus: "active", ProbeEnabled: false,
+	}}
+	applyLatestTargetStateWithMessage(&group,
+		sql.NullString{String: model.StatusOperational, Valid: true},
+		sql.NullString{String: "history", Valid: true}, sql.NullString{},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{Time: now.Add(-time.Minute), Valid: true},
+		now, time.Hour)
+	if group.Status != model.StatusFailed {
+		t.Fatalf("unroutable active group status = %q, want failed", group.Status)
+	}
+	if group.LatestMessage != "无启用渠道或可调度候选" {
+		t.Fatalf("unroutable group message = %q", group.LatestMessage)
+	}
+	if group.LastCheckedAt != nil || group.LatestSource != "" {
+		t.Fatalf("old evidence must not override current routing state: %+v", group.Target)
+	}
+
+	account := model.DashboardTarget{Target: model.Target{Kind: model.KindAccount, ProbeEnabled: false}}
+	applyLatestTargetStateWithMessage(&account, sql.NullString{}, sql.NullString{}, sql.NullString{},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Hour)
+	if account.Status != model.StatusDisabled {
+		t.Fatalf("disabled account status = %q, want disabled", account.Status)
+	}
+}
+
+func TestUnroutableActiveGroupContributesZeroAvailability(t *testing.T) {
+	target := model.DashboardTarget{Target: model.Target{
+		Kind: model.KindGroup, SourceStatus: "active", ProbeEnabled: false,
+	}, Stats: model.TargetStats{Availability: 100}}
+	if !targetContributesAvailability(target) {
+		t.Fatal("unroutable active group must be included in availability denominator")
+	}
+	var summary model.Summary
+	addDashboardSummary(&summary, target)
+	if summary.Failed != 1 || summary.Availability != 0 {
+		t.Fatalf("unroutable group summary = %+v, want failed with zero availability contribution", summary)
+	}
+}
+
 func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T) {
 	for _, fragment := range []string{
 		"percentile_cont(0.95)",
@@ -52,7 +94,9 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"eligible_usage AS MATERIALIZED",
 		"generate_series(0, 23)",
 		"PARTITION BY target_key, bucket_index",
-		"CASE WHEN source = 'history' THEN 0 ELSE 1 END",
+		"JOIN monitoring_targets targets ON targets.target_key = samples.target_key",
+		"CASE WHEN kind = 'group' AND source = 'aggregate' THEN 0 ELSE 1 END",
+		"CASE WHEN source = 'probe' THEN 0 WHEN source = 'history' THEN 1 ELSE 2 END",
 		"COALESCE(recent_ranked.status, 'unknown')",
 		"mc.target_key = t.target_key",
 		"mc.checked_at < bounds.start_at",
@@ -60,11 +104,12 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"ORDER BY mc.checked_at DESC, mc.id DESC",
 		"targets.last_activity_at >= latest_checks.checked_at",
 		"($2::bigint * INTERVAL '1 second')",
-		"latest_checks.checked_at >= bounds.stale_at",
 		"latest_evidence",
 		"latest_evidence_inputs",
 		"targets.kind = 'group'",
+		"latest_checks.source = 'aggregate'",
 		"latest_checks.status, '') IN ('degraded', 'failed', 'error')",
+		"evidence.source = 'aggregate'",
 	} {
 		if !strings.Contains(dashboardQuery, fragment) {
 			t.Fatalf("dashboard query missing %q", fragment)
@@ -81,6 +126,9 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 	if strings.Contains(dashboardQuery, "first_seen_at") {
 		t.Fatal("dashboard query must not depend on the removed idle timestamp")
+	}
+	if strings.Contains(dashboardQuery, "CASE WHEN source = 'history' THEN 0 ELSE 1 END") {
+		t.Fatal("history must not outrank a newer probe or aggregate observation")
 	}
 }
 

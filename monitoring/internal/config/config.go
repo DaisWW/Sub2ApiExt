@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Config struct {
@@ -22,11 +23,16 @@ type Config struct {
 	RecoveryThreshold int
 	DefaultModel      string
 	AllowPrivateHost  bool
+	FrameAncestors    string
 }
 
 const maxWindowDays = 90
 
 func Load() (Config, error) {
+	frameAncestors, err := parseFrameAncestors(envString("MONITORING_FRAME_ANCESTORS", "'self'"))
+	if err != nil {
+		return Config{}, fmt.Errorf("MONITORING_FRAME_ANCESTORS: %w", err)
+	}
 	c := Config{
 		ListenAddr:        envString("MONITORING_LISTEN_ADDR", ":8090"),
 		DatabaseURL:       envString("MONITORING_DATABASE_URL", ""),
@@ -39,6 +45,7 @@ func Load() (Config, error) {
 		RecoveryThreshold: envInt("MONITORING_RECOVERY_THRESHOLD", 1),
 		DefaultModel:      envString("MONITORING_DEFAULT_MODEL", "gpt-4o-mini"),
 		AllowPrivateHost:  strings.EqualFold(envString("MONITORING_ALLOW_PRIVATE_HOSTS", "false"), "true"),
+		FrameAncestors:    frameAncestors,
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDatabaseURL()
@@ -59,6 +66,41 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("alert thresholds must be positive")
 	}
 	return c, nil
+}
+
+func parseFrameAncestors(value string) (string, error) {
+	tokens := strings.FieldsFunc(strings.TrimSpace(value), func(r rune) bool {
+		return unicode.IsSpace(r) || r == ','
+	})
+	if len(tokens) == 0 {
+		return "'self'", nil
+	}
+	seen := make(map[string]struct{}, len(tokens))
+	normalized := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if token == "'self'" {
+			if _, exists := seen[token]; !exists {
+				seen[token] = struct{}{}
+				normalized = append(normalized, token)
+			}
+			continue
+		}
+		if token == "*" || strings.Contains(token, "*") {
+			return "", fmt.Errorf("wildcard frame ancestors are not allowed")
+		}
+		parsed, err := url.Parse(token)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" ||
+			parsed.User != nil || parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
+			return "", fmt.Errorf("must be 'self' or an http(s) origin: %q", token)
+		}
+		origin := strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
+		if _, exists := seen[origin]; exists {
+			continue
+		}
+		seen[origin] = struct{}{}
+		normalized = append(normalized, origin)
+	}
+	return strings.Join(normalized, " "), nil
 }
 
 func buildDatabaseURL() string {

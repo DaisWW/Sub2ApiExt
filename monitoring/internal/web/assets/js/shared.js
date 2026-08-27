@@ -59,7 +59,10 @@ export function historyStatusClass(status) {
   return 'bad';
 }
 
-export function availabilityClass(value) {
+export function availabilityClass(value, status = '') {
+  const normalized = normalizeStatus(status);
+  if (normalized === 'failed' || normalized === 'error') return 'bad';
+  if (normalized === 'degraded') return 'warn';
   if (value >= 99) return 'good';
   if (value >= 90) return 'warn';
   return 'bad';

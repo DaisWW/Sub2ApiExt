@@ -146,6 +146,120 @@ func TestNewCycleBatchDefersFailedAccountBeforeFifteenMinutes(t *testing.T) {
 	}
 }
 
+func TestProbeRetryIntervalBacksOffByFailureKindAndStreak(t *testing.T) {
+	tests := []struct {
+		name    string
+		account model.Account
+		want    time.Duration
+	}{
+		{name: "first recoverable failure", account: model.Account{ID: 11, LastProbeErrorClass: "network", ProbeFailureStreak: 1}, want: 15 * time.Minute},
+		{name: "second recoverable failure", account: model.Account{ID: 11, LastProbeErrorClass: "timeout", ProbeFailureStreak: 2}, want: time.Hour},
+		{name: "third recoverable failure", account: model.Account{ID: 11, LastProbeErrorClass: "read", ProbeFailureStreak: 3}, want: 6 * time.Hour},
+		{name: "persistent recoverable failure", account: model.Account{ID: 11, LastProbeErrorClass: "upstream", ProbeFailureStreak: 4}, want: 24 * time.Hour},
+		{name: "configuration failure", account: model.Account{ID: 11, LastProbeErrorClass: "configuration", ProbeFailureStreak: 1}, want: 24 * time.Hour},
+		{name: "authentication failure", account: model.Account{ID: 11, LastProbeErrorClass: "upstream", LastProbeStatusCode: intPtr(401), ProbeFailureStreak: 1}, want: 24 * time.Hour},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := probeRetryInterval(test.account, time.Minute); got != test.want {
+				t.Fatalf("probeRetryInterval() = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestProbeRetryIntervalAddsBoundedDeterministicJitter(t *testing.T) {
+	account := model.Account{ID: 1, LastProbeErrorClass: "network", ProbeFailureStreak: 1}
+	base := probeRetryInterval(account, time.Minute)
+	first := probeRetryDelay(account, time.Minute)
+	second := probeRetryDelay(account, time.Minute)
+	if first != second || first < base || first > base+base/10 {
+		t.Fatalf("retry jitter = %s/%s, want deterministic value in [%s, %s]", first, second, base, base+base/10)
+	}
+}
+
+func TestNewCycleBatchOnlyRechecksStaleRouteCriticalAccounts(t *testing.T) {
+	now := time.Now().UTC()
+	updated := now.Add(-48 * time.Hour)
+	staleProbe := now.Add(-26 * time.Hour)
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{
+			{ID: 1, Platform: "openai", Type: "api_key", Priority: 1, Status: "active", Schedulable: true, UpdatedAt: &updated, LastProbeAt: &staleProbe, LastProbeStatus: model.StatusOperational},
+			{ID: 2, Platform: "openai", Type: "api_key", Priority: 10, Status: "active", Schedulable: true, UpdatedAt: &updated, LastProbeAt: &staleProbe, LastProbeStatus: model.StatusOperational},
+		},
+		Groups: []model.Group{{
+			ID: 20, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1, 2},
+			Members: []model.GroupMember{
+				{AccountID: 1, AccountPriority: 1},
+				{AccountID: 2, AccountPriority: 10},
+			},
+		}},
+	}
+	batch, accounts := newCycleBatch(snapshot, now, time.Minute)
+	if got := accountIDsForTest(accounts); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("queued accounts = %v, want only route-critical account 1", got)
+	}
+	if cached := batch.accountResults[2]; cached.Status != model.StatusUnknown || cached.Source != "cache" {
+		t.Fatalf("stale fallback evidence = %+v, want cached unknown", cached)
+	}
+}
+
+func TestNewCycleBatchKeepsFreshCriticalEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	updated := now.Add(-48 * time.Hour)
+	recentProbe := now.Add(-23 * time.Hour)
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{{
+			ID: 1, Platform: "openai", Type: "api_key", Status: "active", Schedulable: true,
+			UpdatedAt: &updated, LastProbeAt: &recentProbe, LastProbeStatus: model.StatusOperational,
+		}},
+		Groups: []model.Group{{ID: 20, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1}}},
+	}
+	batch, accounts := newCycleBatch(snapshot, now, time.Minute)
+	if len(accounts) != 0 || batch.accountResults[1].Status != model.StatusOperational {
+		t.Fatalf("fresh critical evidence unexpectedly rechecked: accounts=%v evidence=%+v", accounts, batch.accountResults[1])
+	}
+}
+
+func TestNewCycleBatchRetriesImmediatelyAfterConfigurationUpdate(t *testing.T) {
+	now := time.Now().UTC()
+	updated := now.Add(-time.Minute)
+	lastProbe := now.Add(-5 * time.Minute)
+	snapshot := model.Snapshot{Accounts: []model.Account{{
+		ID: 12, Platform: "openai", Type: "api_key", Status: "active", Schedulable: true,
+		UpdatedAt: &updated, LastProbeAt: &lastProbe, LastProbeStatus: model.StatusError,
+		LastProbeErrorClass: "configuration", ProbeFailureStreak: 4,
+	}}}
+	_, accounts := newCycleBatch(snapshot, now, time.Minute)
+	if len(accounts) != 1 {
+		t.Fatalf("configuration update did not bypass failure backoff: accounts=%d", len(accounts))
+	}
+}
+
+func TestRouteCriticalAccountsIncludesEntirePrimaryTier(t *testing.T) {
+	snapshot := model.Snapshot{Groups: []model.Group{{
+		ID: 30, ProbeEnabled: true,
+		Members: []model.GroupMember{
+			{AccountID: 1, AccountPriority: 1, GroupPriority: 2},
+			{AccountID: 2, AccountPriority: 1, GroupPriority: 2},
+			{AccountID: 3, AccountPriority: 1, GroupPriority: 3},
+			{AccountID: 4, AccountPriority: 2, GroupPriority: 1},
+		},
+	}}}
+	critical := routeCriticalAccounts(snapshot)
+	if _, ok := critical[1]; !ok {
+		t.Fatal("first primary-tier account was not selected")
+	}
+	if _, ok := critical[2]; !ok {
+		t.Fatal("second primary-tier account was not selected")
+	}
+	for _, accountID := range []int64{3, 4} {
+		if _, ok := critical[accountID]; ok {
+			t.Fatalf("fallback account %d was selected as route critical", accountID)
+		}
+	}
+}
+
 func TestNewCycleBatchDoesNotTreatDisabledProbeAsEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	updated := now.Add(-2 * time.Hour)
@@ -213,6 +327,25 @@ func TestAggregateGroupsIncludesCachedFailureWithFreshProbe(t *testing.T) {
 	}
 }
 
+func TestAggregateGroupsPersistsHistoryRecovery(t *testing.T) {
+	now := time.Now().UTC()
+	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
+		1: {TargetKey: "account:1", Kind: model.KindAccount, EntityID: 1, Status: model.StatusOperational, Source: "history", CheckedAt: now},
+	}}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{{ID: 1, Status: "active", Schedulable: true}},
+		Groups:   []model.Group{{ID: 15, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1}}},
+	}
+
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.observations) != 1 || batch.observations[0].Status != model.StatusOperational {
+		t.Fatalf("history recovery did not produce a healthy group observation: %+v", batch.observations)
+	}
+	if len(batch.persisted) != 1 || batch.persisted[0].Source != "aggregate" {
+		t.Fatalf("history recovery aggregate was not persisted: %+v", batch.persisted)
+	}
+}
+
 func TestAggregateGroupsExcludesErrorAccounts(t *testing.T) {
 	now := time.Now().UTC()
 	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
@@ -264,4 +397,12 @@ func TestNextProbeTimeRoundTrip(t *testing.T) {
 
 func intPtr(value int) *int {
 	return &value
+}
+
+func accountIDsForTest(accounts []model.Account) []int64 {
+	ids := make([]int64, 0, len(accounts))
+	for _, account := range accounts {
+		ids = append(ids, account.ID)
+	}
+	return ids
 }

@@ -50,7 +50,7 @@ func TestUsageRankingOmitsUnusedDetailDimensions(t *testing.T) {
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"users", "token_distribution", "cost_per_million_tokens", "channels"} {
+	for _, key := range []string{"users", "token_distribution", "channels"} {
 		if _, exists := payload[key]; exists {
 			t.Errorf("用量响应不应包含顶层字段 %q", key)
 		}
@@ -81,8 +81,8 @@ func TestUsageRankingExposesAccountCacheRates(t *testing.T) {
 	}
 }
 
-func TestUsageSummaryOmitsUserAndQuotaDetails(t *testing.T) {
-	encoded, err := json.Marshal(model.UsageSummary{})
+func TestUsageSummaryExposesCostPerMillionTokens(t *testing.T) {
+	encoded, err := json.Marshal(model.UsageSummary{CostPerMillionTokens: 12.5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,9 +90,21 @@ func TestUsageSummaryOmitsUserAndQuotaDetails(t *testing.T) {
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"users", "quota", "cost_per_million_tokens"} {
+	for _, key := range []string{"users", "quota"} {
 		if _, exists := payload[key]; exists {
 			t.Errorf("用量摘要不应包含字段 %q", key)
 		}
+	}
+	if payload["cost_per_million_tokens"] != 12.5 {
+		t.Fatalf("unexpected unit cost payload: %s", encoded)
+	}
+}
+
+func TestCostPerMillionTokens(t *testing.T) {
+	if got := costPerMillionTokens(1.25, 100_000); math.Abs(got-12.5) > 1e-9 {
+		t.Fatalf("costPerMillionTokens() = %v, want 12.5", got)
+	}
+	if got := costPerMillionTokens(1.25, 0); got != 0 {
+		t.Fatalf("zero-token unit cost = %v, want 0", got)
 	}
 }

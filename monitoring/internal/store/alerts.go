@@ -100,7 +100,8 @@ func insertAlert(ctx context.Context, tx *sql.Tx, result model.ProbeResult, name
 }
 
 func (s *alertState) observe(status string, policy model.AlertPolicy) string {
-	if status == model.StatusFailed || status == model.StatusError {
+	switch status {
+	case model.StatusFailed, model.StatusError:
 		s.failureStreak++
 		s.recoveryStreak = 0
 		if s.failureStreak >= policy.FailureThreshold && s.alertedStatus != model.StatusFailed {
@@ -108,14 +109,23 @@ func (s *alertState) observe(status string, policy model.AlertPolicy) string {
 			return model.StatusFailed
 		}
 		return ""
+	case model.StatusDegraded:
+		// Degraded means the route is still serving traffic but remains risky;
+		// it must not count as a clean recovery.
+		s.failureStreak = 0
+		s.recoveryStreak = 0
+		return ""
+	case model.StatusOperational:
+		s.failureStreak = 0
+		s.recoveryStreak++
+		if s.recoveryStreak >= policy.RecoveryThreshold && s.alertedStatus == model.StatusFailed {
+			s.alertedStatus = model.StatusOperational
+			return model.StatusOperational
+		}
+		return ""
+	default:
+		return ""
 	}
-	s.failureStreak = 0
-	s.recoveryStreak++
-	if s.recoveryStreak >= policy.RecoveryThreshold && s.alertedStatus == model.StatusFailed {
-		s.alertedStatus = model.StatusOperational
-		return model.StatusOperational
-	}
-	return ""
 }
 
 func alertableStatus(status string) bool {

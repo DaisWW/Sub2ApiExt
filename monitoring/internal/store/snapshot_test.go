@@ -1,9 +1,11 @@
 package store
 
 import (
+	"database/sql"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
@@ -17,8 +19,8 @@ func TestBuildSnapshotFiltersInactiveTargetsAndSorts(t *testing.T) {
 		5: {ID: 5, Name: "error", Status: "error", Schedulable: true, GroupIDs: []int64{10}},
 	}
 	groups := map[int64]*model.Group{
-		10: {ID: 10, Name: "beta", Status: "active", AccountIDs: []int64{1, 2, 4, 5}},
-		20: {ID: 20, Name: "alpha", Status: "active", AccountIDs: []int64{1}},
+		10: {ID: 10, Name: "beta", Status: "active", AccountIDs: []int64{1, 2, 4, 5}, HasActiveChannel: true},
+		20: {ID: 20, Name: "alpha", Status: "active", AccountIDs: []int64{1}, HasActiveChannel: true},
 		30: {ID: 30, Name: "alpha", Status: "active"},
 		40: {ID: 40, Name: "disabled", Status: "disabled", AccountIDs: []int64{1}},
 		-1: {ID: -1, Name: "Ungrouped", Status: "disabled", AccountIDs: []int64{3}},
@@ -48,6 +50,27 @@ func TestBuildSnapshotFiltersInactiveTargetsAndSorts(t *testing.T) {
 		{AccountID: 1, AccountPriority: 9},
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("group routing metadata = %+v, want %+v", got, want)
+	}
+}
+
+func TestBuildSnapshotRequiresAnEnabledChannelForGroupRouting(t *testing.T) {
+	accounts := map[int64]*model.Account{
+		1: {ID: 1, Status: "active", Schedulable: true, GroupIDs: []int64{10, 20}},
+	}
+	groups := map[int64]*model.Group{
+		10: {ID: 10, Name: "with-channel", Status: "active", AccountIDs: []int64{1}, HasActiveChannel: true},
+		20: {ID: 20, Name: "without-channel", Status: "active", AccountIDs: []int64{1}},
+	}
+	snapshot := buildSnapshot(accounts, groups)
+	byID := make(map[int64]model.Group, len(snapshot.Groups))
+	for _, group := range snapshot.Groups {
+		byID[group.ID] = group
+	}
+	if !byID[10].ProbeEnabled {
+		t.Fatal("group with an enabled channel and candidate must be routable")
+	}
+	if byID[20].ProbeEnabled {
+		t.Fatal("group without an enabled channel must not be routable")
 	}
 }
 
@@ -81,6 +104,12 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 		"a.priority",
 		"ag.priority",
 		"INTERVAL '24 hours'",
+		"channel_groups",
+		"JOIN channels",
+		"c.status = 'active'",
+		"last_probe.error_class",
+		"last_probe.status_code",
+		"failure_streak",
 	} {
 		if !strings.Contains(snapshotQuery, fragment) {
 			t.Fatalf("snapshot query missing %q", fragment)
@@ -88,6 +117,23 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 	}
 	if strings.Contains(snapshotQuery, "COUNT(*)::bigint AS request_count\n    FROM usage_logs ul\n    WHERE ul.account_id = a.id") {
 		t.Fatal("snapshot query must not count usage once per account-group row")
+	}
+}
+
+func TestAlertStateFailureStreakIgnoresStateBeforeAccountUpdate(t *testing.T) {
+	accountUpdatedAt := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	staleState := sql.NullTime{Time: accountUpdatedAt.Add(-time.Minute), Valid: true}
+	currentState := sql.NullTime{Time: accountUpdatedAt.Add(time.Minute), Valid: true}
+	updated := sql.NullTime{Time: accountUpdatedAt, Valid: true}
+
+	if alertStateCurrent(staleState, updated) {
+		t.Fatal("alert state from before account update must not carry failure streak")
+	}
+	if !alertStateCurrent(currentState, updated) {
+		t.Fatal("alert state after account update should carry failure streak")
+	}
+	if !alertStateCurrent(currentState, sql.NullTime{}) {
+		t.Fatal("account without update timestamp should accept a valid alert state")
 	}
 }
 

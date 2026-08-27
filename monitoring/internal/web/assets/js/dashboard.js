@@ -149,7 +149,7 @@ export class DashboardPanel {
     const hasSamples = samples > 0;
     const availabilityLabel = hasSamples ? `${samples} 次样本` : '暂无样本';
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
-    const availabilityTone = hasSamples ? availabilityClass(stats.availability) : 'neutral';
+    const availabilityTone = hasSamples ? availabilityClass(stats.availability, status) : 'neutral';
     const groupNote = item.kind === 'group' && item.latest_message
       ? `<div class="target-note">${escapeHTML(item.latest_message)}</div>`
       : '';
@@ -166,7 +166,7 @@ export class DashboardPanel {
           <span class="status-badge ${statusClass(status)}">${statusLabel(status)}</span>
         </div>
         <div class="availability">
-          <span class="availability-label">${windowLabel(this.windowDays)}可用率 · ${availabilityLabel}</span>
+          <span class="availability-label">${windowLabel(this.windowDays)}窗口观测通过率 · ${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
         </div>
         <div class="metrics">

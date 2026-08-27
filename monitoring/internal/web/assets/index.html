@@ -71,8 +71,8 @@
         <section class="usage-section" id="usageSection" aria-labelledby="usageTitle" aria-busy="false">
           <div class="section-heading usage-heading">
             <div>
-              <p class="eyebrow">USAGE RANKING</p>
-              <h2 id="usageTitle">Tokens 用量排行榜</h2>
+              <p class="eyebrow">USAGE OVERVIEW</p>
+              <h2 id="usageTitle">Tokens 用量统计</h2>
             </div>
             <div class="usage-controls">
               <span class="section-meta" id="usageMeta"></span>
@@ -90,37 +90,25 @@
             </div>
           </div>
           <div class="usage-kpi-grid" id="usageKpiGrid" aria-live="polite"></div>
-          <div class="cache-rate-grid">
-            <article class="chart-panel cache-rate-panel">
-              <div class="panel-heading">
-                <div><p class="eyebrow">ACCOUNT CACHE</p><h3>账户缓存率</h3></div>
-              </div>
-              <div class="cache-rate-list" id="accountCacheRateList" aria-live="polite"></div>
-            </article>
-            <article class="chart-panel cache-rate-panel">
-              <div class="panel-heading">
-                <div><p class="eyebrow">GROUP CACHE</p><h3>分组缓存率</h3></div>
-              </div>
-              <div class="cache-rate-list" id="groupCacheRateList" aria-live="polite"></div>
-            </article>
-          </div>
           <div class="usage-chart-grid">
             <article class="chart-panel">
               <div class="panel-heading">
-                <div><p class="eyebrow">MODEL SHARE</p><h3>模型占比</h3></div>
+                <div><p class="eyebrow">MODEL DISTRIBUTION</p><h3>模型分布</h3></div>
                 <div class="metric-toggle" role="group" aria-label="模型占比指标">
                   <button class="active" data-share-kind="model" data-share-metric="tokens" aria-pressed="true">Tokens</button>
                   <button data-share-kind="model" data-share-metric="cost" aria-pressed="false">成本</button>
+                  <button data-share-kind="model" data-share-metric="unit_cost" aria-pressed="false">每百万成本</button>
                 </div>
               </div>
               <div class="donut-layout" id="modelDonutLayout"></div>
             </article>
             <article class="chart-panel">
               <div class="panel-heading">
-                <div><p class="eyebrow">GROUP SHARE</p><h3>分组占比</h3></div>
+                <div><p class="eyebrow">GROUP DISTRIBUTION</p><h3>分组分布</h3></div>
                 <div class="metric-toggle" role="group" aria-label="分组占比指标">
                   <button class="active" data-share-kind="group" data-share-metric="tokens" aria-pressed="true">Tokens</button>
                   <button data-share-kind="group" data-share-metric="cost" aria-pressed="false">成本</button>
+                  <button data-share-kind="group" data-share-metric="unit_cost" aria-pressed="false">每百万成本</button>
                 </div>
               </div>
               <div class="donut-layout" id="groupDonutLayout"></div>
@@ -133,6 +121,7 @@
                   <div class="metric-toggle" role="group" aria-label="趋势指标">
                     <button class="active" data-trend-metric="tokens" aria-pressed="true">Tokens</button>
                     <button data-trend-metric="cost" aria-pressed="false">成本</button>
+                    <button data-trend-metric="unit_cost" aria-pressed="false">每百万成本</button>
                   </div>
                 </div>
               </div>
@@ -141,8 +130,19 @@
                 <div class="bar-chart-wrap"><div class="bar-chart" id="usageBarChart"></div></div>
                 <div class="chart-tooltip" id="usageTrendTooltip" role="tooltip" hidden></div>
               </div>
+              <div class="channel-legend" id="usageChannelLegend" aria-label="渠道图例"></div>
             </article>
           </div>
+          <section class="usage-entity-section" aria-labelledby="usageEntityTitle">
+            <div class="usage-entity-heading">
+              <div><p class="eyebrow" id="usageEntityEyebrow">GROUP USAGE</p><h3 id="usageEntityTitle">分组缓存与成本</h3></div>
+              <div class="segmented usage-entity-toggle" role="group" aria-label="用量卡片类型">
+                <button class="active" data-usage-entity="group" aria-pressed="true">分组</button>
+                <button data-usage-entity="account" aria-pressed="false">账户</button>
+              </div>
+            </div>
+            <div class="usage-entity-grid" id="usageEntityCardList" aria-live="polite"></div>
+          </section>
         </section>
       </main>
       </div>

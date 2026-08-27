@@ -20,23 +20,26 @@ const (
 // Account 是监控所需的最小账户快照。凭据不会由 HTTP 层返回，
 // 也不会被监控服务持久化。
 type Account struct {
-	ID              int64
-	Name            string
-	Platform        string
-	Type            string
-	Priority        int
-	Status          string
-	Schedulable     bool
-	Credentials     map[string]any
-	GroupIDs        []int64
-	LastActivityAt  *time.Time
-	UpdatedAt       *time.Time
-	LastProbeAt     *time.Time
-	LastProbeStatus string
-	RecentModel     string
-	ChatGPTAccount  string
-	ProxyURL        string
-	ProxyError      string
+	ID                  int64
+	Name                string
+	Platform            string
+	Type                string
+	Priority            int
+	Status              string
+	Schedulable         bool
+	Credentials         map[string]any
+	GroupIDs            []int64
+	LastActivityAt      *time.Time
+	UpdatedAt           *time.Time
+	LastProbeAt         *time.Time
+	LastProbeStatus     string
+	LastProbeErrorClass string
+	LastProbeStatusCode *int
+	ProbeFailureStreak  int
+	RecentModel         string
+	ChatGPTAccount      string
+	ProxyURL            string
+	ProxyError          string
 }
 
 // GroupMember 是分组内一个可调度账户的路由元数据和近期真实流量。
@@ -50,13 +53,14 @@ type GroupMember struct {
 }
 
 type Group struct {
-	ID           int64
-	Name         string
-	Platform     string
-	Status       string
-	AccountIDs   []int64
-	Members      []GroupMember
-	ProbeEnabled bool
+	ID               int64
+	Name             string
+	Platform         string
+	Status           string
+	AccountIDs       []int64
+	Members          []GroupMember
+	HasActiveChannel bool
+	ProbeEnabled     bool
 }
 
 type Snapshot struct {
@@ -161,37 +165,49 @@ type UsageRanking struct {
 }
 
 type UsageSummary struct {
-	Requests     int64   `json:"requests"`
-	TotalTokens  int64   `json:"total_tokens"`
-	InputTokens  int64   `json:"input_tokens"`
-	OutputTokens int64   `json:"output_tokens"`
-	CacheTokens  int64   `json:"cache_tokens"`
-	CacheRead    int64   `json:"cache_read_tokens"`
-	TotalCost    float64 `json:"total_cost"`
-	Accounts     int64   `json:"accounts"`
-	Groups       int64   `json:"groups"`
+	Requests             int64   `json:"requests"`
+	TotalTokens          int64   `json:"total_tokens"`
+	InputTokens          int64   `json:"input_tokens"`
+	OutputTokens         int64   `json:"output_tokens"`
+	CacheTokens          int64   `json:"cache_tokens"`
+	CacheRead            int64   `json:"cache_read_tokens"`
+	TotalCost            float64 `json:"total_cost"`
+	CostPerMillionTokens float64 `json:"cost_per_million_tokens"`
+	Accounts             int64   `json:"accounts"`
+	Groups               int64   `json:"groups"`
 }
 
 type UsageBucket struct {
-	StartAt     time.Time `json:"start_at"`
-	Requests    int64     `json:"requests"`
-	TotalTokens int64     `json:"total_tokens"`
-	TotalCost   float64   `json:"total_cost"`
+	StartAt              time.Time            `json:"start_at"`
+	Requests             int64                `json:"requests"`
+	TotalTokens          int64                `json:"total_tokens"`
+	TotalCost            float64              `json:"total_cost"`
+	CostPerMillionTokens float64              `json:"cost_per_million_tokens"`
+	Channels             []UsageChannelBucket `json:"channels"`
+}
+
+type UsageChannelBucket struct {
+	Name                 string  `json:"name"`
+	Requests             int64   `json:"requests"`
+	TotalTokens          int64   `json:"total_tokens"`
+	TotalCost            float64 `json:"total_cost"`
+	CostPerMillionTokens float64 `json:"cost_per_million_tokens"`
 }
 
 type UsageRankItem struct {
-	Kind         string  `json:"kind"`
-	ID           *int64  `json:"id,omitempty"`
-	Key          string  `json:"key"`
-	Name         string  `json:"name"`
-	Platform     string  `json:"platform,omitempty"`
-	Requests     int64   `json:"requests"`
-	TotalTokens  int64   `json:"total_tokens"`
-	InputTokens  int64   `json:"input_tokens"`
-	CacheRead    int64   `json:"cache_read_tokens"`
-	CacheHitRate float64 `json:"cache_hit_rate"`
-	TotalCost    float64 `json:"total_cost"`
-	SharePercent float64 `json:"share_percent"`
+	Kind                 string  `json:"kind"`
+	ID                   *int64  `json:"id,omitempty"`
+	Key                  string  `json:"key"`
+	Name                 string  `json:"name"`
+	Platform             string  `json:"platform,omitempty"`
+	Requests             int64   `json:"requests"`
+	TotalTokens          int64   `json:"total_tokens"`
+	InputTokens          int64   `json:"input_tokens"`
+	CacheRead            int64   `json:"cache_read_tokens"`
+	CacheHitRate         float64 `json:"cache_hit_rate"`
+	TotalCost            float64 `json:"total_cost"`
+	CostPerMillionTokens float64 `json:"cost_per_million_tokens"`
+	SharePercent         float64 `json:"share_percent"`
 }
 
 type Alert struct {

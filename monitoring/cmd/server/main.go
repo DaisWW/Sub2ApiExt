@@ -52,7 +52,7 @@ func main() {
 	service := monitor.New(cfg, repository, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           web.New(service).Handler(),
+		Handler:           web.New(service, cfg.FrameAncestors).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,

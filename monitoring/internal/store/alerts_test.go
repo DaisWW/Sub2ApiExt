@@ -21,6 +21,26 @@ func TestAlertStateAppliesFailureAndRecoveryThresholds(t *testing.T) {
 	}
 }
 
+func TestAlertStateDoesNotTreatDegradedAsRecovery(t *testing.T) {
+	policy := model.AlertPolicy{FailureThreshold: 1, RecoveryThreshold: 2}
+	var state alertState
+	if event := state.observe(model.StatusFailed, policy); event != model.StatusFailed {
+		t.Fatalf("failure event = %q, want %q", event, model.StatusFailed)
+	}
+	if event := state.observe(model.StatusDegraded, policy); event != "" {
+		t.Fatalf("degraded observation produced recovery event %q", event)
+	}
+	if state.recoveryStreak != 0 || state.alertedStatus != model.StatusFailed {
+		t.Fatalf("degraded observation changed recovery state: %+v", state)
+	}
+	if event := state.observe(model.StatusOperational, policy); event != "" {
+		t.Fatalf("first operational observation produced recovery event %q", event)
+	}
+	if event := state.observe(model.StatusOperational, policy); event != model.StatusOperational {
+		t.Fatalf("clean recovery event = %q, want %q", event, model.StatusOperational)
+	}
+}
+
 func TestAlertTextUsesObservationSource(t *testing.T) {
 	_, message := alertText("账户 A", model.ProbeResult{Source: "history"}, model.StatusOperational)
 	if !strings.Contains(message, "真实请求") {

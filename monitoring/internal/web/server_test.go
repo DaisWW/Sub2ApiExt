@@ -72,13 +72,37 @@ func TestStaticResponsesSetContentSecurityPolicy(t *testing.T) {
 	if policy == "" {
 		t.Fatal("Content-Security-Policy header is missing")
 	}
-	if !strings.Contains(policy, "frame-ancestors *") {
-		t.Fatalf("CSP %q does not allow iframe embedding", policy)
+	if !strings.Contains(policy, "frame-ancestors 'self'") || strings.Contains(policy, "frame-ancestors *") {
+		t.Fatalf("CSP %q does not restrict iframe embedding to same origin", policy)
 	}
-	if frameOptions := response.Header().Get("X-Frame-Options"); frameOptions != "" {
-		t.Fatalf("got X-Frame-Options %q, want header omitted for iframe embedding", frameOptions)
+	if frameOptions := response.Header().Get("X-Frame-Options"); frameOptions != "SAMEORIGIN" {
+		t.Fatalf("got X-Frame-Options %q, want SAMEORIGIN", frameOptions)
 	}
 	if cacheControl := response.Header().Get("Cache-Control"); cacheControl != "no-store" {
 		t.Fatalf("got Cache-Control %q, want no-store", cacheControl)
+	}
+}
+
+func TestStaticResponsesUseConfiguredFrameAncestors(t *testing.T) {
+	server := New((*monitor.Service)(nil), "'self' https://dashboard.example.test:8443")
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	policy := response.Header().Get("Content-Security-Policy")
+	if !strings.Contains(policy, "frame-ancestors 'self' https://dashboard.example.test:8443") {
+		t.Fatalf("CSP %q does not contain configured frame ancestors", policy)
+	}
+	if frameOptions := response.Header().Get("X-Frame-Options"); frameOptions != "" {
+		t.Fatalf("got X-Frame-Options %q for a multi-origin policy", frameOptions)
+	}
+}
+
+func TestNewRejectsWildcardFrameAncestors(t *testing.T) {
+	server := New((*monitor.Service)(nil), "*")
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if policy := response.Header().Get("Content-Security-Policy"); strings.Contains(policy, "frame-ancestors *") {
+		t.Fatalf("wildcard frame ancestor leaked into CSP %q", policy)
 	}
 }
