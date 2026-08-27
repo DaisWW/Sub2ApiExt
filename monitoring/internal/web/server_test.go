@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/monitor"
@@ -67,8 +68,15 @@ func TestStaticResponsesSetContentSecurityPolicy(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("got status %d", response.Code)
 	}
-	if policy := response.Header().Get("Content-Security-Policy"); policy == "" {
+	policy := response.Header().Get("Content-Security-Policy")
+	if policy == "" {
 		t.Fatal("Content-Security-Policy header is missing")
+	}
+	if !strings.Contains(policy, "frame-ancestors *") {
+		t.Fatalf("CSP %q does not allow iframe embedding", policy)
+	}
+	if frameOptions := response.Header().Get("X-Frame-Options"); frameOptions != "" {
+		t.Fatalf("got X-Frame-Options %q, want header omitted for iframe embedding", frameOptions)
 	}
 	if cacheControl := response.Header().Get("Cache-Control"); cacheControl != "no-store" {
 		t.Fatalf("got Cache-Control %q, want no-store", cacheControl)
