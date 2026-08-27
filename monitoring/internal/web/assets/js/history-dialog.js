@@ -41,24 +41,28 @@ export class HistoryDialog {
       const days = this.#getWindowDays();
       const data = await api(`/api/v1/monitor/history?target=${encodeURIComponent(target)}&days=${days}&limit=240`);
       if (!this.#requests.isCurrent(requestId) || !this.#dialog.open) return;
-      this.#render(data.items || []);
+      this.#render(data.items || [], days);
     } catch (error) {
       if (!this.#requests.isCurrent(requestId) || !this.#dialog.open) return;
       $('#historyBody').innerHTML = `<tr><td colspan="4">${escapeHTML(error.message)}</td></tr>`;
     }
   }
 
-  #render(items) {
+  #render(items, days) {
     const successful = items.filter(isSuccessful).length;
     const availability = items.length ? successful * 100 / items.length : 0;
     $('#historySummary').innerHTML = `
-      <span>样本 ${items.length}</span>
-      <span>可用率 ${formatPct(availability)}</span>
+      <span>${windowLabel(days)} · 列表样本 ${items.length}</span>
+      <span>列表样本可用率 ${formatPct(availability)}</span>
       <span>真实请求为首字，主动探测为首字节近似值</span>`;
     $('#historyBody').innerHTML = items.length
       ? items.map(renderHistoryRow).join('')
       : '<tr><td colspan="4">该窗口没有历史记录</td></tr>';
   }
+}
+
+function windowLabel(days) {
+  return Number(days) === 1 ? '24 小时' : `${days} 天`;
 }
 
 function isSuccessful(item) {

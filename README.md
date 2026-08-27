@@ -5,7 +5,7 @@ Sub2API 的独立扩展服务。本仓库不包含也不修改 Sub2API 上游源
 ## 服务
 
 - `rate-sync`：同步账号倍率，并根据成功请求维护快慢成本记忆、动态调整分组倍率。
-- `monitoring`：探测账号和分组状态，提供健康、延迟、历史与 Tokens 用量面板。
+- `monitoring`：低成本探测账号并按网关路由优先级、真实流量推断分组状态，提供健康、延迟、历史与 Tokens 用量面板。
 
 两个服务在编译时不依赖 Sub2API Go 源码。运行时会连接已经部署的 Sub2API Docker 网络、PostgreSQL 和 Admin API，因此升级 Sub2API 后仍需验证数据库结构及 API 兼容性。
 
@@ -48,7 +48,7 @@ C:\ProgramData\Sub2API\extensions\
 
 如果检测到原工作目录部署的 `sub2api-monitoring-standalone`，安装器会先等待新监控容器健康，再移除旧容器，避免两个 Worker 并行探测。
 
-监控面板默认仅监听 `127.0.0.1:18090`。可在安装后的 `monitoring\.env` 中调整监听地址和端口，再从该目录执行 `docker compose up -d`。
+监控面板默认监听 `0.0.0.0:18090`，部署完成后可从同一局域网通过主机名或 IP 访问。部署脚本会尝试创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再从该目录执行 `docker compose up -d`。
 
 每个运行目录都会安装 `manage.bat`：
 

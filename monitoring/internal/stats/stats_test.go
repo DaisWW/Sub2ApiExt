@@ -2,6 +2,7 @@ package stats
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,96 @@ func TestAggregateFailedGroupKeepsMeasuredLatency(t *testing.T) {
 	got := AggregateGroup("group:3", group, results, now)
 	if got.Status != model.StatusFailed || got.LatencyMs == nil || *got.LatencyMs != 210 {
 		t.Fatalf("unexpected failed group result: %+v", got)
+	}
+}
+
+func TestAggregateGroupTreatsLowerPriorityFailureAsFallbackRisk(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{
+		ID: 4,
+		Members: []model.GroupMember{
+			{AccountID: 1, GroupPriority: 1, AccountPriority: 1},
+			{AccountID: 2, GroupPriority: 2, AccountPriority: 1},
+		},
+	}
+	got := AggregateGroup("group:4", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusOperational},
+		{EntityID: 2, Status: model.StatusFailed},
+	}, now)
+	if got.Status != model.StatusOperational {
+		t.Fatalf("lower-priority failure should not make the primary route unavailable: %+v", got)
+	}
+	if !strings.Contains(got.Message, "异常 1") {
+		t.Fatalf("group message should retain the member risk: %q", got.Message)
+	}
+}
+
+func TestAggregateGroupMarksFailedPrimaryWithHealthyFallbackDegraded(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{
+		ID: 5,
+		Members: []model.GroupMember{
+			{AccountID: 1, GroupPriority: 1, AccountPriority: 1},
+			{AccountID: 2, GroupPriority: 2, AccountPriority: 1},
+		},
+	}
+	got := AggregateGroup("group:5", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusFailed},
+		{EntityID: 2, Status: model.StatusOperational},
+	}, now)
+	if got.Status != model.StatusDegraded {
+		t.Fatalf("failed primary with fallback should be degraded: %+v", got)
+	}
+}
+
+func TestAggregateGroupUsesRecentTrafficWithinEqualPriorityTier(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{
+		ID: 6,
+		Members: []model.GroupMember{
+			{AccountID: 1, GroupPriority: 1, AccountPriority: 1, RequestCount: 1000},
+			{AccountID: 2, GroupPriority: 1, AccountPriority: 1, RequestCount: 1},
+		},
+	}
+	got := AggregateGroup("group:6", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusOperational},
+		{EntityID: 2, Status: model.StatusFailed},
+	}, now)
+	if got.Status != model.StatusOperational {
+		t.Fatalf("a nearly unused failed peer should not outweigh the observed route: %+v", got)
+	}
+}
+
+func TestAggregateGroupRequiresKnownHealthyCandidate(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{
+		ID: 7,
+		Members: []model.GroupMember{
+			{AccountID: 1, GroupPriority: 1, AccountPriority: 1},
+			{AccountID: 2, GroupPriority: 2, AccountPriority: 1},
+		},
+	}
+	got := AggregateGroup("group:7", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusUnknown},
+		{EntityID: 2, Status: model.StatusOperational},
+	}, now)
+	if got.Status != model.StatusDegraded {
+		t.Fatalf("unknown primary with a fallback should be degraded: %+v", got)
+	}
+}
+
+func TestAggregateGroupAllKnownFailuresIsFailed(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{ID: 8, Members: []model.GroupMember{
+		{AccountID: 1, GroupPriority: 1, AccountPriority: 1},
+		{AccountID: 2, GroupPriority: 2, AccountPriority: 1},
+	}}
+	got := AggregateGroup("group:8", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusFailed},
+		{EntityID: 2, Status: model.StatusError},
+	}, now)
+	if got.Status != model.StatusFailed {
+		t.Fatalf("all known candidates failed should be failed: %+v", got)
 	}
 }
 

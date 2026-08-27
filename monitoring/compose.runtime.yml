@@ -6,7 +6,7 @@ services:
     container_name: sub2api-monitoring
     restart: unless-stopped
     ports:
-      - "${MONITORING_BIND_HOST:-127.0.0.1}:${MONITORING_PORT:-18090}:8090"
+      - "${MONITORING_BIND_HOST:-0.0.0.0}:${MONITORING_PORT:-18090}:8090"
     env_file:
       - path: database.runtime.env
         required: true

@@ -26,9 +26,15 @@ function Test-ExtensionRuntimeWritable {
 }
 
 function Invoke-ExtensionElevated {
-    param([Parameter(Mandatory = $true)][string]$ScriptPath)
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [switch]$Force
+    )
 
-    if ((Test-ExtensionAdministrator) -or (Test-ExtensionRuntimeWritable)) {
+    if (Test-ExtensionAdministrator) {
+        return $null
+    }
+    if (-not $Force -and (Test-ExtensionRuntimeWritable)) {
         return $null
     }
 
@@ -311,5 +317,75 @@ function Remove-ExtensionContainer {
 
     if (Test-ExtensionContainerExists -Name $Name) {
         Invoke-ExtensionDocker -Arguments @('container', 'rm', '--force', $Name)
+    }
+}
+
+function Test-ExtensionLanFirewallRule {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [string]$RuleName = 'Sub2APIExt-Monitoring-LAN'
+    )
+
+	try {
+		$rule = @(Get-NetFirewallRule -Name $RuleName -ErrorAction Stop | Select-Object -First 1)
+		if ($rule.Count -eq 0 -or ([string]$rule[0].Enabled) -ne 'True') {
+			return $false
+		}
+        $portFilter = @($rule | Get-NetFirewallPortFilter -ErrorAction Stop | Select-Object -First 1)
+        if ($portFilter.Count -eq 0) {
+            return $false
+        }
+        return @($portFilter[0].LocalPort | ForEach-Object { [string]$_ }) -contains ([string]$Port)
+    } catch {
+        return $false
+    }
+}
+
+function Set-ExtensionLanFirewallRule {
+    param(
+        [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port,
+        [Parameter(Mandatory = $true)][bool]$Enabled,
+        [string]$RuleName = 'Sub2APIExt-Monitoring-LAN'
+    )
+
+    try {
+        $rule = @(Get-NetFirewallRule -Name $RuleName -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($Enabled) {
+            if ($rule.Count -eq 0) {
+                New-NetFirewallRule `
+                    -Name $RuleName `
+                    -DisplayName 'Sub2API monitoring (LAN)' `
+                    -Direction Inbound `
+                    -Action Allow `
+                    -Enabled True `
+                    -Profile Domain,Private `
+                    -Protocol TCP `
+                    -LocalPort $Port `
+                    -RemoteAddress LocalSubnet `
+                    -Description 'Allows Sub2APIExt monitoring access from the local network.' `
+                    -ErrorAction Stop | Out-Null
+            } else {
+                $rule | Set-NetFirewallRule `
+                    -Enabled True `
+                    -Direction Inbound `
+                    -Action Allow `
+                    -Profile Domain,Private `
+                    -ErrorAction Stop | Out-Null
+                $rule | Set-NetFirewallPortFilter `
+                    -Protocol TCP `
+                    -LocalPort $Port `
+                    -ErrorAction Stop | Out-Null
+                $rule | Set-NetFirewallAddressFilter `
+                    -RemoteAddress LocalSubnet `
+                    -ErrorAction Stop | Out-Null
+            }
+            Write-Host "Windows Firewall: allowing TCP $Port from the local network (Domain/Private profiles)." -ForegroundColor DarkGray
+        } elseif ($rule.Count -gt 0) {
+            $rule | Disable-NetFirewallRule -ErrorAction Stop | Out-Null
+        }
+        return $true
+    } catch {
+        Write-Warning "Could not configure the Windows Firewall rule for TCP $Port. LAN access may be blocked by the host firewall. Run the deployment elevated or allow the port manually. $($_.Exception.Message)"
+        return $false
     }
 }

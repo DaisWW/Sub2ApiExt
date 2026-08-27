@@ -30,7 +30,7 @@
           <div class="overview-copy">
             <p class="eyebrow">SERVICE HEALTH</p>
             <h1 id="overallTitle">正在读取状态</h1>
-            <p id="overallMeta" class="muted">等待第一次探测结果</p>
+            <p id="overallMeta" class="muted">等待第一次验证结果</p>
           </div>
           <div class="overview-controls">
             <div class="segmented" role="group" aria-label="对象类型">
@@ -38,7 +38,7 @@
               <button data-filter="account" aria-pressed="false">账户</button>
             </div>
             <label class="select-wrap">
-              <span class="sr-only">历史窗口</span>
+              <span class="sr-only">健康统计范围</span>
               <select id="windowSelect">
                 <option value="1" selected>24 小时</option>
                 <option value="7">7 天</option>
@@ -51,13 +51,13 @@
         <section class="section-heading targets-heading">
           <div>
             <p class="eyebrow">DISCOVERED TARGETS</p>
-            <h2>实时探测对象</h2>
+            <h2>实时健康对象</h2>
           </div>
           <div class="target-heading-meta">
             <div class="probe-status" id="probeStatus" role="status" aria-live="polite">
               <span class="probe-cooldown" aria-hidden="true"><span id="probeCountdown">--</span></span>
               <span class="probe-status-copy">
-                <strong id="probeStatusText">等待探测</strong>
+                <strong id="probeStatusText">等待巡检</strong>
                 <span id="nextProbeText">正在同步周期</span>
               </span>
             </div>

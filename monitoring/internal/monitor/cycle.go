@@ -10,10 +10,21 @@ import (
 )
 
 type cycleBatch struct {
-	accountResults  map[int64]model.ProbeResult
-	observations    []model.ProbeResult
-	persisted       []model.ProbeResult
-	passiveAccounts int
+	accountResults   map[int64]model.ProbeResult
+	observations     []model.ProbeResult
+	persisted        []model.ProbeResult
+	passiveAccounts  int
+	deferredAccounts int
+	verifiedAccounts int
+}
+
+const recoveryProbeInterval = 15 * time.Minute
+
+type accountEvidence struct {
+	status    string
+	source    string
+	checkedAt *time.Time
+	valid     bool
 }
 
 func (s *Service) runCycle(ctx context.Context) error {
@@ -62,15 +73,72 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 		if !probeEligible(account) {
 			continue
 		}
-		if account.Status != "error" && account.LastActivityAt != nil && now.Sub(*account.LastActivityAt) < interval {
-			batch.addPassiveAccount(account)
+		evidence := latestAccountEvidence(account)
+		if evidence.valid && successfulEvidence(evidence.status) {
+			if shouldObserveHistoryRecovery(account, evidence, now, interval) {
+				batch.addPassiveAccount(account)
+			} else {
+				batch.addCachedEvidence(account.ID, evidence)
+			}
+			batch.verifiedAccounts++
 			continue
 		}
-		if probe.SupportsAccount(account) {
-			probeAccounts = append(probeAccounts, account)
+		if !probe.SupportsAccount(account) {
+			continue
 		}
+		probeInterval := max(interval, recoveryProbeInterval)
+		if evidence.valid && evidence.checkedAt != nil && !probeDue(evidence.checkedAt, now, probeInterval) {
+			batch.addCachedEvidence(account.ID, evidence)
+			batch.deferredAccounts++
+			continue
+		}
+		probeAccounts = append(probeAccounts, account)
 	}
 	return batch, probeAccounts
+}
+
+func latestAccountEvidence(account model.Account) accountEvidence {
+	var evidence accountEvidence
+	if evidenceTimeValid(account.LastActivityAt, account.UpdatedAt) {
+		evidence = accountEvidence{
+			status: model.StatusOperational, source: "history", checkedAt: account.LastActivityAt, valid: true,
+		}
+	}
+	if evidenceTimeValid(account.LastProbeAt, account.UpdatedAt) &&
+		(evidence.checkedAt == nil || account.LastProbeAt.After(*evidence.checkedAt)) {
+		evidence = accountEvidence{
+			status: account.LastProbeStatus, source: "probe", checkedAt: account.LastProbeAt,
+			valid: probeEvidenceStatus(account.LastProbeStatus),
+		}
+	}
+	return evidence
+}
+
+func evidenceTimeValid(value, changedAt *time.Time) bool {
+	return value != nil && (changedAt == nil || !value.Before(*changedAt))
+}
+
+func successfulEvidence(status string) bool {
+	return status == model.StatusOperational || status == model.StatusDegraded
+}
+
+func probeEvidenceStatus(status string) bool {
+	return successfulEvidence(status) || status == model.StatusFailed || status == model.StatusError
+}
+
+func shouldObserveHistoryRecovery(account model.Account, evidence accountEvidence, now time.Time, interval time.Duration) bool {
+	if evidence.source != "history" || evidence.checkedAt == nil {
+		return false
+	}
+	if now.Sub(*evidence.checkedAt) < interval {
+		return true
+	}
+	return account.LastProbeAt != nil && evidence.checkedAt.After(*account.LastProbeAt) &&
+		(account.LastProbeStatus == model.StatusFailed || account.LastProbeStatus == model.StatusError)
+}
+
+func probeDue(lastProbeAt *time.Time, now time.Time, interval time.Duration) bool {
+	return lastProbeAt == nil || !lastProbeAt.Add(interval).After(now)
 }
 
 func (b *cycleBatch) addPassiveAccount(account model.Account) {
@@ -88,6 +156,20 @@ func (b *cycleBatch) addPassiveAccount(account model.Account) {
 	b.passiveAccounts++
 }
 
+func (b *cycleBatch) addCachedEvidence(accountID int64, evidence accountEvidence) {
+	if evidence.checkedAt == nil || evidence.status == "" {
+		return
+	}
+	b.accountResults[accountID] = model.ProbeResult{
+		TargetKey: model.TargetKey(model.KindAccount, accountID),
+		Kind:      model.KindAccount,
+		EntityID:  accountID,
+		Status:    evidence.status,
+		CheckedAt: *evidence.checkedAt,
+		Source:    "cache",
+	}
+}
+
 func (b *cycleBatch) addProbeResults(results []model.ProbeResult) {
 	for _, result := range results {
 		b.persisted = append(b.persisted, result)
@@ -102,11 +184,15 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 			continue
 		}
 		memberResults := b.groupMemberResults(group, accounts)
-		if len(memberResults) == 0 {
+		if len(memberResults) == 0 || !containsFreshObservation(memberResults) {
 			continue
 		}
+		// Keep disabled/error accounts out of the aggregation input as well as
+		// out of the observed result list. Otherwise stats.AggregateGroup would
+		// treat an excluded account as an unknown member.
+		aggregationGroup := eligibleGroup(group, accounts)
 		result := stats.AggregateGroup(
-			model.TargetKey(model.KindGroup, group.ID), group, memberResults, now,
+			model.TargetKey(model.KindGroup, group.ID), aggregationGroup, memberResults, now,
 		)
 		b.observations = append(b.observations, result)
 		if containsProbe(memberResults) {
@@ -119,7 +205,7 @@ func (b *cycleBatch) groupMemberResults(group model.Group, accounts map[int64]mo
 	results := make([]model.ProbeResult, 0, len(group.AccountIDs))
 	for _, accountID := range group.AccountIDs {
 		account, exists := accounts[accountID]
-		if !exists || !probeEligible(account) {
+		if !exists || account.Status != "active" || !account.Schedulable {
 			continue
 		}
 		if result, exists := b.accountResults[accountID]; exists {
@@ -127,6 +213,27 @@ func (b *cycleBatch) groupMemberResults(group model.Group, accounts map[int64]mo
 		}
 	}
 	return results
+}
+
+func eligibleGroup(group model.Group, accounts map[int64]model.Account) model.Group {
+	filtered := group
+	filtered.AccountIDs = make([]int64, 0, len(group.AccountIDs))
+	for _, accountID := range group.AccountIDs {
+		account, exists := accounts[accountID]
+		if exists && account.Status == "active" && account.Schedulable {
+			filtered.AccountIDs = append(filtered.AccountIDs, accountID)
+		}
+	}
+	if len(group.Members) > 0 {
+		filtered.Members = make([]model.GroupMember, 0, len(group.Members))
+		for _, member := range group.Members {
+			account, exists := accounts[member.AccountID]
+			if exists && account.Status == "active" && account.Schedulable {
+				filtered.Members = append(filtered.Members, member)
+			}
+		}
+	}
+	return filtered
 }
 
 func (s *Service) evaluateAlerts(ctx context.Context, results []model.ProbeResult, names map[string]string) {
@@ -161,6 +268,8 @@ func (s *Service) logCycle(snapshot model.Snapshot, probeAccounts []model.Accoun
 		"queued_accounts", len(probeAccounts),
 		"persisted_results", len(batch.persisted),
 		"passive_accounts", batch.passiveAccounts,
+		"deferred_accounts", batch.deferredAccounts,
+		"verified_accounts", batch.verifiedAccounts,
 		"observations", len(batch.observations),
 		"discovered_targets", len(snapshot.Accounts)+len(snapshot.Groups),
 	)
@@ -188,6 +297,15 @@ func targetNames(snapshot model.Snapshot) map[string]string {
 func containsProbe(results []model.ProbeResult) bool {
 	for _, result := range results {
 		if result.Source == "probe" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFreshObservation(results []model.ProbeResult) bool {
+	for _, result := range results {
+		if result.Source == "probe" || result.Source == "history" {
 			return true
 		}
 	}

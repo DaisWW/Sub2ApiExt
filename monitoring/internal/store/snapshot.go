@@ -15,20 +15,46 @@ import (
 )
 
 const snapshotQuery = `
-SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.credentials,
+WITH recent_account_usage AS MATERIALIZED (
+    SELECT DISTINCT ON (ul.account_id) ul.account_id, ul.created_at, ul.model
+    FROM usage_logs ul
+    JOIN (
+        SELECT account_id, MAX(created_at) AS created_at
+        FROM usage_logs
+        WHERE actual_cost > 0
+        GROUP BY account_id
+    ) latest ON latest.account_id = ul.account_id AND latest.created_at = ul.created_at
+    WHERE ul.actual_cost > 0
+    ORDER BY ul.account_id, ul.id DESC
+), recent_group_usage AS MATERIALIZED (
+    SELECT ul.group_id, ul.account_id, COUNT(*)::bigint AS request_count
+    FROM usage_logs ul
+    WHERE ul.group_id IS NOT NULL
+      AND ul.actual_cost > 0
+      AND ul.created_at >= NOW() - INTERVAL '24 hours'
+    GROUP BY ul.group_id, ul.account_id
+), latest_account_probe AS MATERIALIZED (
+    SELECT DISTINCT ON (mc.target_key) mc.target_key, mc.checked_at, mc.status
+    FROM monitoring_checks mc
+    WHERE mc.source = 'probe' AND mc.target_key LIKE 'account:%'
+    ORDER BY mc.target_key, mc.checked_at DESC, mc.id DESC
+)
+SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.credentials,
+       a.updated_at,
        a.proxy_id, p.protocol, p.host, p.port, p.username, p.password, p.status,
        recent.created_at, recent.model,
+       last_probe.checked_at, last_probe.status,
+       ag.priority, COALESCE(member_usage.request_count, 0),
        g.id, g.name, g.platform, g.status
 FROM accounts a
 LEFT JOIN proxies p ON p.id = a.proxy_id AND p.deleted_at IS NULL
-LEFT JOIN LATERAL (
-    SELECT ul.created_at, ul.model
-    FROM usage_logs ul
-	WHERE ul.account_id = a.id AND ul.actual_cost > 0
-    ORDER BY ul.created_at DESC, ul.id DESC
-    LIMIT 1
-) recent ON TRUE
+LEFT JOIN recent_account_usage recent ON recent.account_id = a.id
+LEFT JOIN latest_account_probe last_probe
+       ON last_probe.target_key = 'account:' || a.id::text
 LEFT JOIN account_groups ag ON ag.account_id = a.id
+LEFT JOIN recent_group_usage member_usage
+       ON member_usage.group_id = ag.group_id
+      AND member_usage.account_id = a.id
 LEFT JOIN groups g ON g.id = ag.group_id AND g.deleted_at IS NULL
 WHERE a.deleted_at IS NULL
 ORDER BY a.id, g.id`
@@ -36,11 +62,14 @@ ORDER BY a.id, g.id`
 type snapshotRow struct {
 	id, groupID, proxyID                  sql.NullInt64
 	name, platform, accountType, status   sql.NullString
+	accountPriority                       sql.NullInt64
 	proxyProtocol, proxyHost, proxyUser   sql.NullString
 	proxyPassword, proxyStatus            sql.NullString
 	proxyPort                             sql.NullInt64
-	lastActivity                          sql.NullTime
+	updatedAt, lastActivity, lastProbe    sql.NullTime
+	lastProbeStatus                       sql.NullString
 	recentModel                           sql.NullString
+	groupPriority, groupRequestCount      sql.NullInt64
 	schedulable                           bool
 	credentials                           []byte
 	groupName, groupPlatform, groupStatus sql.NullString
@@ -73,9 +102,11 @@ func (s *Store) LoadSnapshot(ctx context.Context) (model.Snapshot, error) {
 
 func (r *snapshotRow) scan(rows *sql.Rows) error {
 	return rows.Scan(
-		&r.id, &r.name, &r.platform, &r.accountType, &r.status, &r.schedulable, &r.credentials,
+		&r.id, &r.name, &r.platform, &r.accountType, &r.status, &r.schedulable, &r.accountPriority, &r.credentials,
+		&r.updatedAt,
 		&r.proxyID, &r.proxyProtocol, &r.proxyHost, &r.proxyPort, &r.proxyUser, &r.proxyPassword,
-		&r.proxyStatus, &r.lastActivity, &r.recentModel, &r.groupID, &r.groupName,
+		&r.proxyStatus, &r.lastActivity, &r.recentModel, &r.lastProbe,
+		&r.lastProbeStatus, &r.groupPriority, &r.groupRequestCount, &r.groupID, &r.groupName,
 		&r.groupPlatform, &r.groupStatus,
 	)
 }
@@ -105,6 +136,9 @@ func (r snapshotRow) account() (*model.Account, error) {
 		Type: r.accountType.String, Status: r.status.String,
 		Schedulable: r.schedulable, Credentials: map[string]any{},
 	}
+	if r.accountPriority.Valid {
+		account.Priority = int(r.accountPriority.Int64)
+	}
 	if len(r.credentials) > 0 {
 		if err := json.Unmarshal(r.credentials, &account.Credentials); err != nil {
 			return nil, fmt.Errorf("decode credentials for account %d: %w", account.ID, err)
@@ -114,6 +148,15 @@ func (r snapshotRow) account() (*model.Account, error) {
 		value := r.lastActivity.Time.UTC()
 		account.LastActivityAt = &value
 	}
+	if r.updatedAt.Valid {
+		value := r.updatedAt.Time.UTC()
+		account.UpdatedAt = &value
+	}
+	if r.lastProbe.Valid {
+		value := r.lastProbe.Time.UTC()
+		account.LastProbeAt = &value
+	}
+	account.LastProbeStatus = strings.TrimSpace(r.lastProbeStatus.String)
 	if r.recentModel.Valid {
 		account.RecentModel = strings.TrimSpace(r.recentModel.String)
 	}
@@ -153,6 +196,19 @@ func linkGroup(row snapshotRow, account *model.Account, groups map[int64]*model.
 	if !containsID(group.AccountIDs, account.ID) {
 		group.AccountIDs = append(group.AccountIDs, account.ID)
 	}
+	member := model.GroupMember{
+		AccountID:       account.ID,
+		GroupPriority:   nullInt(row.groupPriority),
+		AccountPriority: account.Priority,
+		RequestCount:    nullInt64(row.groupRequestCount),
+	}
+	for index := range group.Members {
+		if group.Members[index].AccountID == account.ID {
+			group.Members[index] = member
+			return
+		}
+	}
+	group.Members = append(group.Members, member)
 }
 
 func buildSnapshot(accounts map[int64]*model.Account, groups map[int64]*model.Group) model.Snapshot {
@@ -171,14 +227,21 @@ func buildSnapshot(accounts map[int64]*model.Account, groups map[int64]*model.Gr
 		copy.GroupIDs = filterIDs(account.GroupIDs, activeGroupIDs)
 		activeAccounts[id] = &copy
 	}
+	enabledAccounts := make(map[int64]*model.Account, len(activeAccounts))
+	for id, account := range activeAccounts {
+		if accountIsEnabled(*account) {
+			enabledAccounts[id] = account
+		}
+	}
 	activeGroups := make(map[int64]*model.Group, len(groups))
 	for id, group := range groups {
 		if !groupIsActive(group.Status) {
 			continue
 		}
 		copy := *group
-		copy.AccountIDs = filterAccountIDs(group.AccountIDs, activeAccounts)
-		copy.ProbeEnabled = groupProbeEnabled(copy, activeAccounts)
+		copy.AccountIDs = filterAccountIDs(group.AccountIDs, enabledAccounts)
+		copy.Members = filterGroupMembers(*group, enabledAccounts)
+		copy.ProbeEnabled = groupProbeEnabled(copy, enabledAccounts)
 		activeGroups[id] = &copy
 	}
 
@@ -214,7 +277,7 @@ func groupProbeEnabled(group model.Group, accounts map[int64]*model.Account) boo
 		return false
 	}
 	for _, accountID := range group.AccountIDs {
-		if account, ok := accounts[accountID]; ok && accountIsMonitored(*account) {
+		if account, ok := accounts[accountID]; ok && accountIsEnabled(*account) {
 			return true
 		}
 	}
@@ -225,9 +288,13 @@ func accountIsActive(status string) bool {
 	return strings.EqualFold(strings.TrimSpace(status), "active")
 }
 
+func accountIsEnabled(account model.Account) bool {
+	return accountIsActive(account.Status) && account.Schedulable
+}
+
 // accountIsMonitored 保留启用账户和错误账户；错误账户仅用于恢复探测，不进入启用统计。
 func accountIsMonitored(account model.Account) bool {
-	return account.Status == "error" || (accountIsActive(account.Status) && account.Schedulable)
+	return account.Status == "error" || accountIsEnabled(account)
 }
 
 func filterIDs(values []int64, allowed map[int64]struct{}) []int64 {
@@ -248,6 +315,62 @@ func filterAccountIDs(values []int64, accounts map[int64]*model.Account) []int64
 		}
 	}
 	return filtered
+}
+
+func filterGroupMembers(group model.Group, accounts map[int64]*model.Account) []model.GroupMember {
+	members := group.Members
+	if len(members) > 0 {
+		members = append([]model.GroupMember(nil), members...)
+	}
+	seen := make(map[int64]struct{}, len(members))
+	for _, member := range members {
+		seen[member.AccountID] = struct{}{}
+	}
+	for _, accountID := range group.AccountIDs {
+		if _, exists := seen[accountID]; exists {
+			continue
+		}
+		account, ok := accounts[accountID]
+		if !ok {
+			continue
+		}
+		members = append(members, model.GroupMember{AccountID: accountID, AccountPriority: account.Priority})
+		seen[accountID] = struct{}{}
+	}
+	filtered := make([]model.GroupMember, 0, len(members))
+	for _, member := range members {
+		if _, ok := accounts[member.AccountID]; !ok {
+			continue
+		}
+		if account, ok := accounts[member.AccountID]; ok {
+			member.AccountPriority = account.Priority
+		}
+		filtered = append(filtered, member)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].AccountPriority != filtered[j].AccountPriority {
+			return filtered[i].AccountPriority < filtered[j].AccountPriority
+		}
+		if filtered[i].GroupPriority != filtered[j].GroupPriority {
+			return filtered[i].GroupPriority < filtered[j].GroupPriority
+		}
+		return filtered[i].AccountID < filtered[j].AccountID
+	})
+	return filtered
+}
+
+func nullInt(value sql.NullInt64) int {
+	if !value.Valid {
+		return 0
+	}
+	return int(value.Int64)
+}
+
+func nullInt64(value sql.NullInt64) int64 {
+	if !value.Valid {
+		return 0
+	}
+	return value.Int64
 }
 
 func containsID(values []int64, value int64) bool {

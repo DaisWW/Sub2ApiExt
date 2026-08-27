@@ -100,10 +100,11 @@ function setLoading(loading) {
 
 function usageKPIs(summary) {
   return [
-    ['总 Tokens', formatTokens(summary.total_tokens), `${formatCount(summary.requests)} 次请求`, ''],
+    ['总 Tokens', formatTokens(summary.total_tokens), '', ''],
     ['输入 Tokens', formatTokens(summary.input_tokens), '', ''],
     ['输出 Tokens', formatTokens(summary.output_tokens), '', ''],
-    ['实际消耗', formatUSD(summary.total_cost), `${formatCount(summary.groups)} 个分组`, '']
+    ['请求数', formatCount(summary.requests), '', ''],
+    ['实际消耗', formatUSD(summary.total_cost), '', '']
   ];
 }
 

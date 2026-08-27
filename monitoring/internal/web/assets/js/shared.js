@@ -43,7 +43,7 @@ export function statusLabel(status) {
     operational: '正常',
     failed: '失败',
     error: '错误',
-    unknown: '等待探测',
+    unknown: '等待验证',
     disabled: '已暂停'
   }[normalizeStatus(status)];
 }

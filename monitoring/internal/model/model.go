@@ -20,19 +20,33 @@ const (
 // Account 是监控所需的最小账户快照。凭据不会由 HTTP 层返回，
 // 也不会被监控服务持久化。
 type Account struct {
-	ID             int64
-	Name           string
-	Platform       string
-	Type           string
-	Status         string
-	Schedulable    bool
-	Credentials    map[string]any
-	GroupIDs       []int64
-	LastActivityAt *time.Time
-	RecentModel    string
-	ChatGPTAccount string
-	ProxyURL       string
-	ProxyError     string
+	ID              int64
+	Name            string
+	Platform        string
+	Type            string
+	Priority        int
+	Status          string
+	Schedulable     bool
+	Credentials     map[string]any
+	GroupIDs        []int64
+	LastActivityAt  *time.Time
+	UpdatedAt       *time.Time
+	LastProbeAt     *time.Time
+	LastProbeStatus string
+	RecentModel     string
+	ChatGPTAccount  string
+	ProxyURL        string
+	ProxyError      string
+}
+
+// GroupMember 是分组内一个可调度账户的路由元数据和近期真实流量。
+// 账户优先级是主要排序信号，GroupPriority（数字越小越优先）用于同级候选；
+// RequestCount 用于修正仅按成员等权聚合的偏差。
+type GroupMember struct {
+	AccountID       int64
+	GroupPriority   int
+	AccountPriority int
+	RequestCount    int64
 }
 
 type Group struct {
@@ -41,6 +55,7 @@ type Group struct {
 	Platform     string
 	Status       string
 	AccountIDs   []int64
+	Members      []GroupMember
 	ProbeEnabled bool
 }
 
@@ -61,6 +76,7 @@ type Target struct {
 	Status            string     `json:"status"`
 	Stale             bool       `json:"stale"`
 	LatestSource      string     `json:"latest_source,omitempty"`
+	LatestMessage     string     `json:"latest_message,omitempty"`
 	LatestLatencyMs   *int       `json:"latest_latency_ms,omitempty"`
 	LatestFirstByteMs *int       `json:"latest_first_byte_ms,omitempty"`
 }
@@ -103,9 +119,10 @@ type DashboardTarget struct {
 
 // StatusSample 是目标最近一次观测的紧凑状态，用于绘制状态轨迹。
 type StatusSample struct {
-	Status    string    `json:"status"`
-	CheckedAt time.Time `json:"checked_at"`
-	Source    string    `json:"source"`
+	Status      string     `json:"status"`
+	CheckedAt   time.Time  `json:"checked_at"`
+	Source      string     `json:"source"`
+	CarriedFrom *time.Time `json:"carried_from,omitempty"`
 }
 
 type Summary struct {
