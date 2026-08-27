@@ -288,10 +288,10 @@ func routingGroupMessage(group model.Group, status string, total, healthy, faile
 		return groupMessage(total, healthy)
 	}
 	if status == model.StatusFailed {
-		return fmt.Sprintf("%d/%d accounts healthy", healthy, total)
+		return fmt.Sprintf("当前无可用候选：%d/%d", healthy, total)
 	}
 	if status == model.StatusUnknown {
-		return fmt.Sprintf("无法确认可用路由：%d/%d accounts healthy，%d 个账户待验证", healthy, total, unknown)
+		return fmt.Sprintf("无法确认可用路由：%d/%d 个候选可用；%d 个账户待验证", healthy, total, unknown)
 	}
 	if failed == 0 && unknown == 0 {
 		return "全部账户正常"
@@ -300,7 +300,7 @@ func routingGroupMessage(group model.Group, status string, total, healthy, faile
 	if totalRiskWeight > 0 {
 		risk = failedRiskWeight / totalRiskWeight * 100
 	}
-	return fmt.Sprintf("当前路由可用：%d/%d accounts healthy；异常 %d，待验证 %d；预计失败暴露 %.1f%%",
+	return fmt.Sprintf("当前仍可用：%d/%d 个候选；异常 %d，待验证 %d；预计失败暴露 %.1f%%",
 		healthy, total, failed, unknown, risk)
 }
 

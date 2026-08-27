@@ -376,7 +376,7 @@ func TestAggregateGroupsPersistsAllKnownProbeFailures(t *testing.T) {
 	}
 
 	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
-	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusFailed || batch.persisted[0].Message != "0/2 accounts healthy" {
+	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusFailed || batch.persisted[0].Message != "当前无可用候选：0/2" {
 		t.Fatalf("all failed candidates did not persist a failed aggregate: %+v", batch.persisted)
 	}
 }
