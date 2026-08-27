@@ -71,6 +71,22 @@ WITH bounds AS (
 	           ORDER BY CASE WHEN source = 'history' THEN 0 ELSE 1 END, checked_at DESC
 	       ) AS position
 	FROM recent_bucketed
+), prior_samples AS MATERIALIZED (
+	SELECT mc.target_key, mc.status, mc.checked_at, mc.source
+	FROM monitoring_checks mc
+	CROSS JOIN bounds
+	WHERE mc.checked_at < bounds.start_at
+	  AND mc.status NOT IN ('unknown', 'disabled')
+	UNION ALL
+	SELECT targets.target_key, 'operational', targets.last_activity_at, 'history'
+	FROM monitoring_targets targets
+	CROSS JOIN bounds
+	WHERE targets.last_activity_at IS NOT NULL
+	  AND targets.last_activity_at < bounds.start_at
+), prior_ranked AS (
+	SELECT DISTINCT ON (target_key) target_key, status, checked_at, source
+	FROM prior_samples
+	ORDER BY target_key, checked_at DESC, CASE WHEN source = 'history' THEN 0 ELSE 1 END
 ), recent AS (
 	SELECT targets.target_key,
 	       jsonb_agg(jsonb_build_object(
@@ -133,11 +149,12 @@ SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t
        COALESCE(s.samples,0), COALESCE(s.successful,0),
 	       s.first_fastest, s.first_median, s.first_p95,
 	       s.latency_fastest, s.latency_median, s.latency_p95,
-	       COALESCE(r.samples, '[]'::jsonb)
+	       COALESCE(r.samples, '[]'::jsonb), p.status, p.checked_at, p.source
 FROM monitoring_targets t
 LEFT JOIN latest_evidence e ON e.target_key = t.target_key
 LEFT JOIN stats s ON s.target_key = t.target_key
 LEFT JOIN recent r ON r.target_key = t.target_key
+LEFT JOIN prior_ranked p ON p.target_key = t.target_key
 WHERE t.active = TRUE AND LOWER(TRIM(t.source_status)) = 'active'
 ORDER BY CASE WHEN t.kind = 'group' THEN 0 ELSE 1 END, t.name, t.entity_id`
 
@@ -194,13 +211,15 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	var firstFastest, latencyFastest sql.NullInt64
 	var firstMedian, firstP95, latencyMedian, latencyP95 sql.NullFloat64
 	var recentJSON []byte
+	var priorStatus, priorSource sql.NullString
+	var priorAt sql.NullTime
 	if err := rows.Scan(
 		&target.Key, &target.Kind, &target.EntityID, &target.Name, &target.Platform,
 		&target.SourceStatus, &target.ProbeEnabled,
 		&latestStatus, &latestLatency,
 		&latestFirst, &latestAt, &latestSource, &latestMessage, &samples, &successful,
 		&firstFastest, &firstMedian, &firstP95, &latencyFastest,
-		&latencyMedian, &latencyP95, &recentJSON,
+		&latencyMedian, &latencyP95, &recentJSON, &priorStatus, &priorAt, &priorSource,
 	); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("scan dashboard: %w", err)
 	}
@@ -209,12 +228,20 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	if err := json.Unmarshal(recentJSON, &target.RecentSamples); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("decode recent samples: %w", err)
 	}
-	carryForwardStatusSamples(target.RecentSamples)
+	var prior *model.StatusSample
+	if priorStatus.Valid && priorAt.Valid {
+		prior = &model.StatusSample{Status: priorStatus.String, CheckedAt: priorAt.Time.UTC(), Source: priorSource.String}
+	}
+	carryForwardStatusSamples(target.RecentSamples, prior)
 	return target, target.ProbeEnabled && samples > 0, nil
 }
 
-func carryForwardStatusSamples(samples []model.StatusSample) {
+func carryForwardStatusSamples(samples []model.StatusSample, priorSamples ...*model.StatusSample) {
 	var previous *model.StatusSample
+	if len(priorSamples) > 0 && priorSamples[0] != nil {
+		observed := *priorSamples[0]
+		previous = &observed
+	}
 	for i := range samples {
 		sample := &samples[i]
 		switch sample.Status {
