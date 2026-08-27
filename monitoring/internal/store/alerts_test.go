@@ -1,8 +1,10 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
@@ -38,6 +40,24 @@ func TestAlertStateDoesNotTreatDegradedAsRecovery(t *testing.T) {
 	}
 	if event := state.observe(model.StatusOperational, policy); event != model.StatusOperational {
 		t.Fatalf("clean recovery event = %q, want %q", event, model.StatusOperational)
+	}
+}
+
+func TestAlertStateResetsWhenTargetSourceWasUpdated(t *testing.T) {
+	updatedAt := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	state := alertState{
+		failureStreak:  4,
+		recoveryStreak: 1,
+		alertedStatus:  model.StatusFailed,
+		updatedAt:      sql.NullTime{Time: updatedAt.Add(-time.Minute), Valid: true},
+	}
+	sourceUpdatedAt := sql.NullTime{Time: updatedAt, Valid: true}
+	if alertStateCurrent(state.updatedAt, sourceUpdatedAt) {
+		t.Fatal("alert state before target update must be stale")
+	}
+	state.reset()
+	if state.failureStreak != 0 || state.recoveryStreak != 0 || state.alertedStatus != "" {
+		t.Fatalf("stale alert state was not reset: %+v", state)
 	}
 }
 

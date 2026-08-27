@@ -94,27 +94,32 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"eligible_usage AS MATERIALIZED",
 		"generate_series(0, 23)",
 		"PARTITION BY target_key, bucket_index",
-		"JOIN monitoring_targets targets ON targets.target_key = samples.target_key",
-		"CASE WHEN kind = 'group' AND source = 'aggregate' THEN 0 ELSE 1 END",
-		"CASE WHEN source = 'probe' THEN 0 WHEN source = 'history' THEN 1 ELSE 2 END",
+		"ORDER BY checked_at DESC",
+		"CASE WHEN source = 'history' THEN 0 WHEN source = 'probe' THEN 1 ELSE 2 END",
 		"COALESCE(recent_ranked.status, 'unknown')",
 		"LEFT JOIN LATERAL",
 		"ORDER BY mc.checked_at DESC, mc.id DESC",
 		"targets.last_activity_at >= latest_checks.checked_at",
+		"targets.source_updated_at",
+		"mc.checked_at >= targets.source_updated_at",
+		"targets.last_activity_at >= targets.source_updated_at",
+		"THEN 'degraded'",
+		"THEN '近期真实请求证明仍可用；候选检查异常，等待巡检确认'",
 		"NOW() - INTERVAL '24 hours' AS start_at",
 		"EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds",
 		"latest_evidence",
 		"latest_evidence_inputs",
 		"COALESCE(alert_states.failure_streak, 0) AS failure_streak",
-		"LEFT JOIN monitoring_alert_states alert_states ON alert_states.target_key = targets.target_key",
+		"LEFT JOIN monitoring_alert_states alert_states",
+		"alert_states.updated_at >= targets.source_updated_at",
 		"e.failure_streak",
 		"WHEN t.kind = 'group' THEN g.rate_multiplier::double precision",
 		"WHEN t.kind = 'account' THEN a.rate_multiplier::double precision",
 		"LEFT JOIN accounts a ON t.kind = 'account' AND a.id = t.entity_id AND a.deleted_at IS NULL",
 		"LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL",
-		"targets.kind = 'group'",
-		"latest_checks.source = 'aggregate'",
-		"latest_checks.status, '') IN ('degraded', 'failed', 'error')",
+		"kind = 'group'",
+		"source = 'aggregate'",
+		"status, '') IN ('degraded', 'failed', 'error')",
 	} {
 		if !strings.Contains(dashboardQuery, fragment) {
 			t.Fatalf("dashboard query missing %q", fragment)
@@ -135,12 +140,18 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	if strings.Contains(dashboardQuery, "first_seen_at") {
 		t.Fatal("dashboard query must not depend on the removed idle timestamp")
 	}
-	if strings.Contains(dashboardQuery, "CASE WHEN source = 'history' THEN 0 ELSE 1 END") {
-		t.Fatal("history must not outrank a newer probe or aggregate observation")
+	if strings.Contains(dashboardQuery, "CASE WHEN kind = 'group' AND source = 'aggregate' THEN 0 ELSE 1 END") {
+		t.Fatal("an older aggregate observation must not outrank a newer real request")
+	}
+	if strings.Contains(dashboardQuery, "AND NOT (") {
+		t.Fatal("a newer successful request must be allowed to prove that a group still has a working route")
 	}
 }
 
 func TestEffectiveDashboardStatusRequiresConfirmedAggregateFailures(t *testing.T) {
+	if got := effectiveDashboardStatus(model.KindGroup, model.StatusDegraded, "aggregate", 2, 2); got != model.StatusDegraded {
+		t.Fatalf("real traffic backed aggregate risk = %q, want degraded", got)
+	}
 	if got := effectiveDashboardStatus(model.KindGroup, model.StatusFailed, "aggregate", 1, 2); got != model.StatusDegraded {
 		t.Fatalf("single aggregate failure = %q, want degraded", got)
 	}

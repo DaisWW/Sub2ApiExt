@@ -13,7 +13,10 @@ WITH aggregated AS (
            COALESCE(NULLIF(a.name, ''), '账户 #' || ul.account_id::text) AS name,
            COALESCE(a.platform, 'unknown') AS platform,
            COUNT(*)::bigint AS requests,
-           COALESCE(SUM(ul.input_tokens::bigint + ul.output_tokens::bigint + ul.cache_creation_tokens::bigint + ul.cache_read_tokens::bigint), 0)::bigint AS total_tokens,
+            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+                         COALESCE(ul.output_tokens, 0)::bigint +
+                         COALESCE(ul.cache_creation_tokens, 0)::bigint +
+                         COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
            COALESCE(SUM(ul.input_tokens), 0)::bigint AS input_tokens,
            COALESCE(SUM(ul.cache_read_tokens), 0)::bigint AS cache_read_tokens,
            COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
@@ -48,7 +51,10 @@ WITH aggregated AS (
            COALESCE(NULLIF(g.name, ''), '分组 #' || ul.group_id::text) AS name,
            COALESCE(g.platform, 'unknown') AS platform,
            COUNT(*)::bigint AS requests,
-           COALESCE(SUM(ul.input_tokens::bigint + ul.output_tokens::bigint + ul.cache_creation_tokens::bigint + ul.cache_read_tokens::bigint), 0)::bigint AS total_tokens,
+            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+                         COALESCE(ul.output_tokens, 0)::bigint +
+                         COALESCE(ul.cache_creation_tokens, 0)::bigint +
+                         COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
            COALESCE(SUM(ul.input_tokens), 0)::bigint AS input_tokens,
            COALESCE(SUM(ul.cache_read_tokens), 0)::bigint AS cache_read_tokens,
            COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
@@ -88,7 +94,10 @@ func (s *Store) loadModelUsageRanks(ctx context.Context, bounds usageBounds, lim
 WITH aggregated AS (
     SELECT COALESCE(NULLIF(ul.model, ''), 'unknown') AS name,
            COUNT(*)::bigint AS requests,
-           COALESCE(SUM(ul.input_tokens::bigint + ul.output_tokens::bigint + ul.cache_creation_tokens::bigint + ul.cache_read_tokens::bigint), 0)::bigint AS total_tokens,
+            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+                         COALESCE(ul.output_tokens, 0)::bigint +
+                         COALESCE(ul.cache_creation_tokens, 0)::bigint +
+                         COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
            COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
       FROM usage_logs ul
       JOIN accounts a ON a.id = ul.account_id

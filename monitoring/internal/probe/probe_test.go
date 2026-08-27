@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -263,5 +264,29 @@ func TestProbeRejectsPrivateTargetEvenWithProxy(t *testing.T) {
 	})
 	if result.Status != model.StatusError || result.ErrorClass != "configuration" {
 		t.Fatalf("private target should fail before proxy execution: %+v", result)
+	}
+}
+
+func TestIsPublicIPRejectsSpecialUseNetworks(t *testing.T) {
+	for _, raw := range []string{
+		"100.64.0.1", "192.0.2.1", "198.18.0.1", "198.51.100.1", "203.0.113.1",
+		"2001:db8::1", "2001:2::1", "fc00::1", "fe80::1",
+	} {
+		if isPublicIP(net.ParseIP(raw)) {
+			t.Errorf("isPublicIP(%s) = true, want false", raw)
+		}
+	}
+	for _, raw := range []string{"8.8.8.8", "2001:4860:4860::8888"} {
+		if !isPublicIP(net.ParseIP(raw)) {
+			t.Errorf("isPublicIP(%s) = false, want true", raw)
+		}
+	}
+}
+
+func TestAccountBlockerNormalizesStatus(t *testing.T) {
+	for _, status := range []string{" ACTIVE ", "Error"} {
+		if failure := accountBlocker(model.Account{Platform: "openai", Type: "apikey", Status: status, Schedulable: true}); failure != nil {
+			t.Errorf("accountBlocker(%q) returned %v", status, failure)
+		}
 	}
 }

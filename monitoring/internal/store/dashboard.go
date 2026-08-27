@@ -23,6 +23,10 @@ WITH bounds AS (
 	SELECT id
 	FROM groups
 	WHERE deleted_at IS NULL AND LOWER(TRIM(status)) = 'active'
+), active_targets AS MATERIALIZED (
+    SELECT target_key, source_updated_at
+    FROM monitoring_targets
+    WHERE active = TRUE AND LOWER(TRIM(source_status)) = 'active'
 ), period_usage AS MATERIALIZED (
 	SELECT ul.account_id, ul.group_id, ul.duration_ms, ul.first_token_ms, ul.created_at
 	FROM usage_logs ul
@@ -34,15 +38,22 @@ WITH bounds AS (
 	JOIN active_accounts a ON a.id = ul.account_id
 	JOIN active_groups g ON g.id = ul.group_id
 ), samples AS (
-    SELECT target_key, status, latency_ms, first_byte_ms, checked_at, source
-    FROM monitoring_checks, bounds
-    WHERE checked_at >= bounds.start_at AND checked_at < bounds.end_at
+    SELECT mc.target_key, mc.status, mc.latency_ms, mc.first_byte_ms, mc.checked_at, mc.source
+    FROM monitoring_checks mc
+    JOIN active_targets targets ON targets.target_key = mc.target_key
+    CROSS JOIN bounds
+    WHERE mc.checked_at >= bounds.start_at AND mc.checked_at < bounds.end_at
+      AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at)
 	UNION ALL
-	SELECT 'account:' || account_id::text, 'operational', duration_ms, first_token_ms, created_at, 'history'
-	FROM eligible_usage
+	SELECT targets.target_key, 'operational', usage.duration_ms, usage.first_token_ms, usage.created_at, 'history'
+	FROM eligible_usage usage
+	JOIN active_targets targets ON targets.target_key = 'account:' || usage.account_id::text
+	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at
 	UNION ALL
-	SELECT 'group:' || group_id::text, 'operational', duration_ms, first_token_ms, created_at, 'history'
-	FROM eligible_usage
+	SELECT targets.target_key, 'operational', usage.duration_ms, usage.first_token_ms, usage.created_at, 'history'
+	FROM eligible_usage usage
+	JOIN active_targets targets ON targets.target_key = 'group:' || usage.group_id::text
+	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at
 ), stats AS (
     SELECT target_key,
            COUNT(*) FILTER (WHERE status NOT IN ('unknown','disabled')) AS samples,
@@ -58,19 +69,17 @@ WITH bounds AS (
 ), bucket_positions AS (
 	SELECT generate_series(0, 23)::int AS bucket_index
 ), recent_bucketed AS (
-	SELECT samples.target_key, targets.kind, samples.status, samples.checked_at, samples.source,
+	SELECT samples.target_key, samples.status, samples.checked_at, samples.source,
 	       LEAST(23, FLOOR(EXTRACT(EPOCH FROM (samples.checked_at - bounds.start_at)) / bounds.bucket_seconds)::int) AS bucket_index
 	FROM samples
-	JOIN monitoring_targets targets ON targets.target_key = samples.target_key
 	CROSS JOIN bounds
 	WHERE samples.status NOT IN ('unknown','disabled')
 ), recent_ranked AS (
 	SELECT target_key, status, checked_at, source, bucket_index,
 	       ROW_NUMBER() OVER (
 	           PARTITION BY target_key, bucket_index
-	           ORDER BY CASE WHEN kind = 'group' AND source = 'aggregate' THEN 0 ELSE 1 END,
-	                    checked_at DESC,
-	                    CASE WHEN source = 'probe' THEN 0 WHEN source = 'history' THEN 1 ELSE 2 END
+	           ORDER BY checked_at DESC,
+	                    CASE WHEN source = 'history' THEN 0 WHEN source = 'probe' THEN 1 ELSE 2 END
 	       ) AS position
 	FROM recent_bucketed
 ), recent AS (
@@ -100,35 +109,54 @@ WITH bounds AS (
         SELECT mc.status, mc.latency_ms, mc.first_byte_ms, mc.checked_at, mc.source, mc.message
         FROM monitoring_checks mc
         WHERE mc.target_key = targets.target_key
+          AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at)
         ORDER BY mc.checked_at DESC, mc.id DESC
         LIMIT 1
     ) checks ON TRUE
 ), latest_evidence_inputs AS (
-    SELECT targets.target_key, targets.kind, targets.last_activity_at,
+    SELECT targets.target_key, targets.kind, targets.last_activity_at, targets.source_updated_at,
            latest_checks.status, latest_checks.latency_ms, latest_checks.first_byte_ms,
            latest_checks.checked_at, latest_checks.source, latest_checks.message,
            COALESCE(alert_states.failure_streak, 0) AS failure_streak,
-           CASE WHEN targets.last_activity_at IS NOT NULL
-                      AND NOT (
-                          targets.kind = 'group'
-                          AND latest_checks.source = 'aggregate'
-                          AND COALESCE(latest_checks.status, '') IN ('degraded', 'failed', 'error')
-                      )
-                      AND (latest_checks.checked_at IS NULL
+            CASE WHEN targets.last_activity_at IS NOT NULL
+                       AND (targets.source_updated_at IS NULL
+                            OR targets.last_activity_at >= targets.source_updated_at)
+                       AND (latest_checks.checked_at IS NULL
                            OR targets.last_activity_at >= latest_checks.checked_at)
                 THEN TRUE ELSE FALSE END AS history_wins
     FROM monitoring_targets targets
     CROSS JOIN bounds
     LEFT JOIN latest_checks ON latest_checks.target_key = targets.target_key
-    LEFT JOIN monitoring_alert_states alert_states ON alert_states.target_key = targets.target_key
+    LEFT JOIN monitoring_alert_states alert_states
+           ON alert_states.target_key = targets.target_key
+          AND (targets.source_updated_at IS NULL
+               OR alert_states.updated_at >= targets.source_updated_at)
 ), latest_evidence AS (
     SELECT target_key,
-           CASE WHEN history_wins THEN 'operational' ELSE status END AS status,
+           CASE WHEN history_wins
+                     AND kind = 'group'
+                     AND source = 'aggregate'
+                     AND COALESCE(status, '') IN ('degraded', 'failed', 'error')
+                THEN 'degraded'
+                WHEN history_wins THEN 'operational'
+                ELSE status END AS status,
            CASE WHEN history_wins THEN NULL ELSE latency_ms END AS latency_ms,
            CASE WHEN history_wins THEN NULL ELSE first_byte_ms END AS first_byte_ms,
            CASE WHEN history_wins THEN last_activity_at ELSE checked_at END AS checked_at,
-           CASE WHEN history_wins THEN 'history' ELSE source END AS source,
-           CASE WHEN history_wins THEN '近期真实请求' ELSE message END AS message,
+           CASE WHEN history_wins
+                     AND kind = 'group'
+                     AND source = 'aggregate'
+                     AND COALESCE(status, '') IN ('degraded', 'failed', 'error')
+                THEN source
+                WHEN history_wins THEN 'history'
+                ELSE source END AS source,
+           CASE WHEN history_wins
+                     AND kind = 'group'
+                     AND source = 'aggregate'
+                     AND COALESCE(status, '') IN ('degraded', 'failed', 'error')
+                THEN '近期真实请求证明仍可用；候选检查异常，等待巡检确认'
+                WHEN history_wins THEN '近期真实请求'
+                ELSE message END AS message,
            failure_streak
     FROM latest_evidence_inputs
 )

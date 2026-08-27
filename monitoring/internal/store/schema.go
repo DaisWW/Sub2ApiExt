@@ -12,12 +12,15 @@ CREATE TABLE IF NOT EXISTS monitoring_targets (
     platform TEXT NOT NULL DEFAULT '',
     source_status TEXT NOT NULL DEFAULT '',
     probe_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    active BOOLEAN NOT NULL DEFAULT TRUE,
+	active BOOLEAN NOT NULL DEFAULT TRUE,
 	last_activity_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	source_updated_at TIMESTAMPTZ,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
+ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS monitoring_checks (
     id BIGSERIAL PRIMARY KEY,
     target_key TEXT NOT NULL,

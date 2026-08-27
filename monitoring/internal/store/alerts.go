@@ -13,6 +13,7 @@ type alertState struct {
 	failureStreak  int
 	recoveryStreak int
 	alertedStatus  string
+	updatedAt      sql.NullTime
 }
 
 func (s *Store) Alerts(ctx context.Context, limit int) ([]model.Alert, error) {
@@ -55,6 +56,15 @@ func (s *Store) EvaluateAlert(ctx context.Context, result model.ProbeResult, nam
 	if err != nil {
 		return err
 	}
+	if exists {
+		sourceUpdatedAt, err := loadTargetSourceUpdatedAt(ctx, tx, result.TargetKey)
+		if err != nil {
+			return err
+		}
+		if !alertStateCurrent(state.updatedAt, sourceUpdatedAt) {
+			state.reset()
+		}
+	}
 	eventStatus := state.observe(result.Status, policy)
 	if err := saveAlertState(ctx, tx, result.TargetKey, result.Status, state, exists); err != nil {
 		return err
@@ -69,13 +79,23 @@ func (s *Store) EvaluateAlert(ctx context.Context, result model.ProbeResult, nam
 
 func loadAlertState(ctx context.Context, tx *sql.Tx, key string) (alertState, bool, error) {
 	var state alertState
-	err := tx.QueryRowContext(ctx, `SELECT failure_streak, recovery_streak, alerted_status
+	err := tx.QueryRowContext(ctx, `SELECT failure_streak, recovery_streak, alerted_status, updated_at
 FROM monitoring_alert_states WHERE target_key = $1 FOR UPDATE`, key).
-		Scan(&state.failureStreak, &state.recoveryStreak, &state.alertedStatus)
+		Scan(&state.failureStreak, &state.recoveryStreak, &state.alertedStatus, &state.updatedAt)
 	if err == sql.ErrNoRows {
 		return alertState{}, false, nil
 	}
 	return state, true, err
+}
+
+func loadTargetSourceUpdatedAt(ctx context.Context, tx *sql.Tx, key string) (sql.NullTime, error) {
+	var updatedAt sql.NullTime
+	err := tx.QueryRowContext(ctx, `SELECT source_updated_at
+FROM monitoring_targets WHERE target_key = $1`, key).Scan(&updatedAt)
+	if err == sql.ErrNoRows {
+		return sql.NullTime{}, nil
+	}
+	return updatedAt, err
 }
 
 func saveAlertState(ctx context.Context, tx *sql.Tx, key, observed string, state alertState, exists bool) error {
@@ -126,6 +146,12 @@ func (s *alertState) observe(status string, policy model.AlertPolicy) string {
 	default:
 		return ""
 	}
+}
+
+func (s *alertState) reset() {
+	s.failureStreak = 0
+	s.recoveryStreak = 0
+	s.alertedStatus = ""
 }
 
 func alertableStatus(status string) bool {

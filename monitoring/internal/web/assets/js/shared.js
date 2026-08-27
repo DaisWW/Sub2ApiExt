@@ -40,7 +40,7 @@ export function normalizeStatus(status) {
 export function statusLabel(status) {
   return {
     operational: '正常',
-    degraded: '降级',
+    degraded: '可用但有风险',
     failed: '失败',
     error: '错误',
     unknown: '等待验证',

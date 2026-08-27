@@ -73,7 +73,7 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	dashboard, err := s.service.Dashboard(r.Context())
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, "监控面板暂时不可用")
 		return
 	}
 	writeJSON(w, http.StatusOK, dashboard)
@@ -90,7 +90,7 @@ func (s *Server) usageRanking(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "period must be 1h, 24h, today, 7d, 15d, or 30d")
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, "用量数据暂时不可用")
 		return
 	}
 	writeJSON(w, http.StatusOK, ranking)
@@ -105,7 +105,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	limit := boundedQueryInt(r, "limit", 240, 1, 1000)
 	items, err := s.service.History(r.Context(), key, limit)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, "历史数据暂时不可用")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"target": key, "items": items})
@@ -114,7 +114,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
 	items, err := s.service.Alerts(r.Context(), boundedQueryInt(r, "limit", 50, 1, 200))
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeError(w, http.StatusServiceUnavailable, "告警数据暂时不可用")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})

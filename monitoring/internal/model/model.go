@@ -57,6 +57,7 @@ type Group struct {
 	Name             string
 	Platform         string
 	Status           string
+	UpdatedAt        *time.Time
 	AccountIDs       []int64
 	Members          []GroupMember
 	HasActiveChannel bool

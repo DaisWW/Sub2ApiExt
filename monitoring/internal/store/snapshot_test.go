@@ -105,6 +105,53 @@ func TestFilterGroupMembersPreservesConfiguredPriority(t *testing.T) {
 	}
 }
 
+func TestLinkGroupPreservesSourceUpdatedAt(t *testing.T) {
+	updated := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	row := snapshotRow{
+		groupID:               sql.NullInt64{Int64: 7, Valid: true},
+		groupName:             sql.NullString{String: "group", Valid: true},
+		groupStatus:           sql.NullString{String: "active", Valid: true},
+		groupUpdatedAt:        sql.NullTime{Time: updated, Valid: true},
+		groupHasActiveChannel: true,
+	}
+	account := &model.Account{ID: 3}
+	groups := make(map[int64]*model.Group)
+
+	linkGroup(row, account, groups)
+
+	group := groups[7]
+	if group == nil {
+		t.Fatal("group was not linked")
+	}
+	if group.UpdatedAt == nil || !group.UpdatedAt.Equal(updated) {
+		t.Fatalf("group source update time = %#v, want %s", group.UpdatedAt, updated)
+	}
+}
+
+func TestBuildSnapshotKeepsFilteredMemberUpdateForGroupEvidence(t *testing.T) {
+	groupUpdated := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	filteredMemberUpdated := groupUpdated.Add(time.Hour)
+	accounts := map[int64]*model.Account{
+		1: {ID: 1, Status: "active", Schedulable: true, GroupIDs: []int64{7}, UpdatedAt: &groupUpdated},
+		2: {ID: 2, Status: "error", Schedulable: true, GroupIDs: []int64{7}, UpdatedAt: &filteredMemberUpdated},
+	}
+	groups := map[int64]*model.Group{
+		7: {ID: 7, Status: "active", AccountIDs: []int64{1, 2}, UpdatedAt: &groupUpdated},
+	}
+
+	snapshot := buildSnapshot(accounts, groups)
+	if len(snapshot.Groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(snapshot.Groups))
+	}
+	group := snapshot.Groups[0]
+	if !reflect.DeepEqual(group.AccountIDs, []int64{1}) {
+		t.Fatalf("routable account IDs = %v, want [1]", group.AccountIDs)
+	}
+	if group.UpdatedAt == nil || !group.UpdatedAt.Equal(filteredMemberUpdated) {
+		t.Fatalf("group source update = %v, want %s", group.UpdatedAt, filteredMemberUpdated)
+	}
+}
+
 func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 	for _, fragment := range []string{
 		"WITH recent_account_usage AS MATERIALIZED",
@@ -116,9 +163,12 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 		"channel_groups",
 		"JOIN channels",
 		"LOWER(TRIM(c.status)) = 'active'",
+		"LOWER(TRIM(p.status)) = 'active'",
+		"p.expires_at > NOW()",
 		"last_probe.error_class",
 		"last_probe.status_code",
 		"failure_streak",
+		"g.updated_at",
 	} {
 		if !strings.Contains(snapshotQuery, fragment) {
 			t.Fatalf("snapshot query missing %q", fragment)
@@ -126,6 +176,41 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 	}
 	if strings.Contains(snapshotQuery, "COUNT(*)::bigint AS request_count\n    FROM usage_logs ul\n    WHERE ul.account_id = a.id") {
 		t.Fatal("snapshot query must not count usage once per account-group row")
+	}
+}
+
+func TestGroupSnapshotQueryIncludesUnboundGroups(t *testing.T) {
+	for _, fragment := range []string{
+		"FROM groups g",
+		"g.deleted_at IS NULL",
+		"EXISTS (",
+		"channel_groups cg",
+		"LOWER(TRIM(c.status)) = 'active'",
+	} {
+		if !strings.Contains(groupSnapshotQuery, fragment) {
+			t.Fatalf("group snapshot query missing %q", fragment)
+		}
+	}
+}
+
+func TestMergeGroupSnapshotRowAddsEmptyGroup(t *testing.T) {
+	updated := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	groups := make(map[int64]*model.Group)
+	mergeGroupSnapshotRow(groupSnapshotRow{
+		groupID:          sql.NullInt64{Int64: 12, Valid: true},
+		name:             sql.NullString{String: "empty", Valid: true},
+		platform:         sql.NullString{String: "openai", Valid: true},
+		status:           sql.NullString{String: "active", Valid: true},
+		updatedAt:        sql.NullTime{Time: updated, Valid: true},
+		hasActiveChannel: false,
+	}, groups)
+
+	group := groups[12]
+	if group == nil || group.Name != "empty" || group.Status != "active" || len(group.AccountIDs) != 0 || group.HasActiveChannel {
+		t.Fatalf("empty group was not merged correctly: %+v", group)
+	}
+	if group.UpdatedAt == nil || !group.UpdatedAt.Equal(updated) {
+		t.Fatalf("group update = %v, want %s", group.UpdatedAt, updated)
 	}
 }
 

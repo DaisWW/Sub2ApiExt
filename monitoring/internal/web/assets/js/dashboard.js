@@ -144,7 +144,8 @@ export class DashboardPanel {
     const hasSamples = samples > 0;
     const availabilityLabel = hasSamples ? `${samples} 次样本` : '暂无样本';
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
-    const availabilityTone = hasSamples ? availabilityClass(stats.availability, status) : 'neutral';
+    const availabilityStatus = item.kind === 'group' && status === 'degraded' ? '' : status;
+    const availabilityTone = hasSamples ? availabilityClass(stats.availability, availabilityStatus) : 'neutral';
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
@@ -163,7 +164,7 @@ export class DashboardPanel {
           </div>
           <div class="target-head-meta">
             ${currentRate ? `<span class="current-rate" title="${currentRateTitle}">${currentRateLabel} ${currentRate}</span>` : ''}
-            <span class="status-badge ${statusClass(status)}">${statusLabel(status)}</span>
+            <span class="status-badge ${statusClass(status)}">${targetStatusLabel(item, status)}</span>
           </div>
         </div>
         <div class="availability">
@@ -178,7 +179,7 @@ export class DashboardPanel {
         </div>
         <div class="card-foot">
           ${renderStatusHistory(item.recent_samples || [])}
-          <span>最近验证 · ${source} · ${formatTime(item.last_checked_at)}</span>
+          <span>最新证据 · ${source} · ${formatTime(item.last_checked_at)}</span>
         </div>
       </article>`;
   }
@@ -237,6 +238,19 @@ function sourceLabel(source) {
   if (source === 'history') return '真实请求';
   if (source === 'aggregate') return '分组候选检查';
   return source ? '主动探测' : '暂无来源';
+}
+
+function targetStatusLabel(item, status) {
+  if (item.kind !== 'group') return statusLabel(status);
+  if (status === 'degraded' && item.latest_source === 'aggregate' && isPendingAggregateFailure(item.latest_message)) {
+    return '候选待确认';
+  }
+  if ((status === 'failed' || status === 'error') && item.latest_source === 'aggregate') return '候选不可用';
+  return statusLabel(status);
+}
+
+function isPendingAggregateFailure(message) {
+  return String(message || '').includes('等待下一轮确认');
 }
 
 function staleLabel(item, status) {

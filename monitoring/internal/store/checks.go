@@ -9,6 +9,48 @@ import (
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
+const historyQuery = `
+WITH authorized_target AS (
+    SELECT $1::text AS target_key, NULL::timestamptz AS source_updated_at
+    WHERE $1 = 'group:-1'
+    UNION
+    SELECT target_key, source_updated_at
+    FROM monitoring_targets
+    WHERE target_key = $1 AND active = TRUE
+), combined AS (
+SELECT monitoring_checks.target_key, monitoring_checks.kind, monitoring_checks.entity_id, monitoring_checks.group_id,
+       monitoring_checks.status, monitoring_checks.latency_ms, monitoring_checks.first_byte_ms,
+       monitoring_checks.status_code, monitoring_checks.error_class, monitoring_checks.message,
+       monitoring_checks.checked_at, monitoring_checks.source
+FROM monitoring_checks
+JOIN authorized_target auth ON auth.target_key = monitoring_checks.target_key
+WHERE monitoring_checks.checked_at >= NOW() - INTERVAL '24 hours'
+  AND (auth.source_updated_at IS NULL OR monitoring_checks.checked_at >= auth.source_updated_at)
+UNION ALL
+SELECT 'account:' || account_id::text, 'account', account_id, group_id, 'operational',
+           duration_ms, first_token_ms, NULL::integer, '', '真实请求历史', created_at, 'history'
+FROM usage_logs
+JOIN authorized_target auth ON TRUE
+WHERE $1 = 'account:' || account_id::text
+  AND actual_cost > 0
+  AND created_at >= NOW() - INTERVAL '24 hours'
+  AND (auth.source_updated_at IS NULL OR usage_logs.created_at >= auth.source_updated_at)
+UNION ALL
+SELECT 'group:' || COALESCE(group_id, -1)::text, 'group', COALESCE(group_id, -1), group_id, 'operational',
+           duration_ms, first_token_ms, NULL::integer, '', '真实请求历史', created_at, 'history'
+FROM usage_logs
+JOIN authorized_target auth ON TRUE
+WHERE $1 = 'group:' || COALESCE(group_id, -1)::text
+  AND actual_cost > 0
+  AND created_at >= NOW() - INTERVAL '24 hours'
+  AND (auth.source_updated_at IS NULL OR usage_logs.created_at >= auth.source_updated_at)
+)
+SELECT target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms,
+       status_code, error_class, message, checked_at, source
+FROM combined
+ORDER BY checked_at DESC
+LIMIT $2`
+
 func (s *Store) InsertResults(ctx context.Context, results []model.ProbeResult) error {
 	if len(results) == 0 {
 		return nil
@@ -50,32 +92,7 @@ func (s *Store) Prune(ctx context.Context, before time.Time) error {
 
 func (s *Store) History(ctx context.Context, key string, limit int) ([]model.ProbeResult, error) {
 	limit = normalizeHistoryLimit(limit)
-	const query = `
-SELECT target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms,
-       status_code, error_class, message, checked_at, source
-FROM (
-    SELECT target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms,
-           status_code, error_class, message, checked_at, source
-    FROM monitoring_checks
-    WHERE target_key = $1 AND checked_at >= NOW() - INTERVAL '24 hours'
-    UNION ALL
-	SELECT 'account:' || account_id::text, 'account', account_id, group_id, 'operational',
-	           duration_ms, first_token_ms, NULL::integer, '', '真实请求历史', created_at, 'history'
-	FROM usage_logs
-	WHERE $1 = 'account:' || account_id::text
-	  AND actual_cost > 0
-	  AND created_at >= NOW() - INTERVAL '24 hours'
-    UNION ALL
-	SELECT 'group:' || COALESCE(group_id, -1)::text, 'group', COALESCE(group_id, -1), group_id, 'operational',
-	           duration_ms, first_token_ms, NULL::integer, '', '真实请求历史', created_at, 'history'
-	FROM usage_logs
-	WHERE $1 = 'group:' || COALESCE(group_id, -1)::text
-	  AND actual_cost > 0
-	  AND created_at >= NOW() - INTERVAL '24 hours'
-) combined
-ORDER BY checked_at DESC
-LIMIT $2`
-	rows, err := s.db.QueryContext(ctx, query, key, limit)
+	rows, err := s.db.QueryContext(ctx, historyQuery, key, limit)
 	if err != nil {
 		return nil, err
 	}

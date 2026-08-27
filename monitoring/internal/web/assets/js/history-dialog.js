@@ -51,7 +51,7 @@ export class HistoryDialog {
     $('#historySummary').innerHTML = `
       <span>最近 24 小时 · 列表样本 ${items.length}</span>
       <span>列表样本可用率 ${formatPct(availability)}</span>
-      <span>真实请求为首字，主动探测为首字节近似值；分组失败记录仅表示候选检查</span>`;
+      <span>真实请求为首字，主动探测为首字节近似值；分组“可用但有风险”仅表示候选异常，不代表分组整体不可用</span>`;
     $('#historyBody').innerHTML = items.length
       ? items.map(renderHistoryRow).join('')
       : '<tr><td colspan="4">最近 24 小时没有历史记录</td></tr>';
@@ -68,9 +68,16 @@ function renderHistoryRow(item) {
   const error = isSuccessful(item) ? '' : `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>`;
   return `<tr>
     <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small></td>
-    <td class="table-status ${historyStatusClass(status)}">${statusLabel(status)}${error}</td>
+    <td class="table-status ${historyStatusClass(status)}">${historyStatusLabel(item, status)}${error}</td>
     <td>${formatMs(item.first_byte_ms)}</td><td>${formatMs(item.latency_ms)}</td>
   </tr>`;
+}
+
+function historyStatusLabel(item, status) {
+  if (item.kind !== 'group' || item.source !== 'aggregate') return statusLabel(status);
+  if (status === 'degraded') return '可用但有风险';
+  if (status === 'failed' || status === 'error') return '候选检查失败';
+  return '候选正常';
 }
 
 function sourceLabel(source) {

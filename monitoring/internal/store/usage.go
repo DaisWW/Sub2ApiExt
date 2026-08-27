@@ -136,7 +136,10 @@ func (s *Store) usageBounds(ctx context.Context, value string) (usageBounds, err
 func (s *Store) loadUsageSummary(ctx context.Context, summary *model.UsageSummary, bounds usageBounds) error {
 	const query = `
 SELECT COUNT(*)::bigint,
-       COALESCE(SUM(ul.input_tokens::bigint + ul.output_tokens::bigint + ul.cache_creation_tokens::bigint + ul.cache_read_tokens::bigint), 0)::bigint,
+       COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+                    COALESCE(ul.output_tokens, 0)::bigint +
+                    COALESCE(ul.cache_creation_tokens, 0)::bigint +
+                    COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint,
        COALESCE(SUM(ul.input_tokens), 0)::bigint,
        COALESCE(SUM(ul.output_tokens), 0)::bigint,
        COALESCE(SUM(ul.cache_creation_tokens), 0)::bigint,
@@ -185,7 +188,10 @@ func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]mo
 	    SELECT date_trunc('%s', ul.created_at) AS start_at,
 	           COALESCE(NULLIF(BTRIM(c.name), ''), '未归属渠道') AS channel_name,
 	           COUNT(*)::bigint AS requests,
-	           COALESCE(SUM(ul.input_tokens::bigint + ul.output_tokens::bigint + ul.cache_creation_tokens::bigint + ul.cache_read_tokens::bigint), 0)::bigint AS total_tokens,
+	           COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+	                        COALESCE(ul.output_tokens, 0)::bigint +
+	                        COALESCE(ul.cache_creation_tokens, 0)::bigint +
+	                        COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
 	           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
 	    FROM usage_logs ul
 	    JOIN accounts a ON a.id = ul.account_id

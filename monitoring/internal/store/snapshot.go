@@ -52,10 +52,13 @@ SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.
        last_probe.checked_at, last_probe.status, last_probe.error_class, last_probe.status_code,
        COALESCE(alert_state.failure_streak, 0), alert_state.updated_at,
        ag.priority, COALESCE(member_usage.request_count, 0),
-       g.id, g.name, g.platform, g.status,
+	       g.id, g.name, g.platform, g.status, g.updated_at,
        active_channel.group_id IS NOT NULL
 FROM accounts a
-LEFT JOIN proxies p ON p.id = a.proxy_id AND p.deleted_at IS NULL
+LEFT JOIN proxies p ON p.id = a.proxy_id
+    AND p.deleted_at IS NULL
+    AND LOWER(TRIM(p.status)) = 'active'
+    AND (p.expires_at IS NULL OR p.expires_at > NOW())
 LEFT JOIN recent_account_usage recent ON recent.account_id = a.id
 LEFT JOIN latest_account_probe last_probe
        ON last_probe.target_key = 'account:' || a.id::text
@@ -69,6 +72,18 @@ LEFT JOIN groups g ON g.id = ag.group_id AND g.deleted_at IS NULL
 LEFT JOIN active_channel_groups active_channel ON active_channel.group_id = g.id
 WHERE a.deleted_at IS NULL
 ORDER BY a.id, g.id`
+
+const groupSnapshotQuery = `
+SELECT g.id, g.name, g.platform, g.status, g.updated_at,
+       EXISTS (
+           SELECT 1
+           FROM channel_groups cg
+           JOIN channels c ON c.id = cg.channel_id
+           WHERE cg.group_id = g.id
+             AND LOWER(TRIM(c.status)) = 'active'
+       )
+FROM groups g
+WHERE g.deleted_at IS NULL`
 
 type snapshotRow struct {
 	id, groupID, proxyID                  sql.NullInt64
@@ -88,31 +103,90 @@ type snapshotRow struct {
 	groupHasActiveChannel                 bool
 	credentials                           []byte
 	groupName, groupPlatform, groupStatus sql.NullString
+	groupUpdatedAt                        sql.NullTime
 }
 
 // LoadSnapshot 只读取网关账户、分组和最近成功请求，不修改业务表或监控表。
 func (s *Store) LoadSnapshot(ctx context.Context) (model.Snapshot, error) {
-	rows, err := s.db.QueryContext(ctx, snapshotQuery)
-	if err != nil {
-		return model.Snapshot{}, fmt.Errorf("load account snapshot: %w", err)
-	}
-	defer rows.Close()
-
 	accounts := make(map[int64]*model.Account)
 	groups := make(map[int64]*model.Group)
-	for rows.Next() {
-		var row snapshotRow
-		if err := row.scan(rows); err != nil {
-			return model.Snapshot{}, fmt.Errorf("scan account snapshot: %w", err)
-		}
-		if err := mergeSnapshotRow(row, accounts, groups); err != nil {
-			return model.Snapshot{}, err
-		}
+	if err := s.loadAccountSnapshot(ctx, accounts, groups); err != nil {
+		return model.Snapshot{}, err
 	}
-	if err := rows.Err(); err != nil {
+	if err := s.loadGroups(ctx, groups); err != nil {
 		return model.Snapshot{}, err
 	}
 	return buildSnapshot(accounts, groups), nil
+}
+
+func (s *Store) loadAccountSnapshot(ctx context.Context, accounts map[int64]*model.Account, groups map[int64]*model.Group) error {
+	rows, err := s.db.QueryContext(ctx, snapshotQuery)
+	if err != nil {
+		return fmt.Errorf("load account snapshot: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var row snapshotRow
+		if err := row.scan(rows); err != nil {
+			return fmt.Errorf("scan account snapshot: %w", err)
+		}
+		if err := mergeSnapshotRow(row, accounts, groups); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+type groupSnapshotRow struct {
+	groupID          sql.NullInt64
+	name, platform   sql.NullString
+	status           sql.NullString
+	updatedAt        sql.NullTime
+	hasActiveChannel bool
+}
+
+func (s *Store) loadGroups(ctx context.Context, groups map[int64]*model.Group) error {
+	rows, err := s.db.QueryContext(ctx, groupSnapshotQuery)
+	if err != nil {
+		return fmt.Errorf("load group snapshot: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row groupSnapshotRow
+		if err := rows.Scan(&row.groupID, &row.name, &row.platform, &row.status, &row.updatedAt, &row.hasActiveChannel); err != nil {
+			return fmt.Errorf("scan group snapshot: %w", err)
+		}
+		mergeGroupSnapshotRow(row, groups)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read group snapshot: %w", err)
+	}
+	return nil
+}
+
+func mergeGroupSnapshotRow(row groupSnapshotRow, groups map[int64]*model.Group) {
+	if !row.groupID.Valid {
+		return
+	}
+	group := groups[row.groupID.Int64]
+	if group == nil {
+		group = &model.Group{ID: row.groupID.Int64}
+		groups[group.ID] = group
+	}
+	group.Name = row.name.String
+	group.Platform = row.platform.String
+	group.Status = row.status.String
+	group.HasActiveChannel = row.hasActiveChannel
+	if row.updatedAt.Valid {
+		value := row.updatedAt.Time.UTC()
+		group.UpdatedAt = &value
+	} else {
+		group.UpdatedAt = nil
+	}
 }
 
 func (r *snapshotRow) scan(rows *sql.Rows) error {
@@ -124,7 +198,7 @@ func (r *snapshotRow) scan(rows *sql.Rows) error {
 		&r.lastProbeStatus, &r.lastProbeErrorClass, &r.lastProbeStatusCode, &r.probeFailureStreak,
 		&r.alertStateUpdatedAt,
 		&r.groupPriority, &r.groupRequestCount, &r.groupID, &r.groupName,
-		&r.groupPlatform, &r.groupStatus, &r.groupHasActiveChannel,
+		&r.groupPlatform, &r.groupStatus, &r.groupUpdatedAt, &r.groupHasActiveChannel,
 	)
 }
 
@@ -203,7 +277,8 @@ func alertStateCurrent(stateUpdatedAt, accountUpdatedAt sql.NullTime) bool {
 }
 
 func applyProxy(account *model.Account, row snapshotRow) {
-	if !row.proxyProtocol.Valid || !row.proxyHost.Valid || !row.proxyPort.Valid || row.proxyStatus.String != "active" {
+	if !row.proxyProtocol.Valid || !row.proxyHost.Valid || !row.proxyPort.Valid ||
+		!strings.EqualFold(strings.TrimSpace(row.proxyStatus.String), "active") {
 		account.ProxyError = "configured proxy is unavailable"
 		return
 	}
@@ -226,6 +301,10 @@ func linkGroup(row snapshotRow, account *model.Account, groups map[int64]*model.
 			ID: row.groupID.Int64, Name: row.groupName.String,
 			Platform: row.groupPlatform.String, Status: row.groupStatus.String,
 			HasActiveChannel: row.groupHasActiveChannel,
+		}
+		if row.groupUpdatedAt.Valid {
+			value := row.groupUpdatedAt.Time.UTC()
+			group.UpdatedAt = &value
 		}
 		groups[group.ID] = group
 	}
@@ -276,6 +355,9 @@ func buildSnapshot(accounts map[int64]*model.Account, groups map[int64]*model.Gr
 			continue
 		}
 		copy := *group
+		// Keep source changes from members that are filtered out below. A
+		// disabled/error member must still invalidate older group evidence.
+		copy.UpdatedAt = groupSourceUpdatedAt(*group, accounts)
 		copy.AccountIDs = filterAccountIDs(group.AccountIDs, enabledAccounts)
 		copy.Members = filterGroupMembers(*group, enabledAccounts)
 		copy.ProbeEnabled = groupProbeEnabled(copy, enabledAccounts)
