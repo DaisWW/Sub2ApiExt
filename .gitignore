@@ -35,6 +35,4 @@ runtime/
 
 # Local agent state
 .claude/
-.codex/
 .serena/
-AGENTS.md
