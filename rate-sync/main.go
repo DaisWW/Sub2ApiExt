@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,9 +19,19 @@ func main() {
 	if configPath == "" {
 		configPath = "config.json"
 	}
+	if len(os.Args) > 1 && os.Args[1] == "health" {
+		if err := runHealthCheck(configPath, time.Now()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	config, err := loadConfig(configPath)
 	if err != nil {
+		logger.Fatalf("启动失败: %v", err)
+	}
+	if err := invalidateSyncHealth(config.StateFile); err != nil {
 		logger.Fatalf("启动失败: %v", err)
 	}
 	db, err := sql.Open("postgres", "")
@@ -59,8 +70,34 @@ func main() {
 		config.UsageBootstrap,
 	)
 	run := func() {
-		if err := syncer.RunOnce(ctx, time.Now()); err != nil {
+		healthy, err := syncer.runCycle(ctx, time.Now())
+		finishedAt := time.Now().UTC()
+		if err != nil {
 			logger.Printf("同步周期失败: %v", err)
+			if healthErr := recordSyncHealthFailure(config.StateFile, finishedAt); healthErr != nil {
+				logger.Printf("健康状态更新失败: %v", healthErr)
+			}
+			return
+		}
+		if config.AdminAPIKey == "" {
+			logger.Printf("本轮等待 Admin API Key，健康状态标记为等待")
+			if healthErr := writeSyncHealthState(config.StateFile, syncHealth{
+				Phase:       syncHealthWaiting,
+				LastCycleAt: finishedAt,
+			}); healthErr != nil {
+				logger.Printf("健康状态更新失败: %v", healthErr)
+			}
+			return
+		}
+		if !healthy {
+			logger.Printf("本轮没有足够成功证据，健康状态标记为失败")
+			if healthErr := recordSyncHealthFailure(config.StateFile, finishedAt); healthErr != nil {
+				logger.Printf("健康状态更新失败: %v", healthErr)
+			}
+			return
+		}
+		if err := writeSyncHealth(config.StateFile, finishedAt); err != nil {
+			logger.Printf("健康状态更新失败: %v", err)
 		}
 	}
 
@@ -76,4 +113,22 @@ func main() {
 			run()
 		}
 	}
+}
+
+func runHealthCheck(configPath string, now time.Time) error {
+	config, err := loadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("健康检查配置无效: %w", err)
+	}
+	return checkSyncHealth(config.StateFile, config.Interval, now)
+}
+
+func recordSyncHealthFailure(stateFile string, cycleAt time.Time) error {
+	health, err := readSyncHealth(stateFile)
+	if err != nil {
+		health = syncHealth{}
+	}
+	health.Phase = syncHealthFailed
+	health.LastCycleAt = cycleAt.UTC()
+	return writeSyncHealthState(stateFile, health)
 }

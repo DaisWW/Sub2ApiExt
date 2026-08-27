@@ -204,3 +204,25 @@ func (r *syncReport) summaryCount() int {
 	}
 	return len(seen)
 }
+
+// healthy reports whether this cycle has enough successful evidence to refresh
+// the process health marker. An empty discovery result is healthy idle work;
+// a skipped-only or failed cycle is not healthy.
+func (r *syncReport) healthy() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.rows) == 0 {
+		return true
+	}
+	hasSuccess := false
+	for _, row := range r.rows {
+		switch row.status {
+		case reportStatusChecked, reportStatusStable, reportStatusPreview, reportStatusUpdated:
+			hasSuccess = true
+		}
+	}
+	return hasSuccess
+}

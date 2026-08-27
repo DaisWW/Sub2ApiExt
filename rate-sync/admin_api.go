@@ -22,8 +22,7 @@ type accountUpdate struct {
 }
 
 type adminUpdateResponse struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code int `json:"code"`
 }
 
 type adminUpdateSpec struct {
@@ -95,7 +94,7 @@ func (s *Syncer) updateAdminResource(ctx context.Context, spec adminUpdateSpec, 
 		return fmt.Errorf("%s: %w", spec.decodeAction, err)
 	}
 	if envelope.Code != 0 {
-		return fmt.Errorf("更新 Sub2API %s失败: code=%d message=%s", spec.label, envelope.Code, envelope.Message)
+		return fmt.Errorf("更新 Sub2API %s失败: code=%d", spec.label, envelope.Code)
 	}
 	return nil
 }

@@ -59,10 +59,11 @@ func TestSyncerWaitsForAdminAPIKeyAndRetries(t *testing.T) {
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 
-	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+	healthy, err := syncer.runCycle(context.Background(), time.Now())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if source.listCalls != 0 || !strings.Contains(output.String(), "Admin API Key 尚未配置") {
+	if healthy || source.listCalls != 0 || !strings.Contains(output.String(), "Admin API Key 尚未配置") {
 		t.Fatalf("unexpected waiting state, listCalls=%d:\n%s", source.listCalls, output.String())
 	}
 

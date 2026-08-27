@@ -85,6 +85,9 @@ func (s StateStore) Load() (*State, error) {
 	if err := json.NewDecoder(io.LimitReader(file, 1024*1024)).Decode(&state); err != nil {
 		return nil, fmt.Errorf("解析状态文件: %w", err)
 	}
+	if err := validateStateEntries(&state); err != nil {
+		return nil, err
+	}
 	switch state.Version {
 	case 2:
 		for _, rule := range state.Rules {
@@ -98,7 +101,7 @@ func (s StateStore) Load() (*State, error) {
 		state.Version = currentStateVersion
 	case currentStateVersion:
 	default:
-		return newState(), nil
+		return nil, fmt.Errorf("状态文件版本不支持: %d", state.Version)
 	}
 	if state.Rules == nil {
 		state.Rules = make(map[string]*RuleState)
@@ -107,6 +110,20 @@ func (s StateStore) Load() (*State, error) {
 		state.DynamicGroups = make(map[int64]*DynamicGroupState)
 	}
 	return &state, nil
+}
+
+func validateStateEntries(state *State) error {
+	for key, rule := range state.Rules {
+		if rule == nil {
+			return fmt.Errorf("状态文件 rules[%q] 不能为空", key)
+		}
+	}
+	for groupID, group := range state.DynamicGroups {
+		if group == nil {
+			return fmt.Errorf("状态文件 dynamic_groups[%d] 不能为空", groupID)
+		}
+	}
+	return nil
 }
 
 func (s StateStore) Save(state *State) error {

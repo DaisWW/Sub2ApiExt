@@ -252,3 +252,268 @@ func TestDynamicSyncFreezesWithoutUsageAndRepricesAccountChanges(t *testing.T) {
 		t.Fatalf("usage was consumed twice: first=%.8f second=%.8f", after, syncer.state.DynamicGroups[24].Fast.Denominator)
 	}
 }
+
+func TestDynamicPendingTargetSurvivesRestartAndRetriesWithoutReconsumingUsage(t *testing.T) {
+	first := testChannel("https://one.test", 0.15)
+	first.AccountID = 1
+	first.AccountName = "plus"
+	first.AccountRateMultiplier = 0.1
+	second := first
+	second.AccountID = 2
+	second.AccountName = "pro"
+	second.AccountRateMultiplier = 0.2
+	source := &incrementalTestSource{
+		staticChannelSource: &staticChannelSource{channels: []Channel{first, second}},
+		latestID:            100,
+		bootstrap: []GroupUsageAccountStats{
+			{GroupID: 24, AccountID: 1, Requests: 20, StandardCost: 50, BaseCost: 50, CurrentAccountRate: 0.1},
+			{GroupID: 24, AccountID: 2, Requests: 20, StandardCost: 50, BaseCost: 50, CurrentAccountRate: 0.2},
+		},
+	}
+	var putRates []float64
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload groupUpdate
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		putRates = append(putRates, payload.RateMultiplier)
+		if len(putRates) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := StateStore{Path: statePath}
+	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer.store = store
+	syncer.logger = log.New(io.Discard, "", 0)
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	if err := syncer.RunOnce(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	source.latestID = 101
+	source.incremental = []GroupUsageAccountStats{
+		{GroupID: 24, AccountID: 2, Requests: 1, StandardCost: 5, BaseCost: 5, CurrentAccountRate: 0.4},
+	}
+	beforeRetry := syncer.state.DynamicGroups[24].Fast.Denominator
+	if err := syncer.RunOnce(context.Background(), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	failedState := syncer.state.DynamicGroups[24]
+	if len(putRates) != 1 || !failedState.HasPendingTarget || failedState.PendingTarget <= 0 || failedState.LastUsageID != 101 {
+		t.Fatalf("failed publish did not retain replay state: puts=%v state=%+v", putRates, failedState)
+	}
+	if failedState.Fast.Denominator <= beforeRetry {
+		t.Fatalf("incremental usage was not consumed before publish failure: before=%.8f after=%.8f", beforeRetry, failedState.Fast.Denominator)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := loaded.DynamicGroups[24]
+	if persisted == nil || !persisted.HasPendingTarget || persisted.PendingTarget != failedState.PendingTarget || persisted.LastUsageID != 101 {
+		t.Fatalf("pending replay state was not persisted: %+v", persisted)
+	}
+	persistedDenominator := persisted.Fast.Denominator
+
+	source.latestID = 102
+	source.incremental = []GroupUsageAccountStats{
+		{GroupID: 24, AccountID: 1, Requests: 1, StandardCost: 5, BaseCost: 5, CurrentAccountRate: 0.5},
+	}
+	restarted := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	restarted.store = store
+	restarted.state = loaded
+	restarted.logger = log.New(io.Discard, "", 0)
+	if err := restarted.RunOnce(context.Background(), now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(putRates) != 2 || !almostEqual(putRates[0], putRates[1]) {
+		t.Fatalf("restart did not retry the same absolute target: puts=%v", putRates)
+	}
+	if !almostEqual(restarted.state.DynamicGroups[24].Fast.Denominator, persistedDenominator) {
+		t.Fatalf("restart re-consumed usage: before=%.8f after=%.8f", persistedDenominator, restarted.state.DynamicGroups[24].Fast.Denominator)
+	}
+	if restarted.state.DynamicGroups[24].HasPendingTarget {
+		t.Fatal("pending target was not cleared after successful retry")
+	}
+	if len(source.watermarks) != 1 || source.watermarks[0] != 100 {
+		t.Fatalf("pending retry should not query usage: %v", source.watermarks)
+	}
+	if restarted.state.DynamicGroups[24].LastUsageID != 101 {
+		t.Fatalf("pending retry advanced usage watermark: got %d, want 101", restarted.state.DynamicGroups[24].LastUsageID)
+	}
+	beforeCatchUp := restarted.state.DynamicGroups[24].Fast.Denominator
+	if err := restarted.RunOnce(context.Background(), now.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.state.DynamicGroups[24].Fast.Denominator <= beforeCatchUp || restarted.state.DynamicGroups[24].LastUsageID != 102 {
+		t.Fatalf("usage accumulated while pending was not consumed after retry: before=%.8f state=%+v", beforeCatchUp, restarted.state.DynamicGroups[24])
+	}
+	if len(source.watermarks) != 2 || source.watermarks[1] != 101 {
+		t.Fatalf("usage watermark was not advanced after pending retry: %v", source.watermarks)
+	}
+}
+
+func TestDynamicPendingTargetReplaysAfterSuccessfulPublishBeforeSave(t *testing.T) {
+	first := testChannel("https://one.test", 0.15)
+	first.AccountID = 1
+	first.AccountName = "plus"
+	first.AccountRateMultiplier = 0.1
+	second := first
+	second.AccountID = 2
+	second.AccountName = "pro"
+	second.AccountRateMultiplier = 0.2
+	source := &incrementalTestSource{
+		staticChannelSource: &staticChannelSource{channels: []Channel{first, second}},
+		latestID:            100,
+	}
+	state := seedDynamicGroupState([]GroupUsageAccountStats{
+		{GroupID: 24, AccountID: 1, Requests: 20, StandardCost: 50, BaseCost: 50, CurrentAccountRate: 0.1},
+		{GroupID: 24, AccountID: 2, Requests: 20, StandardCost: 50, BaseCost: 50, CurrentAccountRate: 0.2},
+	}, 100)
+	if state == nil {
+		t.Fatal("failed to seed dynamic state")
+	}
+	state.PendingTarget = 0.17
+	state.HasPendingTarget = true
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store := StateStore{Path: statePath}
+	persistedState := newState()
+	persistedState.DynamicGroups[24] = state
+	if err := store.Save(persistedState); err != nil {
+		t.Fatal(err)
+	}
+
+	var putRates []float64
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload groupUpdate
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		putRates = append(putRates, payload.RateMultiplier)
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer.store = store
+	syncer.state = loaded
+	syncer.logger = log.New(io.Discard, "", 0)
+	group := source.channels[0].Group
+	report := newSyncReport("group", source.channels)
+	syncer.publishDynamicChange(context.Background(), &group, loaded.DynamicGroups[24], 0.17, 0.15, 0.15, 0.15, "重放", dynamicUsageSummary{}, report)
+	if loaded.DynamicGroups[24].HasPendingTarget {
+		t.Fatal("successful publish did not clear in-memory pending target")
+	}
+	diskState, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diskState.DynamicGroups[24].HasPendingTarget {
+		t.Fatal("test setup did not preserve pending target on disk")
+	}
+
+	restarted := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	restarted.store = store
+	restarted.state = diskState
+	restarted.logger = log.New(io.Discard, "", 0)
+	if err := restarted.RunOnce(context.Background(), time.Date(2026, 8, 26, 12, 1, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	if len(putRates) != 2 || !almostEqual(putRates[0], 0.17) || !almostEqual(putRates[1], 0.17) {
+		t.Fatalf("stale pending target was not replayed idempotently: puts=%v", putRates)
+	}
+	if restarted.state.DynamicGroups[24].HasPendingTarget {
+		t.Fatal("replayed pending target was not cleared")
+	}
+}
+
+func TestDynamicPendingTargetSurvivesInvalidStateReset(t *testing.T) {
+	state := newState()
+	state.DynamicGroups[24] = &DynamicGroupState{
+		Initialized:      true,
+		LastUsageID:      100,
+		Fast:             DynamicCostMemory{Denominator: 5},
+		Slow:             DynamicCostMemory{Denominator: 100},
+		LastAccountRates: map[int64]float64{},
+		PendingTarget:    0.17,
+		HasPendingTarget: true,
+	}
+	syncer := &Syncer{state: state}
+
+	watermarks, uninitialized := syncer.prepareDynamicStates([]int64{24}, 99)
+	recovered := state.DynamicGroups[24]
+	if len(watermarks) != 0 || len(uninitialized) != 1 || recovered == nil {
+		t.Fatalf("invalid state was not reinitialized: watermarks=%v uninitialized=%v state=%+v", watermarks, uninitialized, recovered)
+	}
+	if !recovered.HasPendingTarget || !almostEqual(recovered.PendingTarget, 0.17) {
+		t.Fatalf("pending target was lost during state reset: %+v", recovered)
+	}
+}
+
+func TestDynamicPendingTargetRetriesWithoutValidMemory(t *testing.T) {
+	channel := testChannel("https://one.test", 0.10)
+	state := newState()
+	state.DynamicGroups[24] = &DynamicGroupState{
+		Initialized:      true,
+		Fast:             DynamicCostMemory{Denominator: 0},
+		Slow:             DynamicCostMemory{Denominator: 0},
+		LastAccountRates: map[int64]float64{},
+		PendingTarget:    0.17,
+		HasPendingTarget: true,
+	}
+	var updated groupUpdate
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+			t.Error(err)
+		}
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, "", 1)
+	syncer.state = state
+	report := newSyncReport("group", []Channel{channel})
+	syncer.publishDynamicGroup(context.Background(), &channel.Group, state.DynamicGroups[24], false, false, "待发布重试", dynamicUsageSummary{}, report)
+
+	if !almostEqual(updated.RateMultiplier, 0.17) || state.DynamicGroups[24].HasPendingTarget {
+		t.Fatalf("pending target was not retried independently of memory: update=%+v state=%+v", updated, state.DynamicGroups[24])
+	}
+}
+
+func TestDynamicBootstrapPreservesPendingRetryFailureEvidence(t *testing.T) {
+	channel := testChannel("https://one.test", 0.10)
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer admin.Close()
+
+	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, "", 1)
+	syncer.state.DynamicGroups[24] = &DynamicGroupState{
+		PendingTarget:    0.17,
+		HasPendingTarget: true,
+	}
+	report := newSyncReport("group", []Channel{channel})
+	plan := dynamicGroupPlan{
+		bindings:   buildGroupBindings([]Channel{channel}),
+		suspicious: map[int64]bool{},
+	}
+
+	syncer.reportDynamicBootstrap(context.Background(), plan, nil, []int64{24}, 100, report)
+
+	row := report.rows["account:18/group:24"]
+	if row == nil || row.status != reportStatusFailed {
+		t.Fatalf("pending retry status = %+v, want failed", row)
+	}
+	if row.window != "待发布重试" || row.detail != "待发布目标=0.1700" {
+		t.Fatalf("pending retry evidence was overwritten: %+v", row)
+	}
+}

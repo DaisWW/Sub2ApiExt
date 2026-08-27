@@ -101,7 +101,12 @@ func (s *Syncer) prepareDynamicStates(groupIDs []int64, snapshotID int64) (map[i
 	for _, groupID := range groupIDs {
 		state := s.state.DynamicGroups[groupID]
 		if !usableDynamicGroupState(state) || state.LastUsageID > snapshotID {
+			pendingTarget, hasPendingTarget := preservedPendingTarget(state)
 			state = newDynamicGroupState()
+			if hasPendingTarget {
+				state.PendingTarget = pendingTarget
+				state.HasPendingTarget = true
+			}
 			s.state.DynamicGroups[groupID] = state
 		}
 		if state.Initialized {
@@ -122,6 +127,20 @@ func (s *Syncer) reportDynamicBootstrap(
 	report *syncReport,
 ) {
 	for _, groupID := range insufficient {
+		state := s.state.DynamicGroups[groupID]
+		if state != nil && state.HasPendingTarget {
+			s.publishDynamicGroup(
+				ctx,
+				&plan.bindings[groupID].group,
+				state,
+				false,
+				plan.suspicious[groupID],
+				"待发布重试",
+				dynamicUsageSummary{},
+				report,
+			)
+			continue
+		}
 		group := plan.bindings[groupID].group
 		report.markGroup(groupID, reportStatusSkipped)
 		report.setGroupEvidence(groupID, "初始化", fmt.Sprintf("%s 样本不足（请求>=30 且标准费用>=5 美元），保持当前倍率", dynamicBootstrapWindowLabel))
@@ -134,13 +153,31 @@ func (s *Syncer) reportDynamicBootstrap(
 	sort.Slice(groupIDs, func(i, j int) bool { return groupIDs[i] < groupIDs[j] })
 	for _, groupID := range groupIDs {
 		choice := choices[groupID]
+		previous := s.state.DynamicGroups[groupID]
 		state := seedDynamicGroupState(choice.rows, snapshotID)
 		group := plan.bindings[groupID].group
 		if state == nil {
+			if previous != nil && previous.HasPendingTarget {
+				s.publishDynamicGroup(
+					ctx,
+					&plan.bindings[groupID].group,
+					previous,
+					false,
+					plan.suspicious[groupID],
+					"待发布重试",
+					dynamicUsageSummary{},
+					report,
+				)
+				continue
+			}
 			report.markGroup(groupID, reportStatusSkipped)
 			report.setGroupEvidence(groupID, "初始化", "历史账号成本无效，保持当前倍率")
 			s.logger.Printf("[%s] 动态成本初始化跳过: 历史账号成本无效，保持 %.4f", group.Name, group.RateMultiplier)
 			continue
+		}
+		if pendingTarget, hasPendingTarget := preservedPendingTarget(previous); hasPendingTarget {
+			state.PendingTarget = pendingTarget
+			state.HasPendingTarget = true
 		}
 		overlayBindingRates(state.LastAccountRates, plan.bindings[groupID])
 		s.state.DynamicGroups[groupID] = state
@@ -157,6 +194,13 @@ func (s *Syncer) reportDynamicBootstrap(
 	}
 }
 
+func preservedPendingTarget(state *DynamicGroupState) (float64, bool) {
+	if state == nil || !state.HasPendingTarget || !validPositiveRate(state.PendingTarget) {
+		return 0, false
+	}
+	return state.PendingTarget, true
+}
+
 func (s *Syncer) consumeDynamicUsage(
 	ctx context.Context,
 	source groupUsageIncrementalSource,
@@ -168,13 +212,40 @@ func (s *Syncer) consumeDynamicUsage(
 	if len(watermarks) == 0 {
 		return nil
 	}
-	rows, err := source.ListGroupUsageSince(ctx, watermarks, snapshotID)
+	readyWatermarks := make(map[int64]int64, len(watermarks))
+	pendingGroupIDs := make([]int64, 0)
+	for groupID, watermark := range watermarks {
+		state := s.state.DynamicGroups[groupID]
+		if state != nil && state.HasPendingTarget {
+			pendingGroupIDs = append(pendingGroupIDs, groupID)
+			continue
+		}
+		readyWatermarks[groupID] = watermark
+	}
+	sort.Slice(pendingGroupIDs, func(i, j int) bool { return pendingGroupIDs[i] < pendingGroupIDs[j] })
+	for _, groupID := range pendingGroupIDs {
+		state := s.state.DynamicGroups[groupID]
+		s.publishDynamicGroup(
+			ctx,
+			&plan.bindings[groupID].group,
+			state,
+			false,
+			plan.suspicious[groupID],
+			"待发布重试",
+			dynamicUsageSummary{},
+			report,
+		)
+	}
+	if len(readyWatermarks) == 0 {
+		return nil
+	}
+	rows, err := source.ListGroupUsageSince(ctx, readyWatermarks, snapshotID)
 	if err != nil {
 		return err
 	}
 	usageByGroup := groupDynamicUsage(rows)
-	groupIDs := make([]int64, 0, len(watermarks))
-	for groupID := range watermarks {
+	groupIDs := make([]int64, 0, len(readyWatermarks))
+	for groupID := range readyWatermarks {
 		groupIDs = append(groupIDs, groupID)
 	}
 	sort.Slice(groupIDs, func(i, j int) bool { return groupIDs[i] < groupIDs[j] })

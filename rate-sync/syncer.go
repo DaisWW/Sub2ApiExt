@@ -41,24 +41,29 @@ func NewSyncer(config *Config, source ChannelSource, client *http.Client, store 
 }
 
 func (s *Syncer) RunOnce(ctx context.Context, now time.Time) error {
+	_, err := s.runCycle(ctx, now)
+	return err
+}
+
+func (s *Syncer) runCycle(ctx context.Context, now time.Time) (bool, error) {
 	startedAt := time.Now()
 	if err := s.refreshAdminAPIKey(ctx); err != nil {
-		return err
+		return false, err
 	}
 	if s.config.AdminAPIKey == "" {
 		s.logger.Printf("Admin API Key 尚未配置，本轮等待；配置后将自动开始同步")
-		return nil
+		return false, nil
 	}
 
 	s.logger.Printf("开始自动发现并同步价格")
 	channels, err := s.source.List(ctx)
 	if err != nil {
-		return fmt.Errorf("自动发现渠道: %w", err)
+		return false, fmt.Errorf("自动发现渠道: %w", err)
 	}
 	report := newSyncReport(s.syncTarget(), channels)
 	stats := s.syncDiscoveredChannels(ctx, channels, now, report)
 	if err := s.store.Save(s.state); err != nil {
-		return err
+		return false, err
 	}
 	s.logger.Printf(
 		"同步检查完成: 可用绑定=%d 已检查=%d 检查正常=%d 暂不自动=%d 失败=%d 耗时=%s",
@@ -66,7 +71,7 @@ func (s *Syncer) RunOnce(ctx context.Context, now time.Time) error {
 		time.Since(startedAt).Round(time.Millisecond),
 	)
 	s.logSyncReport(report)
-	return nil
+	return report.healthy(), nil
 }
 
 func (s *Syncer) refreshAdminAPIKey(ctx context.Context) error {

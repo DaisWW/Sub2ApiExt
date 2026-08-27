@@ -142,15 +142,29 @@ func (s *Syncer) runChannelChecks(
 		if !plan.admit(s, channel, report, &stats) {
 			continue
 		}
+		if !acquireCheckSlot(ctx, semaphore) {
+			return s.collectCheckResults(results, stats, report)
+		}
 		ruleState := s.ruleStateFor(channel, plan.target)
 		stats.checked++
-		semaphore <- struct{}{}
 		go func(channel *Channel, ruleState *RuleState) {
 			defer func() { <-semaphore }()
 			results <- channelCheckResult{channel: channel, err: s.syncChannel(ctx, channel, ruleState, now, report)}
 		}(channel, ruleState)
 	}
 	return s.collectCheckResults(results, stats, report)
+}
+
+func acquireCheckSlot(ctx context.Context, semaphore chan<- struct{}) bool {
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+	select {
+	case semaphore <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func (s *Syncer) ruleStateFor(channel *Channel, target string) *RuleState {
