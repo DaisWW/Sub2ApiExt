@@ -283,21 +283,23 @@ function Wait-ExtensionContainer {
     do {
         try {
             $inspect = Get-ExtensionContainerInspect -Name $Name
-            if ($inspect.State.Running) {
-                $healthProperty = $inspect.State.PSObject.Properties['Health']
-                if ($null -eq $healthProperty -or $healthProperty.Value.Status -eq 'healthy') {
-                    return
-                }
-                if ($healthProperty.Value.Status -eq 'unhealthy') {
-                    throw "$Name is unhealthy."
-                }
-            } elseif ($inspect.State.Status -eq 'exited') {
-                throw "$Name exited with code $($inspect.State.ExitCode)."
-            }
         } catch {
             if ((Get-Date) -ge $deadline) {
                 throw
             }
+            Start-Sleep -Seconds 2
+            continue
+        }
+        if ($inspect.State.Running) {
+            $healthProperty = $inspect.State.PSObject.Properties['Health']
+            if ($null -eq $healthProperty -or $healthProperty.Value.Status -eq 'healthy') {
+                return
+            }
+            if ($healthProperty.Value.Status -eq 'unhealthy') {
+                throw "$Name is unhealthy."
+            }
+        } elseif ($inspect.State.Status -eq 'exited') {
+            throw "$Name exited with code $($inspect.State.ExitCode)."
         }
         Start-Sleep -Seconds 2
     } while ((Get-Date) -lt $deadline)
