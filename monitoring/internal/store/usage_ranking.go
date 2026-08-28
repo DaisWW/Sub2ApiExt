@@ -2,24 +2,33 @@ package store
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
-func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, error) {
+func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	const query = `
 WITH aggregated AS (
-    SELECT ul.account_id,
+    SELECT ul.account_id AS entity_id,
            COALESCE(NULLIF(a.name, ''), '账户 #' || ul.account_id::text) AS name,
+           ''::text AS context,
            COALESCE(a.platform, 'unknown') AS platform,
            COUNT(*)::bigint AS requests,
-            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
-                         COALESCE(ul.output_tokens, 0)::bigint +
-                         COALESCE(ul.cache_creation_tokens, 0)::bigint +
-                         COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
+           COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+                        COALESCE(ul.output_tokens, 0)::bigint +
+                        COALESCE(ul.cache_creation_tokens, 0)::bigint +
+                        COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
            COALESCE(SUM(ul.input_tokens), 0)::bigint AS input_tokens,
+           COALESCE(SUM(ul.output_tokens), 0)::bigint AS output_tokens,
+           COALESCE(SUM(ul.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
            COALESCE(SUM(ul.cache_read_tokens), 0)::bigint AS cache_read_tokens,
-           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
+           COALESCE(SUM(COALESCE(ul.total_cost, ul.actual_cost, 0)), 0)::double precision AS base_cost,
+           COALESCE(SUM(COALESCE(ul.input_cost, 0)), 0)::double precision AS input_cost,
+           COALESCE(SUM(COALESCE(ul.output_cost, 0)), 0)::double precision AS output_cost,
+           COALESCE(SUM(COALESCE(ul.cache_creation_cost, 0)), 0)::double precision AS cache_creation_cost,
+           COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
+           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS actual_cost
       FROM usage_logs ul
       JOIN accounts a ON a.id = ul.account_id
                      AND a.deleted_at IS NULL
@@ -29,76 +38,57 @@ WITH aggregated AS (
                    AND g.deleted_at IS NULL
                    AND LOWER(TRIM(g.status)) = 'active'
      WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
-    GROUP BY ul.account_id, a.name, a.platform
+     GROUP BY ul.account_id, a.name, a.platform
 ), ranked AS (
     SELECT aggregated.*,
+           COUNT(*) OVER () AS total_items,
+           SUM(requests) OVER () AS total_requests,
+           SUM(total_tokens) OVER () AS all_tokens,
+           SUM(actual_cost) OVER () AS all_actual_cost,
+           ROW_NUMBER() OVER (ORDER BY total_tokens DESC, actual_cost DESC, entity_id) AS token_rank,
+           ROW_NUMBER() OVER (ORDER BY actual_cost DESC, total_tokens DESC, entity_id) AS cost_rank,
            ROW_NUMBER() OVER (
-               ORDER BY input_tokens + cache_read_tokens DESC, cache_read_tokens DESC, account_id
-           ) AS cache_context_rank
-      FROM aggregated
-)
-SELECT account_id, name, platform, requests, total_tokens, input_tokens, cache_read_tokens, total_cost
-  FROM ranked
- WHERE cache_context_rank <= $3
- ORDER BY cache_context_rank`
-	return s.loadDimensionRanks(ctx, query, model.KindAccount, bounds, limit, totalTokens)
-}
-
-func (s *Store) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, error) {
-	const query = `
-WITH aggregated AS (
-    SELECT ul.group_id,
-           COALESCE(NULLIF(g.name, ''), '分组 #' || ul.group_id::text) AS name,
-           COALESCE(g.platform, 'unknown') AS platform,
-           COUNT(*)::bigint AS requests,
-            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
-                         COALESCE(ul.output_tokens, 0)::bigint +
-                         COALESCE(ul.cache_creation_tokens, 0)::bigint +
-                         COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
-           COALESCE(SUM(ul.input_tokens), 0)::bigint AS input_tokens,
-           COALESCE(SUM(ul.cache_read_tokens), 0)::bigint AS cache_read_tokens,
-           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
-      FROM usage_logs ul
-      JOIN accounts a ON a.id = ul.account_id
-                     AND a.deleted_at IS NULL
-                     AND LOWER(TRIM(a.status)) = 'active'
-                     AND a.schedulable = TRUE
-      JOIN groups g ON g.id = ul.group_id
-                   AND g.deleted_at IS NULL
-                   AND LOWER(TRIM(g.status)) = 'active'
-     WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
-    GROUP BY ul.group_id, g.name, g.platform
-), ranked AS (
-    SELECT aggregated.*,
-           ROW_NUMBER() OVER (ORDER BY total_tokens DESC, total_cost DESC, group_id) AS token_rank,
-           ROW_NUMBER() OVER (ORDER BY total_cost DESC, total_tokens DESC, group_id) AS cost_rank,
-           ROW_NUMBER() OVER (
-               ORDER BY CASE WHEN total_tokens > 0 THEN total_cost * 1000000 / total_tokens ELSE 0 END DESC,
-                        total_cost DESC, group_id
+               ORDER BY CASE WHEN total_tokens > 0 THEN actual_cost * 1000000 / total_tokens ELSE 0 END DESC,
+                        actual_cost DESC, entity_id
            ) AS unit_cost_rank,
            ROW_NUMBER() OVER (
-               ORDER BY input_tokens + cache_read_tokens DESC, cache_read_tokens DESC, group_id
+               ORDER BY input_tokens + cache_read_tokens DESC, cache_read_tokens DESC, entity_id
            ) AS cache_context_rank
       FROM aggregated
 )
-SELECT group_id, name, platform, requests, total_tokens, input_tokens, cache_read_tokens, total_cost
+SELECT entity_id, NULL::text AS entity_key, name, context, platform,
+       requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
+       total_items, total_requests, all_tokens, all_actual_cost
   FROM ranked
  WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3 OR cache_context_rank <= $3
  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
           token_rank, cost_rank, unit_cost_rank, cache_context_rank`
-	return s.loadDimensionRanks(ctx, query, model.KindGroup, bounds, limit, totalTokens)
+	return s.loadDimensionRanks(ctx, query, model.KindAccount, bounds, limit, totalTokens, totalCost)
 }
 
-func (s *Store) loadModelUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, error) {
+func (s *Store) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	const query = `
 WITH aggregated AS (
-    SELECT COALESCE(NULLIF(ul.model, ''), 'unknown') AS name,
+    SELECT ul.group_id AS entity_id,
+           COALESCE(NULLIF(g.name, ''), '分组 #' || ul.group_id::text) AS name,
+           ''::text AS context,
+           COALESCE(g.platform, 'unknown') AS platform,
            COUNT(*)::bigint AS requests,
-            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
-                         COALESCE(ul.output_tokens, 0)::bigint +
-                         COALESCE(ul.cache_creation_tokens, 0)::bigint +
-                         COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
-           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
+           COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+                        COALESCE(ul.output_tokens, 0)::bigint +
+                        COALESCE(ul.cache_creation_tokens, 0)::bigint +
+                        COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
+           COALESCE(SUM(ul.input_tokens), 0)::bigint AS input_tokens,
+           COALESCE(SUM(ul.output_tokens), 0)::bigint AS output_tokens,
+           COALESCE(SUM(ul.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+           COALESCE(SUM(ul.cache_read_tokens), 0)::bigint AS cache_read_tokens,
+           COALESCE(SUM(COALESCE(ul.total_cost, ul.actual_cost, 0)), 0)::double precision AS base_cost,
+           COALESCE(SUM(COALESCE(ul.input_cost, 0)), 0)::double precision AS input_cost,
+           COALESCE(SUM(COALESCE(ul.output_cost, 0)), 0)::double precision AS output_cost,
+           COALESCE(SUM(COALESCE(ul.cache_creation_cost, 0)), 0)::double precision AS cache_creation_cost,
+           COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
+           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS actual_cost
       FROM usage_logs ul
       JOIN accounts a ON a.id = ul.account_id
                      AND a.deleted_at IS NULL
@@ -108,71 +98,191 @@ WITH aggregated AS (
                    AND g.deleted_at IS NULL
                    AND LOWER(TRIM(g.status)) = 'active'
      WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
-    GROUP BY COALESCE(NULLIF(ul.model, ''), 'unknown')
+     GROUP BY ul.group_id, g.name, g.platform
 ), ranked AS (
     SELECT aggregated.*,
-           ROW_NUMBER() OVER (ORDER BY total_tokens DESC, total_cost DESC, name) AS token_rank,
-           ROW_NUMBER() OVER (ORDER BY total_cost DESC, total_tokens DESC, name) AS cost_rank,
+           COUNT(*) OVER () AS total_items,
+           SUM(requests) OVER () AS total_requests,
+           SUM(total_tokens) OVER () AS all_tokens,
+           SUM(actual_cost) OVER () AS all_actual_cost,
+           ROW_NUMBER() OVER (ORDER BY total_tokens DESC, actual_cost DESC, entity_id) AS token_rank,
+           ROW_NUMBER() OVER (ORDER BY actual_cost DESC, total_tokens DESC, entity_id) AS cost_rank,
            ROW_NUMBER() OVER (
-               ORDER BY CASE WHEN total_tokens > 0 THEN total_cost * 1000000 / total_tokens ELSE 0 END DESC,
-                        total_cost DESC, name
-           ) AS unit_cost_rank
-       FROM aggregated
+               ORDER BY CASE WHEN total_tokens > 0 THEN actual_cost * 1000000 / total_tokens ELSE 0 END DESC,
+                        actual_cost DESC, entity_id
+           ) AS unit_cost_rank,
+           ROW_NUMBER() OVER (
+               ORDER BY input_tokens + cache_read_tokens DESC, cache_read_tokens DESC, entity_id
+           ) AS cache_context_rank
+      FROM aggregated
 )
-SELECT name, requests, total_tokens, total_cost
+SELECT entity_id, NULL::text AS entity_key, name, context, platform,
+       requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
+       total_items, total_requests, all_tokens, all_actual_cost
+  FROM ranked
+ WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3 OR cache_context_rank <= $3
+ ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
+          token_rank, cost_rank, unit_cost_rank, cache_context_rank`
+	return s.loadDimensionRanks(ctx, query, model.KindGroup, bounds, limit, totalTokens, totalCost)
+}
+
+const modelUsageRankQuery = `
+WITH aggregated AS (
+    SELECT NULL::bigint AS entity_id,
+           'model:' || COALESCE(NULLIF(ul.model, ''), 'unknown') ||
+               ':account:' || ul.account_id::text ||
+               ':channel:' || COALESCE(ul.channel_id, 0)::text ||
+               ':group:' || ul.group_id::text ||
+               ':account-rate:' || COALESCE(ul.account_rate_multiplier, 1)::text ||
+               ':record-rate:' || COALESCE(ul.rate_multiplier, 1)::text AS entity_key,
+           COALESCE(NULLIF(ul.model, ''), 'unknown') AS name,
+           COALESCE(NULLIF(BTRIM(g.name), ''), '分组 #' || ul.group_id::text) || ' / ' ||
+           COALESCE(NULLIF(BTRIM(a.name), ''), '账户 #' || ul.account_id::text) || ' / ' ||
+           COALESCE(NULLIF(BTRIM(c.name), ''), '未归属渠道') || ' / 账号×' ||
+           COALESCE(ul.account_rate_multiplier, 1)::text || ' / 记录×' ||
+           COALESCE(ul.rate_multiplier, 1)::text AS context,
+           COALESCE(a.platform, 'unknown') AS platform,
+           COUNT(*)::bigint AS requests,
+           COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
+                        COALESCE(ul.output_tokens, 0)::bigint +
+                        COALESCE(ul.cache_creation_tokens, 0)::bigint +
+                        COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
+           COALESCE(SUM(ul.input_tokens), 0)::bigint AS input_tokens,
+           COALESCE(SUM(ul.output_tokens), 0)::bigint AS output_tokens,
+           COALESCE(SUM(ul.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+           COALESCE(SUM(ul.cache_read_tokens), 0)::bigint AS cache_read_tokens,
+           COALESCE(SUM(COALESCE(ul.total_cost, ul.actual_cost, 0)), 0)::double precision AS base_cost,
+           COALESCE(SUM(COALESCE(ul.input_cost, 0)), 0)::double precision AS input_cost,
+           COALESCE(SUM(COALESCE(ul.output_cost, 0)), 0)::double precision AS output_cost,
+           COALESCE(SUM(COALESCE(ul.cache_creation_cost, 0)), 0)::double precision AS cache_creation_cost,
+           COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
+           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS actual_cost
+      FROM usage_logs ul
+      JOIN accounts a ON a.id = ul.account_id
+                     AND a.deleted_at IS NULL
+                     AND LOWER(TRIM(a.status)) = 'active'
+                     AND a.schedulable = TRUE
+      JOIN groups g ON g.id = ul.group_id
+                   AND g.deleted_at IS NULL
+                   AND LOWER(TRIM(g.status)) = 'active'
+      LEFT JOIN channels c ON c.id = ul.channel_id
+     WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
+     GROUP BY COALESCE(NULLIF(ul.model, ''), 'unknown'),
+              ul.account_id, ul.channel_id, ul.group_id, a.name, a.platform, g.name, c.id, c.name,
+              COALESCE(ul.account_rate_multiplier, 1), COALESCE(ul.rate_multiplier, 1)
+), ranked AS (
+    SELECT aggregated.*,
+           COUNT(*) OVER () AS total_items,
+           SUM(requests) OVER () AS total_requests,
+           SUM(total_tokens) OVER () AS all_tokens,
+           SUM(actual_cost) OVER () AS all_actual_cost,
+           ROW_NUMBER() OVER (ORDER BY total_tokens DESC, actual_cost DESC, entity_key) AS token_rank,
+           ROW_NUMBER() OVER (ORDER BY actual_cost DESC, total_tokens DESC, entity_key) AS cost_rank,
+           ROW_NUMBER() OVER (
+               ORDER BY CASE WHEN total_tokens > 0 THEN actual_cost * 1000000 / total_tokens ELSE 0 END DESC,
+                        actual_cost DESC, entity_key
+           ) AS unit_cost_rank
+      FROM aggregated
+)
+SELECT entity_id, entity_key, name, context, platform,
+       requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
+       total_items, total_requests, all_tokens, all_actual_cost
   FROM ranked
  WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3
- ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank),
-          token_rank, cost_rank, unit_cost_rank`
-	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := make([]model.UsageRankItem, 0)
-	for rows.Next() {
-		var name string
-		var item model.UsageRankItem
-		if err := rows.Scan(&name, &item.Requests, &item.TotalTokens, &item.TotalCost); err != nil {
-			return nil, err
-		}
-		item.Kind, item.Key, item.Name = "model", "model:"+name, name
-		items = append(items, item)
-	}
-	applyUsageShares(items, totalTokens)
-	return items, rows.Err()
+  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank), token_rank, cost_rank, unit_cost_rank`
+
+func (s *Store) loadModelUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+	return s.loadDimensionRanks(ctx, modelUsageRankQuery, model.KindModel, bounds, limit, totalTokens, totalCost)
 }
 
-func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, error) {
+func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end, limit)
 	if err != nil {
-		return nil, err
+		return nil, model.UsageDimensionMeta{}, err
 	}
 	defer rows.Close()
 	items := make([]model.UsageRankItem, 0)
+	meta := model.UsageDimensionMeta{}
 	for rows.Next() {
-		var id int64
-		var name, platform string
+		var id sql.NullInt64
+		var entityKey sql.NullString
+		var baseCost, actualCost float64
+		var totalItems, totalRequests, allTokens int64
+		var allActualCost float64
 		var item model.UsageRankItem
 		if err := rows.Scan(
-			&id, &name, &platform, &item.Requests, &item.TotalTokens,
-			&item.InputTokens, &item.CacheRead, &item.TotalCost,
+			&id, &entityKey, &item.Name, &item.Context, &item.Platform,
+			&item.Requests, &item.TotalTokens, &item.InputTokens, &item.OutputTokens,
+			&item.CacheCreationTokens, &item.CacheRead, &baseCost, &item.InputCost,
+			&item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &actualCost,
+			&totalItems, &totalRequests, &allTokens, &allActualCost,
 		); err != nil {
-			return nil, err
+			return nil, model.UsageDimensionMeta{}, err
 		}
-		item.Kind, item.ID, item.Key, item.Name, item.Platform = kind, &id, model.TargetKey(kind, id), name, platform
+		item.Kind = kind
+		item.BaseCost = baseCost
+		item.TotalCost = actualCost
+		item.TokenCost, item.NonTokenCost, item.EffectiveRateMultiplier = usageCostBreakdown(
+			item.BaseCost, item.TotalCost, item.InputCost, item.OutputCost,
+			item.CacheCreationCost, item.CacheReadCost,
+		)
+		if id.Valid {
+			idValue := id.Int64
+			item.ID = &idValue
+			item.Key = model.TargetKey(kind, idValue)
+		} else {
+			item.Key = entityKey.String
+		}
+		if meta.TotalItems == 0 {
+			meta.TotalItems = totalItems
+			meta.OmittedRequests = totalRequests
+			meta.OmittedTokens = allTokens
+			meta.OmittedCost = allActualCost
+		}
 		items = append(items, item)
 	}
-	applyUsageShares(items, totalTokens)
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, model.UsageDimensionMeta{}, err
+	}
+	meta.ReturnedItems = int64(len(items))
+	meta.OmittedItems = meta.TotalItems - meta.ReturnedItems
+	if meta.OmittedItems < 0 {
+		meta.OmittedItems = 0
+	}
+	var returnedRequests, returnedTokens int64
+	var returnedCost float64
+	for _, item := range items {
+		returnedRequests += item.Requests
+		returnedTokens += item.TotalTokens
+		returnedCost += item.TotalCost
+	}
+	meta.OmittedRequests -= returnedRequests
+	meta.OmittedTokens -= returnedTokens
+	meta.OmittedCost -= returnedCost
+	if meta.OmittedRequests < 0 {
+		meta.OmittedRequests = 0
+	}
+	if meta.OmittedTokens < 0 {
+		meta.OmittedTokens = 0
+	}
+	if meta.OmittedCost < 0 {
+		meta.OmittedCost = 0
+	}
+	applyUsageShares(items, totalTokens, totalCost)
+	return items, meta, nil
 }
 
-func applyUsageShares(items []model.UsageRankItem, totalTokens int64) {
+func applyUsageShares(items []model.UsageRankItem, totalTokens int64, totalCost float64) {
 	for index := range items {
 		items[index].CacheHitRate = cacheHitRate(items[index].InputTokens, items[index].CacheRead)
 		items[index].CostPerMillionTokens = costPerMillionTokens(items[index].TotalCost, items[index].TotalTokens)
 		if totalTokens > 0 {
 			items[index].SharePercent = float64(items[index].TotalTokens) * 100 / float64(totalTokens)
+		}
+		if totalCost > 0 {
+			items[index].CostSharePercent = items[index].TotalCost * 100 / totalCost
 		}
 	}
 }

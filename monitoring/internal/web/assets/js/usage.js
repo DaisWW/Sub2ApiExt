@@ -84,6 +84,7 @@ export class UsagePanel {
     const summary = this.usage.summary || {};
     $('#usageMeta').textContent = `${this.usage.period_label || '用量窗口'} · ${formatTime(this.usage.generated_at)} 更新`;
     $('#usageKpiGrid').innerHTML = usageKPIs(summary).map(renderUsageKPI).join('');
+    $('#usageDetailStrip').innerHTML = usageDetailStrip(summary);
     this.#renderEntityCards();
     this.#renderShares();
     this.#renderTrend();
@@ -94,8 +95,8 @@ export class UsagePanel {
     const summary = this.usage.summary || {};
     const modelMetric = this.shareMetrics.model;
     const groupMetric = this.shareMetrics.group;
-    renderShareDonut('modelDonutLayout', this.usage.models || [], summary, '暂无模型用量', '模型', modelMetric);
-    renderShareDonut('groupDonutLayout', this.usage.groups || [], summary, '暂无分组用量', '分组', groupMetric);
+    renderShareDonut('modelDonutLayout', this.usage.models || [], summary, '暂无模型用量', '模型', modelMetric, this.usage.dimension_meta?.models);
+    renderShareDonut('groupDonutLayout', this.usage.groups || [], summary, '暂无分组用量', '分组', groupMetric, this.usage.dimension_meta?.groups);
   }
 
   #renderEntityCards() {
@@ -121,6 +122,7 @@ function setLoading(loading, entityKind = 'group') {
   $('#usageSection').setAttribute('aria-busy', String(loading));
   if (!loading) return;
   $('#usageKpiGrid').innerHTML = '<div class="loading-state usage-loading">读取用量数据中...</div>';
+  $('#usageDetailStrip').innerHTML = '<div class="loading-state usage-detail-loading">读取成本构成中...</div>';
   $('#usageEntityCardList').innerHTML = `<div class="loading-state usage-entity-loading">读取${entityKind === 'account' ? '账户' : '分组'}用量中...</div>`;
   $('#usageMeta').textContent = '正在更新用量窗口…';
 }
@@ -129,6 +131,7 @@ function showUsageError(message) {
   const safeMessage = escapeHTML(message);
   $('#usageMeta').textContent = '用量读取失败';
   $('#usageKpiGrid').innerHTML = `<div class="empty-state usage-loading">${safeMessage}</div>`;
+  $('#usageDetailStrip').innerHTML = '';
   $('#usageEntityCardList').innerHTML = `<div class="empty-state usage-entity-loading">${safeMessage}</div>`;
   $('#modelDonutLayout').innerHTML = `<div class="empty-state donut-empty">${safeMessage}</div>`;
   $('#groupDonutLayout').innerHTML = `<div class="empty-state donut-empty">${safeMessage}</div>`;
@@ -142,12 +145,31 @@ function showUsageError(message) {
 function usageKPIs(summary) {
   return [
     ['总 Tokens', formatTokens(summary.total_tokens), '', ''],
-    ['输入 Tokens', formatTokens(summary.input_tokens), '', ''],
-    ['输出 Tokens', formatTokens(summary.output_tokens), '', ''],
     ['请求数', formatCount(summary.requests), '', ''],
+    ['原始成本', formatUSD(summary.base_cost), '四类 Token 成本与非 Token 成本之和', ''],
     ['实际消耗', formatUSD(summary.total_cost), '', ''],
-    ['每百万 Tokens 成本', formatUnitCost(summary.cost_per_million_tokens), '', '']
+    ['有效倍率', formatMultiplier(summary.effective_rate_multiplier), '实际成本 / 原始成本', ''],
+    ['每百万 Tokens 成本', formatUnitCost(summary.cost_per_million_tokens), '实际成本 / 1M Tokens', '']
   ];
+}
+
+function usageDetailStrip(summary) {
+  const details = [
+    ['输入 Tokens', formatTokens(summary.input_tokens)],
+    ['输出 Tokens', formatTokens(summary.output_tokens)],
+    ['Cache Create', formatTokens(summary.cache_creation_tokens)],
+    ['Cache Read', formatTokens(summary.cache_read_tokens)],
+    ['原始输入成本', formatUSD(summary.input_cost)],
+    ['原始输出成本', formatUSD(summary.output_cost)],
+    ['原始 Cache Create 成本', formatUSD(summary.cache_creation_cost)],
+    ['原始 Cache Read 成本', formatUSD(summary.cache_read_cost)],
+    ['原始 Token 成本', formatUSD(summary.token_cost)],
+    ['原始非 Token 成本', formatUSD(summary.non_token_cost)]
+  ];
+  return `<div class="usage-detail-heading">窗口构成</div>
+    <div class="usage-detail-grid">${details.map(([label, value]) =>
+      `<div><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>
+    <div class="usage-detail-note">每百万 Tokens 成本按实际成本加权计算；输入/输出 Tokens 已包含图片 Tokens，不重复相加；非 Token 成本包含按次、按图等未拆分费用。</div>`;
 }
 
 function renderUsageKPI([label, value, note, color]) {
@@ -173,6 +195,8 @@ function renderUsageCards(sourceItems, emptyText, kind) {
 
 function renderUsageCard(item, kind) {
   const inputTokens = nonNegativeNumber(item?.input_tokens);
+  const outputTokens = nonNegativeNumber(item?.output_tokens);
+  const cacheCreationTokens = nonNegativeNumber(item?.cache_creation_tokens);
   const cacheReadTokens = nonNegativeNumber(item?.cache_read_tokens);
   const denominator = inputTokens + cacheReadTokens;
   const hitRate = Math.min(100, nonNegativeNumber(item?.cache_hit_rate));
@@ -181,14 +205,18 @@ function renderUsageCard(item, kind) {
   const platform = item?.platform && item.platform !== 'unknown' ? item.platform : '未知平台';
   const totalTokens = nonNegativeNumber(item?.total_tokens);
   const requests = nonNegativeNumber(item?.requests);
+  const baseCost = nonNegativeNumber(item?.base_cost);
   const totalCost = nonNegativeNumber(item?.total_cost);
+  const nonTokenCost = nonNegativeNumber(item?.non_token_cost);
   const kindLabel = kind === 'group' ? '分组' : '账户';
   const kindClass = kind === 'group' ? ' group-usage-card' : '';
+  const context = item?.context || '';
   return `<article class="usage-entity-card${kindClass}">
     <div class="usage-card-head">
       <div class="usage-card-title">
         <span>${escapeHTML(kindLabel)}</span>
         <h4 title="${escapeHTML(name)}">${escapeHTML(name)}</h4>
+        ${context ? `<small>${escapeHTML(context)}</small>` : ''}
       </div>
       <span class="usage-platform">${escapeHTML(platform)}</span>
     </div>
@@ -197,22 +225,32 @@ function renderUsageCard(item, kind) {
       <div class="usage-card-primary-metric unit-cost-metric"><span>每百万 Tokens</span><strong>${formatUnitCost(unitCost)}</strong></div>
     </div>
     <div class="usage-card-details">
-      <div><span>Cache Read</span><strong>${formatTokens(cacheReadTokens)}</strong></div>
       <div><span>输入 Tokens</span><strong>${formatTokens(inputTokens)}</strong></div>
+      <div><span>输出 Tokens</span><strong>${formatTokens(outputTokens)}</strong></div>
+      <div><span>Cache Create</span><strong>${formatTokens(cacheCreationTokens)}</strong></div>
+      <div><span>Cache Read</span><strong>${formatTokens(cacheReadTokens)}</strong></div>
       <div><span>总 Tokens</span><strong>${formatTokens(totalTokens)}</strong></div>
+      <div><span>原始成本</span><strong>${formatUSD(baseCost)}</strong></div>
       <div><span>实际成本</span><strong>${formatUSD(totalCost)}</strong></div>
+      <div><span>非 Token 成本</span><strong>${formatUSD(nonTokenCost)}</strong></div>
+      <div><span>有效倍率</span><strong>${formatMultiplier(item?.effective_rate_multiplier)}</strong></div>
     </div>
     <div class="usage-card-foot">
       <span>${formatCount(requests)} 次请求</span>
-      <span>缓存分母 ${formatTokens(denominator)}</span>
+      <span>缓存分母 ${formatTokens(denominator)} · ${formatTokens(totalTokens)} Tokens</span>
     </div>
   </article>`;
 }
 
-function renderShareDonut(containerId, sourceItems, summary, emptyText, itemLabel, metric) {
+function renderShareDonut(containerId, sourceItems, summary, emptyText, itemLabel, metric, dimensionMeta = {}) {
+  const container = $(`#${containerId}`);
+  container.classList.toggle('is-unit-cost', metric === 'unit_cost');
+  if (metric === 'unit_cost') {
+    renderUnitCostRanking(container, sourceItems, summary, emptyText, itemLabel, dimensionMeta);
+    return;
+  }
   const sliceTotal = shareSliceTotal(summary, metric);
   const total = shareMetricValue(summary, metric);
-  const container = $(`#${containerId}`);
   const items = shareItems(sourceItems, summary, metric);
   if (!items.length) {
     container.innerHTML = `<div class="empty-state donut-empty">${emptyText}</div>`;
@@ -239,6 +277,93 @@ function renderShareDonut(containerId, sourceItems, summary, emptyText, itemLabe
   bindChartTooltip(container, '[data-chart-tooltip]', $(`#${tooltipId}`));
 }
 
+function renderUnitCostRanking(container, sourceItems, summary, emptyText, itemLabel, dimensionMeta) {
+  const items = unitCostItems(sourceItems, summary, dimensionMeta);
+  if (!items.length) {
+    container.innerHTML = `<div class="empty-state donut-empty">${emptyText}</div>`;
+    return;
+  }
+  const rows = items.map((item) => renderUnitCostRow(item)).join('');
+  container.innerHTML = `<div class="unit-cost-ranking">
+    <div class="unit-cost-intro">已展开${escapeHTML(itemLabel)}按综合实际成本 / 1M Tokens 排序；“其他”是未展开对象汇总。百分比分别为 Tokens 占比和实际成本占比。</div>
+    <div class="unit-cost-table-wrap">
+      <table class="unit-cost-table">
+        <thead><tr><th>名称</th><th>每百万 Tokens</th><th>Tokens 占比</th><th>成本占比</th><th>请求数</th><th>Tokens</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function unitCostItems(sourceItems, summary, dimensionMeta = {}) {
+  const summaryTokens = nonNegativeNumber(summary?.total_tokens);
+  const summaryCost = nonNegativeNumber(summary?.total_cost);
+  const items = (Array.isArray(sourceItems) ? sourceItems : [])
+    .filter((item) => nonNegativeNumber(item?.total_tokens) > 0 || nonNegativeNumber(item?.total_cost) > 0)
+    .map((item) => ({
+      ...item,
+      isOther: false,
+      unitCost: shareMetricValue(item, 'unit_cost'),
+      tokenShare: percentOf(item?.total_tokens, summaryTokens),
+      costShare: percentOf(item?.total_cost, summaryCost)
+    }))
+    .sort((left, right) => right.unitCost - left.unitCost
+      || nonNegativeNumber(right.total_tokens) - nonNegativeNumber(left.total_tokens)
+      || String(left.name || left.key || '').localeCompare(String(right.name || right.key || ''), 'zh-CN'));
+  const returnedTokens = items.reduce((sum, item) => sum + nonNegativeNumber(item.total_tokens), 0);
+  const returnedCost = items.reduce((sum, item) => sum + nonNegativeNumber(item.total_cost), 0);
+  const omittedTokens = hasDimensionMeta(dimensionMeta)
+    ? nonNegativeNumber(dimensionMeta?.omitted_tokens)
+    : Math.max(summaryTokens - returnedTokens, 0);
+  const omittedCost = hasDimensionMeta(dimensionMeta)
+    ? nonNegativeNumber(dimensionMeta?.omitted_cost)
+    : Math.max(summaryCost - returnedCost, 0);
+  const omittedItems = hasDimensionMeta(dimensionMeta)
+    ? nonNegativeNumber(dimensionMeta?.omitted_items)
+    : 0;
+  if (omittedItems > 0 || omittedTokens > 0 || omittedCost > 0) {
+    items.push({
+      name: '其他',
+      context: omittedItems > 0 ? `未展开 ${formatCount(omittedItems)} 个对象` : '',
+      isOther: true,
+      requests: hasDimensionMeta(dimensionMeta) ? nonNegativeNumber(dimensionMeta?.omitted_requests) : 0,
+      total_tokens: omittedTokens,
+      total_cost: omittedCost,
+      unitCost: costPerMillion(omittedCost, omittedTokens),
+      tokenShare: percentOf(omittedTokens, summaryTokens),
+      costShare: percentOf(omittedCost, summaryCost)
+    });
+  }
+  return items;
+}
+
+function renderUnitCostRow(item) {
+  const requests = nonNegativeNumber(item?.requests);
+  const totalTokens = nonNegativeNumber(item?.total_tokens);
+  const lowSample = requests < 5 || totalTokens < 10_000;
+  const label = item?.name || item?.key || '未命名';
+  const context = item?.context || item?.platform || '';
+  const detail = item?.isOther
+    ? `其余 ${formatCount(requests)} 次请求 · ${formatTokens(totalTokens)} Tokens · ${formatUSD(item?.total_cost)} 实际成本`
+    : [
+      `原始输入 ${formatUSD(item?.input_cost)}`,
+      `原始输出 ${formatUSD(item?.output_cost)}`,
+      `原始 Cache Create ${formatUSD(item?.cache_creation_cost)}`,
+      `原始 Cache Read ${formatUSD(item?.cache_read_cost)}`,
+      `实际 ${formatUSD(item?.total_cost)}`,
+      `原始非 Token ${formatUSD(item?.non_token_cost)}`,
+      `有效倍率 ${formatMultiplier(item?.effective_rate_multiplier)}`
+    ].join(' · ');
+  return `<tr class="${item?.isOther ? 'is-other' : ''}">
+    <td><div class="unit-cost-name"><strong>${escapeHTML(label)}</strong>${context ? `<small>${escapeHTML(context)}</small>` : ''}${lowSample && !item?.isOther ? '<em>样本较少</em>' : ''}</div><span class="unit-cost-breakdown">${escapeHTML(detail)}</span></td>
+    <td class="numeric"><strong>${formatUnitCost(item?.unitCost)}</strong></td>
+    <td class="numeric">${formatPercent(item?.tokenShare)}</td>
+    <td class="numeric">${formatPercent(item?.costShare)}</td>
+    <td class="numeric">${formatCount(requests)}</td>
+    <td class="numeric">${formatTokens(totalTokens)}</td>
+  </tr>`;
+}
+
 function shareItems(sourceItems, summary, metric) {
   const sliceTotal = shareSliceTotal(summary, metric);
   if (sliceTotal <= 0) return [];
@@ -251,7 +376,9 @@ function shareItems(sourceItems, summary, metric) {
       name: item.name || item.key || '未命名',
       value: shareMetricValue(item, metric),
       sliceValue: shareSliceValue(item, metric),
-      totalCost: nonNegativeNumber(item?.total_cost)
+      totalCost: nonNegativeNumber(item?.total_cost),
+      context: item?.context || '',
+      platform: item?.platform || ''
     }));
   const minimumSliceValue = sliceTotal * minimumDonutPercent / 100;
   const items = ranked.slice(0, 7).filter((item) => item.sliceValue >= minimumSliceValue);
@@ -262,19 +389,13 @@ function shareItems(sourceItems, summary, metric) {
     0
   );
   if (remainder > 0) {
-    const last = items[items.length - 1];
-    if (last && remainder < minimumSliceValue) {
-      last.sliceValue += remainder;
-      if (metric === 'unit_cost') {
-        last.totalCost += remainingCost;
-        last.value = costPerMillion(last.totalCost, last.sliceValue);
-      } else {
-        last.value += remainder;
-      }
-    } else {
-      const value = metric === 'unit_cost' ? costPerMillion(remainingCost, remainder) : remainder;
-      items.push({ name: '其他', value, sliceValue: remainder, totalCost: remainingCost });
-    }
+    items.push({
+      name: '其他',
+      value: remainder,
+      sliceValue: remainder,
+      totalCost: remainingCost,
+      context: '未展开的其余对象'
+    });
   }
   return items;
 }
@@ -295,7 +416,7 @@ function renderLegendItem(item, total, index, tooltipId, metric) {
   return `<div class="legend-item" tabindex="0" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}"
     data-chart-tooltip="${escapeHTML(label)}" aria-describedby="${tooltipId}">
     <i style="background:${donutColors[index % donutColors.length]}"></i>
-    <span>${escapeHTML(item.name)}</span><strong>${formatShareValue(item.value, metric)}</strong><em>${percent.toFixed(1)}%</em>
+    <span class="legend-copy"><strong>${escapeHTML(item.name)}</strong>${item.context ? `<small>${escapeHTML(item.context)}</small>` : ''}</span><b>${formatShareValue(item.value, metric)}</b><em>${percent.toFixed(1)}%</em>
   </div>`;
 }
 
@@ -344,7 +465,8 @@ function shareTooltipLabel(item, total, metric) {
   const share = metric === 'unit_cost'
     ? `${formatTokens(item.sliceValue)} Tokens · ${percent.toFixed(1)}%`
     : `${percent.toFixed(1)}%`;
-  return `${item.name} · ${formatShareDetail(item.value, metric)} · ${share}`;
+  const context = item.context ? ` · ${item.context}` : '';
+  return `${item.name}${context} · ${formatShareDetail(item.value, metric)} · ${share}`;
 }
 
 function bindChartTooltip(container, selector, tooltip) {
@@ -501,6 +623,12 @@ function pointChannels(item) {
   return [{
     name: '全部渠道', requests: item?.requests,
     total_tokens: item?.total_tokens, total_cost: item?.total_cost,
+    base_cost: item?.base_cost,
+    input_tokens: item?.input_tokens, output_tokens: item?.output_tokens,
+    cache_creation_tokens: item?.cache_creation_tokens, cache_read_tokens: item?.cache_read_tokens,
+    input_cost: item?.input_cost, output_cost: item?.output_cost,
+    cache_creation_cost: item?.cache_creation_cost, cache_read_cost: item?.cache_read_cost,
+    non_token_cost: item?.non_token_cost,
     cost_per_million_tokens: item?.cost_per_million_tokens
   }];
 }
@@ -566,6 +694,26 @@ function formatUnitCost(value) {
 function costPerMillion(totalCost, totalTokens) {
   const tokens = nonNegativeNumber(totalTokens);
   return tokens > 0 ? nonNegativeNumber(totalCost) * 1_000_000 / tokens : 0;
+}
+
+function percentOf(value, total) {
+  const denominator = nonNegativeNumber(total);
+  return denominator > 0 ? nonNegativeNumber(value) * 100 / denominator : 0;
+}
+
+function hasDimensionMeta(meta) {
+  return meta && ['total_items', 'returned_items', 'omitted_items', 'omitted_requests', 'omitted_tokens', 'omitted_cost']
+    .some((key) => Number.isFinite(Number(meta[key])));
+}
+
+function formatPercent(value) {
+  return `${nonNegativeNumber(value).toFixed(1)}%`;
+}
+
+function formatMultiplier(value) {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return '—';
+  const multiplier = Number(value);
+  return Number.isFinite(multiplier) && multiplier >= 0 ? `${multiplier.toFixed(4)}×` : '—';
 }
 
 function nonNegativeNumber(value) {

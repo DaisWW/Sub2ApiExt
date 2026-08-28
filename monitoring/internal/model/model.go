@@ -8,7 +8,7 @@ import (
 const (
 	KindAccount = "account"
 	KindGroup   = "group"
-
+	KindModel   = "model"
 	StatusOperational = "operational"
 	StatusDegraded    = "degraded"
 	StatusFailed      = "failed"
@@ -168,63 +168,127 @@ type LiveActivityTarget struct {
 // UsageRanking 是由网关 usage_logs 生成的只读用量视图。
 // Token 数量保持整数，成本保持浮点数，浏览器无需推断单位。
 type UsageRanking struct {
-	GeneratedAt time.Time       `json:"generated_at"`
-	Period      string          `json:"period"`
-	PeriodLabel string          `json:"period_label"`
-	Bucket      string          `json:"bucket"`
-	StartAt     time.Time       `json:"start_at"`
-	EndAt       time.Time       `json:"end_at"`
-	Summary     UsageSummary    `json:"summary"`
-	Timeline    []UsageBucket   `json:"timeline"`
-	Accounts    []UsageRankItem `json:"accounts"`
-	Groups      []UsageRankItem `json:"groups"`
-	Models      []UsageRankItem `json:"models"`
+	GeneratedAt   time.Time             `json:"generated_at"`
+	Period        string                `json:"period"`
+	PeriodLabel   string                `json:"period_label"`
+	Bucket        string                `json:"bucket"`
+	StartAt       time.Time             `json:"start_at"`
+	EndAt         time.Time             `json:"end_at"`
+	Summary       UsageSummary          `json:"summary"`
+	DimensionMeta UsageDimensionMetaSet `json:"dimension_meta"`
+	Timeline      []UsageBucket         `json:"timeline"`
+	Accounts      []UsageRankItem       `json:"accounts"`
+	Groups        []UsageRankItem       `json:"groups"`
+	Models        []UsageRankItem       `json:"models"`
+}
+
+// UsageDimensionMeta describes how much of a ranking dimension is returned.
+// Rank arrays intentionally contain the union of the most useful dimensions;
+// the omitted aggregate lets the UI explain the "其他" remainder precisely.
+type UsageDimensionMeta struct {
+	TotalItems      int64   `json:"total_items"`
+	ReturnedItems   int64   `json:"returned_items"`
+	OmittedItems    int64   `json:"omitted_items"`
+	OmittedRequests int64   `json:"omitted_requests"`
+	OmittedTokens   int64   `json:"omitted_tokens"`
+	OmittedCost     float64 `json:"omitted_cost"`
+}
+
+type UsageDimensionMetaSet struct {
+	Accounts UsageDimensionMeta `json:"accounts"`
+	Groups   UsageDimensionMeta `json:"groups"`
+	Models   UsageDimensionMeta `json:"models"`
 }
 
 type UsageSummary struct {
-	Requests             int64   `json:"requests"`
-	TotalTokens          int64   `json:"total_tokens"`
-	InputTokens          int64   `json:"input_tokens"`
-	OutputTokens         int64   `json:"output_tokens"`
-	CacheTokens          int64   `json:"cache_tokens"`
-	CacheRead            int64   `json:"cache_read_tokens"`
-	TotalCost            float64 `json:"total_cost"`
-	CostPerMillionTokens float64 `json:"cost_per_million_tokens"`
-	Accounts             int64   `json:"accounts"`
-	Groups               int64   `json:"groups"`
+	Requests                int64   `json:"requests"`
+	TotalTokens             int64   `json:"total_tokens"`
+	InputTokens             int64   `json:"input_tokens"`
+	OutputTokens            int64   `json:"output_tokens"`
+	CacheCreationTokens     int64   `json:"cache_creation_tokens"`
+	CacheTokens             int64   `json:"cache_tokens"`
+	CacheRead               int64   `json:"cache_read_tokens"`
+	BaseCost                float64 `json:"base_cost"`
+	TotalCost               float64 `json:"total_cost"` // 实际扣除成本，保留旧字段语义
+	TokenCost               float64 `json:"token_cost"`
+	InputCost               float64 `json:"input_cost"`
+	OutputCost              float64 `json:"output_cost"`
+	CacheCreationCost       float64 `json:"cache_creation_cost"`
+	CacheReadCost           float64 `json:"cache_read_cost"`
+	NonTokenCost            float64 `json:"non_token_cost"`
+	EffectiveRateMultiplier float64 `json:"effective_rate_multiplier"`
+	CostPerMillionTokens    float64 `json:"cost_per_million_tokens"`
+	Accounts                int64   `json:"accounts"`
+	Groups                  int64   `json:"groups"`
 }
 
 type UsageBucket struct {
-	StartAt              time.Time            `json:"start_at"`
-	Requests             int64                `json:"requests"`
-	TotalTokens          int64                `json:"total_tokens"`
-	TotalCost            float64              `json:"total_cost"`
-	CostPerMillionTokens float64              `json:"cost_per_million_tokens"`
-	Channels             []UsageChannelBucket `json:"channels"`
+	StartAt                 time.Time            `json:"start_at"`
+	Requests                int64                `json:"requests"`
+	TotalTokens             int64                `json:"total_tokens"`
+	InputTokens             int64                `json:"input_tokens"`
+	OutputTokens            int64                `json:"output_tokens"`
+	CacheCreationTokens     int64                `json:"cache_creation_tokens"`
+	CacheRead               int64                `json:"cache_read_tokens"`
+	BaseCost                float64              `json:"base_cost"`
+	TotalCost               float64              `json:"total_cost"`
+	TokenCost               float64              `json:"token_cost"`
+	InputCost               float64              `json:"input_cost"`
+	OutputCost              float64              `json:"output_cost"`
+	CacheCreationCost       float64              `json:"cache_creation_cost"`
+	CacheReadCost           float64              `json:"cache_read_cost"`
+	NonTokenCost            float64              `json:"non_token_cost"`
+	EffectiveRateMultiplier float64              `json:"effective_rate_multiplier"`
+	CostPerMillionTokens    float64              `json:"cost_per_million_tokens"`
+	Channels                []UsageChannelBucket `json:"channels"`
 }
 
 type UsageChannelBucket struct {
-	Name                 string  `json:"name"`
-	Requests             int64   `json:"requests"`
-	TotalTokens          int64   `json:"total_tokens"`
-	TotalCost            float64 `json:"total_cost"`
-	CostPerMillionTokens float64 `json:"cost_per_million_tokens"`
+	Name                    string  `json:"name"`
+	Requests                int64   `json:"requests"`
+	TotalTokens             int64   `json:"total_tokens"`
+	InputTokens             int64   `json:"input_tokens"`
+	OutputTokens            int64   `json:"output_tokens"`
+	CacheCreationTokens     int64   `json:"cache_creation_tokens"`
+	CacheRead               int64   `json:"cache_read_tokens"`
+	BaseCost                float64 `json:"base_cost"`
+	TotalCost               float64 `json:"total_cost"`
+	TokenCost               float64 `json:"token_cost"`
+	InputCost               float64 `json:"input_cost"`
+	OutputCost              float64 `json:"output_cost"`
+	CacheCreationCost       float64 `json:"cache_creation_cost"`
+	CacheReadCost           float64 `json:"cache_read_cost"`
+	NonTokenCost            float64 `json:"non_token_cost"`
+	EffectiveRateMultiplier float64 `json:"effective_rate_multiplier"`
+	CostPerMillionTokens    float64 `json:"cost_per_million_tokens"`
 }
 
 type UsageRankItem struct {
-	Kind                 string  `json:"kind"`
-	ID                   *int64  `json:"id,omitempty"`
-	Key                  string  `json:"key"`
-	Name                 string  `json:"name"`
-	Platform             string  `json:"platform,omitempty"`
-	Requests             int64   `json:"requests"`
-	TotalTokens          int64   `json:"total_tokens"`
-	InputTokens          int64   `json:"input_tokens"`
-	CacheRead            int64   `json:"cache_read_tokens"`
-	CacheHitRate         float64 `json:"cache_hit_rate"`
-	TotalCost            float64 `json:"total_cost"`
-	CostPerMillionTokens float64 `json:"cost_per_million_tokens"`
-	SharePercent         float64 `json:"share_percent"`
+	Kind                    string  `json:"kind"`
+	ID                      *int64  `json:"id,omitempty"`
+	Key                     string  `json:"key"`
+	Name                    string  `json:"name"`
+	Context                 string  `json:"context,omitempty"`
+	Platform                string  `json:"platform,omitempty"`
+	Requests                int64   `json:"requests"`
+	TotalTokens             int64   `json:"total_tokens"`
+	InputTokens             int64   `json:"input_tokens"`
+	OutputTokens            int64   `json:"output_tokens"`
+	CacheCreationTokens     int64   `json:"cache_creation_tokens"`
+	CacheRead               int64   `json:"cache_read_tokens"`
+	CacheHitRate            float64 `json:"cache_hit_rate"`
+	BaseCost                float64 `json:"base_cost"`
+	TotalCost               float64 `json:"total_cost"`
+	TokenCost               float64 `json:"token_cost"`
+	InputCost               float64 `json:"input_cost"`
+	OutputCost              float64 `json:"output_cost"`
+	CacheCreationCost       float64 `json:"cache_creation_cost"`
+	CacheReadCost           float64 `json:"cache_read_cost"`
+	NonTokenCost            float64 `json:"non_token_cost"`
+	EffectiveRateMultiplier float64 `json:"effective_rate_multiplier"`
+	CostPerMillionTokens    float64 `json:"cost_per_million_tokens"`
+	SharePercent            float64 `json:"share_percent"` // Tokens 占比，保留旧字段名兼容现有客户端
+	CostSharePercent        float64 `json:"cost_share_percent"`
 }
 
 type Alert struct {

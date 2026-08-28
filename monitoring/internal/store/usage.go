@@ -74,16 +74,17 @@ func (s *Store) loadUsageOverview(ctx context.Context, result *model.UsageRankin
 
 func (s *Store) loadUsageRanks(ctx context.Context, result *model.UsageRanking, bounds usageBounds, limit int) error {
 	totalTokens := result.Summary.TotalTokens
+	totalCost := result.Summary.TotalCost
 	var err error
-	result.Accounts, err = s.loadAccountUsageRanks(ctx, bounds, limit, totalTokens)
+	result.Accounts, result.DimensionMeta.Accounts, err = s.loadAccountUsageRanks(ctx, bounds, limit, totalTokens, totalCost)
 	if err != nil {
 		return fmt.Errorf("load account usage ranks: %w", err)
 	}
-	result.Groups, err = s.loadGroupUsageRanks(ctx, bounds, limit, totalTokens)
+	result.Groups, result.DimensionMeta.Groups, err = s.loadGroupUsageRanks(ctx, bounds, limit, totalTokens, totalCost)
 	if err != nil {
 		return fmt.Errorf("load group usage ranks: %w", err)
 	}
-	result.Models, err = s.loadModelUsageRanks(ctx, bounds, limit, totalTokens)
+	result.Models, result.DimensionMeta.Models, err = s.loadModelUsageRanks(ctx, bounds, limit, totalTokens, totalCost)
 	if err != nil {
 		return fmt.Errorf("load model usage ranks: %w", err)
 	}
@@ -157,6 +158,11 @@ SELECT COUNT(*)::bigint,
        COALESCE(SUM(ul.output_tokens), 0)::bigint,
        COALESCE(SUM(ul.cache_creation_tokens), 0)::bigint,
        COALESCE(SUM(ul.cache_read_tokens), 0)::bigint,
+       COALESCE(SUM(COALESCE(ul.total_cost, ul.actual_cost, 0)), 0)::double precision,
+       COALESCE(SUM(COALESCE(ul.input_cost, 0)), 0)::double precision,
+       COALESCE(SUM(COALESCE(ul.output_cost, 0)), 0)::double precision,
+       COALESCE(SUM(COALESCE(ul.cache_creation_cost, 0)), 0)::double precision,
+       COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision,
        COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision,
        COUNT(DISTINCT ul.account_id)::bigint,
        COUNT(DISTINCT ul.group_id)::bigint
@@ -170,14 +176,23 @@ SELECT COUNT(*)::bigint,
               AND LOWER(TRIM(g.status)) = 'active'
  WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0`
 	var cacheCreate, cacheRead int64
+	var baseCost, actualCost float64
 	if err := s.db.QueryRowContext(ctx, query, bounds.start, bounds.end).Scan(
 		&summary.Requests, &summary.TotalTokens, &summary.InputTokens, &summary.OutputTokens,
-		&cacheCreate, &cacheRead, &summary.TotalCost, &summary.Accounts, &summary.Groups,
+		&cacheCreate, &cacheRead, &baseCost, &summary.InputCost, &summary.OutputCost,
+		&summary.CacheCreationCost, &summary.CacheReadCost, &actualCost,
+		&summary.Accounts, &summary.Groups,
 	); err != nil {
 		return err
 	}
 	summary.CacheTokens = cacheCreate + cacheRead
 	summary.CacheRead = cacheRead
+	summary.BaseCost = baseCost
+	summary.TotalCost = actualCost
+	summary.TokenCost, summary.NonTokenCost, summary.EffectiveRateMultiplier = usageCostBreakdown(
+		summary.BaseCost, summary.TotalCost, summary.InputCost, summary.OutputCost,
+		summary.CacheCreationCost, summary.CacheReadCost,
+	)
 	summary.CostPerMillionTokens = costPerMillionTokens(summary.TotalCost, summary.TotalTokens)
 	return nil
 }
@@ -205,6 +220,15 @@ func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]mo
 	                        COALESCE(ul.output_tokens, 0)::bigint +
 	                        COALESCE(ul.cache_creation_tokens, 0)::bigint +
 	                        COALESCE(ul.cache_read_tokens, 0)::bigint), 0)::bigint AS total_tokens,
+	           COALESCE(SUM(ul.input_tokens), 0)::bigint AS input_tokens,
+	           COALESCE(SUM(ul.output_tokens), 0)::bigint AS output_tokens,
+	           COALESCE(SUM(ul.cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+	           COALESCE(SUM(ul.cache_read_tokens), 0)::bigint AS cache_read_tokens,
+	           COALESCE(SUM(COALESCE(ul.total_cost, ul.actual_cost, 0)), 0)::double precision AS base_cost,
+	           COALESCE(SUM(COALESCE(ul.input_cost, 0)), 0)::double precision AS input_cost,
+	           COALESCE(SUM(COALESCE(ul.output_cost, 0)), 0)::double precision AS output_cost,
+	           COALESCE(SUM(COALESCE(ul.cache_creation_cost, 0)), 0)::double precision AS cache_creation_cost,
+	           COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
 	           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
 	    FROM usage_logs ul
 	    JOIN accounts a ON a.id = ul.account_id
@@ -218,7 +242,20 @@ func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]mo
 	    WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
 	    GROUP BY 1, 2
 	)
-SELECT buckets.start_at, COALESCE(usage.channel_name, ''), COALESCE(usage.requests, 0), COALESCE(usage.total_tokens, 0), COALESCE(usage.total_cost, 0)
+SELECT buckets.start_at,
+       COALESCE(usage.channel_name, ''),
+       COALESCE(usage.requests, 0),
+       COALESCE(usage.total_tokens, 0),
+       COALESCE(usage.input_tokens, 0),
+       COALESCE(usage.output_tokens, 0),
+       COALESCE(usage.cache_creation_tokens, 0),
+       COALESCE(usage.cache_read_tokens, 0),
+       COALESCE(usage.base_cost, 0),
+       COALESCE(usage.input_cost, 0),
+       COALESCE(usage.output_cost, 0),
+       COALESCE(usage.cache_creation_cost, 0),
+       COALESCE(usage.cache_read_cost, 0),
+       COALESCE(usage.total_cost, 0)
 FROM buckets
 LEFT JOIN usage USING (start_at)
 ORDER BY buckets.start_at, usage.channel_name`, bounds.bucket, bounds.bucket, step, bounds.bucket)
@@ -231,17 +268,35 @@ ORDER BY buckets.start_at, usage.channel_name`, bounds.bucket, bounds.bucket, st
 	for rows.Next() {
 		var startAt time.Time
 		var channel model.UsageChannelBucket
-		if err := rows.Scan(&startAt, &channel.Name, &channel.Requests, &channel.TotalTokens, &channel.TotalCost); err != nil {
+		if err := rows.Scan(
+			&startAt, &channel.Name, &channel.Requests, &channel.TotalTokens,
+			&channel.InputTokens, &channel.OutputTokens, &channel.CacheCreationTokens,
+			&channel.CacheRead, &channel.BaseCost, &channel.InputCost, &channel.OutputCost,
+			&channel.CacheCreationCost, &channel.CacheReadCost, &channel.TotalCost,
+		); err != nil {
 			return nil, err
 		}
 		startAt = startAt.UTC()
+		channel.TokenCost, channel.NonTokenCost, channel.EffectiveRateMultiplier = usageCostBreakdown(
+			channel.BaseCost, channel.TotalCost, channel.InputCost, channel.OutputCost,
+			channel.CacheCreationCost, channel.CacheReadCost,
+		)
 		if len(items) == 0 || !items[len(items)-1].StartAt.Equal(startAt) {
 			items = append(items, model.UsageBucket{StartAt: startAt, Channels: []model.UsageChannelBucket{}})
 		}
 		item := &items[len(items)-1]
 		item.Requests += channel.Requests
 		item.TotalTokens += channel.TotalTokens
+		item.InputTokens += channel.InputTokens
+		item.OutputTokens += channel.OutputTokens
+		item.CacheCreationTokens += channel.CacheCreationTokens
+		item.CacheRead += channel.CacheRead
+		item.BaseCost += channel.BaseCost
 		item.TotalCost += channel.TotalCost
+		item.InputCost += channel.InputCost
+		item.OutputCost += channel.OutputCost
+		item.CacheCreationCost += channel.CacheCreationCost
+		item.CacheReadCost += channel.CacheReadCost
 		if channel.Name == "" {
 			continue
 		}
@@ -249,6 +304,10 @@ ORDER BY buckets.start_at, usage.channel_name`, bounds.bucket, bounds.bucket, st
 		item.Channels = append(item.Channels, channel)
 	}
 	for index := range items {
+		items[index].TokenCost, items[index].NonTokenCost, items[index].EffectiveRateMultiplier = usageCostBreakdown(
+			items[index].BaseCost, items[index].TotalCost, items[index].InputCost,
+			items[index].OutputCost, items[index].CacheCreationCost, items[index].CacheReadCost,
+		)
 		items[index].CostPerMillionTokens = costPerMillionTokens(items[index].TotalCost, items[index].TotalTokens)
 	}
 	return items, rows.Err()
@@ -259,4 +318,19 @@ func costPerMillionTokens(totalCost float64, totalTokens int64) float64 {
 		return 0
 	}
 	return totalCost * 1_000_000 / float64(totalTokens)
+}
+
+func usageCostBreakdown(baseCost, actualCost, inputCost, outputCost, cacheCreationCost, cacheReadCost float64) (tokenCost, nonTokenCost, effectiveRateMultiplier float64) {
+	tokenCost = inputCost + outputCost + cacheCreationCost + cacheReadCost
+	if tokenCost < 0 {
+		tokenCost = 0
+	}
+	nonTokenCost = baseCost - tokenCost
+	if nonTokenCost < 0 {
+		nonTokenCost = 0
+	}
+	if baseCost > 0 {
+		effectiveRateMultiplier = actualCost / baseCost
+	}
+	return tokenCost, nonTokenCost, effectiveRateMultiplier
 }

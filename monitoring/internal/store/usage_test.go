@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,5 +143,73 @@ func TestCostPerMillionTokens(t *testing.T) {
 	}
 	if got := costPerMillionTokens(1.25, 0); got != 0 {
 		t.Fatalf("zero-token unit cost = %v, want 0", got)
+	}
+}
+
+func TestUsageCostBreakdown(t *testing.T) {
+	tokenCost, nonTokenCost, multiplier := usageCostBreakdown(2, 2.4, 0.8, 0.6, 0.2, 0.1)
+	if math.Abs(tokenCost-1.7) > 1e-9 {
+		t.Fatalf("token cost = %v, want 1.7", tokenCost)
+	}
+	if math.Abs(nonTokenCost-0.3) > 1e-9 {
+		t.Fatalf("non-token cost = %v, want 0.3", nonTokenCost)
+	}
+	if math.Abs(multiplier-1.2) > 1e-9 {
+		t.Fatalf("effective multiplier = %v, want 1.2", multiplier)
+	}
+	if _, nonTokenCost, _ = usageCostBreakdown(1, 1, 0.8, 0.8, 0, 0); nonTokenCost != 0 {
+		t.Fatalf("negative non-token cost = %v, want 0", nonTokenCost)
+	}
+}
+
+func TestApplyUsageSharesIncludesCostShare(t *testing.T) {
+	items := []model.UsageRankItem{
+		{TotalTokens: 25, TotalCost: 2},
+		{TotalTokens: 75, TotalCost: 8},
+	}
+	applyUsageShares(items, 100, 10)
+	if math.Abs(items[0].SharePercent-25) > 1e-9 || math.Abs(items[0].CostSharePercent-20) > 1e-9 {
+		t.Fatalf("first shares = (%v, %v), want (25, 20)", items[0].SharePercent, items[0].CostSharePercent)
+	}
+	if math.Abs(items[1].SharePercent-75) > 1e-9 || math.Abs(items[1].CostSharePercent-80) > 1e-9 {
+		t.Fatalf("second shares = (%v, %v), want (75, 80)", items[1].SharePercent, items[1].CostSharePercent)
+	}
+}
+
+func TestUsageSummaryExposesCostBreakdown(t *testing.T) {
+	encoded, err := json.Marshal(model.UsageSummary{
+		BaseCost: 2, TotalCost: 2.4, TokenCost: 1.7,
+		NonTokenCost: 0.3, EffectiveRateMultiplier: 1.2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]float64{
+		"base_cost":                 2,
+		"total_cost":                2.4,
+		"token_cost":                1.7,
+		"non_token_cost":            0.3,
+		"effective_rate_multiplier": 1.2,
+	} {
+		if payload[key] != want {
+			t.Errorf("%s = %v, want %v", key, payload[key], want)
+		}
+	}
+}
+
+func TestModelUsageRankSeparatesRecordedRates(t *testing.T) {
+	for _, fragment := range []string{
+		":account-rate:' || COALESCE(ul.account_rate_multiplier, 1)::text",
+		":record-rate:' || COALESCE(ul.rate_multiplier, 1)::text",
+		"COALESCE(ul.rate_multiplier, 1)::text AS context",
+		"COALESCE(ul.account_rate_multiplier, 1), COALESCE(ul.rate_multiplier, 1)",
+	} {
+		if !strings.Contains(modelUsageRankQuery, fragment) {
+			t.Fatalf("model usage rank query missing recorded-rate split %q", fragment)
+		}
 	}
 }
