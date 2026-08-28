@@ -114,16 +114,8 @@ func (s *Service) Alerts(ctx context.Context, limit int) ([]model.Alert, error) 
 	return s.store.Alerts(ctx, limit)
 }
 
-func probeEligible(account model.Account) bool {
-	return accountIsError(account) || accountIsEnabled(account)
-}
-
 func accountIsActive(account model.Account) bool {
 	return strings.EqualFold(strings.TrimSpace(account.Status), "active")
-}
-
-func accountIsError(account model.Account) bool {
-	return strings.EqualFold(strings.TrimSpace(account.Status), "error")
 }
 
 func accountIsEnabled(account model.Account) bool {

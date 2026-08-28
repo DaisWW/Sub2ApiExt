@@ -71,8 +71,39 @@ func (s *Store) InsertResults(ctx context.Context, results []model.ProbeResult) 
 		); err != nil {
 			return fmt.Errorf("insert monitoring result: %w", err)
 		}
+		if probeResolvesChannelError(result) {
+			if _, err := tx.ExecContext(ctx, clearResolvedChannelErrorQuery, result.TargetKey, result.CheckedAt); err != nil {
+				return fmt.Errorf("clear resolved channel error for %s: %w", result.TargetKey, err)
+			}
+		}
 	}
 	return tx.Commit()
+}
+
+const clearResolvedChannelErrorQuery = `
+UPDATE monitoring_targets
+SET last_channel_error_resolved_at = CASE
+        WHEN last_channel_error_resolved_at IS NULL OR last_channel_error_resolved_at < $2 THEN $2
+        ELSE last_channel_error_resolved_at
+    END,
+    last_channel_error_at = CASE
+        WHEN last_channel_error_at IS NOT NULL AND last_channel_error_at <= $2 THEN NULL
+        ELSE last_channel_error_at
+    END,
+    last_channel_error_class = CASE
+        WHEN last_channel_error_at IS NOT NULL AND last_channel_error_at <= $2 THEN ''
+        ELSE last_channel_error_class
+    END,
+    last_channel_error_status_code = CASE
+        WHEN last_channel_error_at IS NOT NULL AND last_channel_error_at <= $2 THEN NULL
+        ELSE last_channel_error_status_code
+    END
+WHERE target_key = $1
+  AND kind = 'account'`
+
+func probeResolvesChannelError(result model.ProbeResult) bool {
+	return result.Source == "probe" &&
+		(result.Status == model.StatusOperational || result.Status == model.StatusDegraded)
 }
 
 func (s *Store) Prune(ctx context.Context, before time.Time) error {

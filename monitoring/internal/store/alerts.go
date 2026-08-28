@@ -57,11 +57,11 @@ func (s *Store) EvaluateAlert(ctx context.Context, result model.ProbeResult, nam
 		return err
 	}
 	if exists {
-		sourceUpdatedAt, err := loadTargetSourceUpdatedAt(ctx, tx, result.TargetKey)
+		times, err := loadTargetEvidenceTimes(ctx, tx, result.TargetKey)
 		if err != nil {
 			return err
 		}
-		if !alertStateCurrent(state.updatedAt, sourceUpdatedAt) {
+		if !alertStateCurrentForSource(state.updatedAt, times.sourceUpdatedAt, times.activityAt) {
 			state.reset()
 		}
 	}
@@ -88,14 +88,19 @@ FROM monitoring_alert_states WHERE target_key = $1 FOR UPDATE`, key).
 	return state, true, err
 }
 
-func loadTargetSourceUpdatedAt(ctx context.Context, tx *sql.Tx, key string) (sql.NullTime, error) {
-	var updatedAt sql.NullTime
-	err := tx.QueryRowContext(ctx, `SELECT source_updated_at
-FROM monitoring_targets WHERE target_key = $1`, key).Scan(&updatedAt)
+type targetEvidenceTimes struct {
+	sourceUpdatedAt sql.NullTime
+	activityAt      sql.NullTime
+}
+
+func loadTargetEvidenceTimes(ctx context.Context, tx *sql.Tx, key string) (targetEvidenceTimes, error) {
+	var times targetEvidenceTimes
+	err := tx.QueryRowContext(ctx, `SELECT source_updated_at, last_activity_at
+FROM monitoring_targets WHERE target_key = $1`, key).Scan(&times.sourceUpdatedAt, &times.activityAt)
 	if err == sql.ErrNoRows {
-		return sql.NullTime{}, nil
+		return targetEvidenceTimes{}, nil
 	}
-	return updatedAt, err
+	return times, err
 }
 
 func saveAlertState(ctx context.Context, tx *sql.Tx, key, observed string, state alertState, exists bool) error {

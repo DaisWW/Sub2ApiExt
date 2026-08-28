@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net/http"
@@ -23,7 +24,11 @@ func main() {
 		panic(err)
 	}
 	defer db.Close()
-	service := monitor.New(cfg, store.New(db), slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	repository := store.New(db)
+	if err := repository.EnsureSchema(context.Background()); err != nil {
+		panic(err)
+	}
+	service := monitor.New(cfg, repository, slog.New(slog.NewTextHandler(os.Stdout, nil)))
 	if err := http.ListenAndServe(":8091", web.New(service, cfg.FrameAncestors).Handler()); err != nil {
 		panic(err)
 	}

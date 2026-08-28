@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
@@ -50,6 +51,7 @@ SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.
        a.proxy_id, p.protocol, p.host, p.port, p.username, p.password, p.status,
        recent.created_at, recent.model,
        last_probe.checked_at, last_probe.status, last_probe.error_class, last_probe.status_code,
+       channel_error.created_at, channel_error.error_class, channel_error.status_code,
        COALESCE(alert_state.failure_streak, 0), alert_state.updated_at,
        ag.priority, COALESCE(member_usage.request_count, 0),
 	       g.id, g.name, g.platform, g.status, g.updated_at,
@@ -62,6 +64,52 @@ LEFT JOIN proxies p ON p.id = a.proxy_id
 LEFT JOIN recent_account_usage recent ON recent.account_id = a.id
 LEFT JOIN latest_account_probe last_probe
        ON last_probe.target_key = 'account:' || a.id::text
+LEFT JOIN monitoring_targets persisted_target
+       ON persisted_target.target_key = 'account:' || a.id::text
+      AND persisted_target.kind = 'account'
+      AND persisted_target.active = TRUE
+LEFT JOIN LATERAL (
+    SELECT channel_errors.created_at, channel_errors.error_class, channel_errors.status_code
+    FROM (
+        SELECT oe.created_at,
+               COALESCE(
+                   NULLIF(BTRIM(oe.error_type), ''),
+                   NULLIF(BTRIM(oe.error_phase), ''),
+                   'upstream_error'
+               ) AS error_class,
+               COALESCE(NULLIF(oe.upstream_status_code, 0), oe.status_code) AS status_code,
+               oe.id AS error_id
+        FROM ops_error_logs oe
+        WHERE oe.account_id = a.id
+          AND oe.created_at >= NOW() - INTERVAL '24 hours'
+          AND (persisted_target.source_updated_at IS NULL
+               OR oe.created_at >= persisted_target.source_updated_at)
+          AND (persisted_target.last_channel_error_resolved_at IS NULL
+               OR oe.created_at > persisted_target.last_channel_error_resolved_at)
+          AND COALESCE(oe.is_business_limited, FALSE) = FALSE
+          AND LOWER(BTRIM(COALESCE(oe.error_type, ''))) NOT IN (
+              'cyber_policy', 'client_cancelled', 'rate_limit_error', 'invalid_request_error'
+          )
+          AND LOWER(BTRIM(COALESCE(oe.error_owner, ''))) = 'provider'
+          AND (
+              LOWER(BTRIM(COALESCE(oe.error_phase, ''))) IN ('account_auth', 'network', 'upstream')
+              OR LOWER(BTRIM(COALESCE(oe.error_source, ''))) IN ('upstream_http', 'upstream_network')
+          )
+          AND COALESCE(NULLIF(oe.upstream_status_code, 0), oe.status_code, 0) <> 429
+        UNION ALL
+        SELECT persisted_target.last_channel_error_at,
+               NULLIF(BTRIM(persisted_target.last_channel_error_class), ''),
+               persisted_target.last_channel_error_status_code,
+               0
+        WHERE persisted_target.last_channel_error_at IS NOT NULL
+          AND (persisted_target.source_updated_at IS NULL
+               OR persisted_target.last_channel_error_at >= persisted_target.source_updated_at)
+          AND (persisted_target.last_channel_error_resolved_at IS NULL
+               OR persisted_target.last_channel_error_at > persisted_target.last_channel_error_resolved_at)
+    ) channel_errors
+    ORDER BY channel_errors.created_at DESC, channel_errors.error_id DESC
+    LIMIT 1
+) channel_error ON TRUE
 LEFT JOIN monitoring_alert_states alert_state
        ON alert_state.target_key = 'account:' || a.id::text
 LEFT JOIN account_groups ag ON ag.account_id = a.id
@@ -95,6 +143,9 @@ type snapshotRow struct {
 	updatedAt, lastActivity, lastProbe    sql.NullTime
 	lastProbeStatus, lastProbeErrorClass  sql.NullString
 	lastProbeStatusCode                   sql.NullInt64
+	lastChannelError                      sql.NullTime
+	lastChannelErrorClass                 sql.NullString
+	lastChannelErrorCode                  sql.NullInt64
 	probeFailureStreak                    sql.NullInt64
 	alertStateUpdatedAt                   sql.NullTime
 	recentModel                           sql.NullString
@@ -195,7 +246,9 @@ func (r *snapshotRow) scan(rows *sql.Rows) error {
 		&r.updatedAt,
 		&r.proxyID, &r.proxyProtocol, &r.proxyHost, &r.proxyPort, &r.proxyUser, &r.proxyPassword,
 		&r.proxyStatus, &r.lastActivity, &r.recentModel, &r.lastProbe,
-		&r.lastProbeStatus, &r.lastProbeErrorClass, &r.lastProbeStatusCode, &r.probeFailureStreak,
+		&r.lastProbeStatus, &r.lastProbeErrorClass, &r.lastProbeStatusCode,
+		&r.lastChannelError, &r.lastChannelErrorClass, &r.lastChannelErrorCode,
+		&r.probeFailureStreak,
 		&r.alertStateUpdatedAt,
 		&r.groupPriority, &r.groupRequestCount, &r.groupID, &r.groupName,
 		&r.groupPlatform, &r.groupStatus, &r.groupUpdatedAt, &r.groupHasActiveChannel,
@@ -227,6 +280,7 @@ func (r snapshotRow) account() (*model.Account, error) {
 		Type: r.accountType.String, Status: r.status.String,
 		Schedulable: r.schedulable, Credentials: map[string]any{},
 	}
+	effectiveUpdatedAt := effectiveAccountUpdatedAt(r.updatedAt, r.lastActivity)
 	if r.accountPriority.Valid {
 		account.Priority = int(r.accountPriority.Int64)
 	}
@@ -239,8 +293,8 @@ func (r snapshotRow) account() (*model.Account, error) {
 		value := r.lastActivity.Time.UTC()
 		account.LastActivityAt = &value
 	}
-	if r.updatedAt.Valid {
-		value := r.updatedAt.Time.UTC()
+	if effectiveUpdatedAt.Valid {
+		value := effectiveUpdatedAt.Time.UTC()
 		account.UpdatedAt = &value
 	}
 	if r.lastProbe.Valid {
@@ -253,7 +307,20 @@ func (r snapshotRow) account() (*model.Account, error) {
 		value := int(r.lastProbeStatusCode.Int64)
 		account.LastProbeStatusCode = &value
 	}
-	if alertStateCurrent(r.alertStateUpdatedAt, r.updatedAt) {
+	if r.lastChannelError.Valid {
+		value := r.lastChannelError.Time.UTC()
+		if !channelErrorResolved(value, account.LastActivityAt, account.LastProbeAt, account.LastProbeStatus) {
+			account.LastChannelErrorAt = &value
+		}
+	}
+	if account.LastChannelErrorAt != nil {
+		account.LastChannelErrorClass = strings.TrimSpace(r.lastChannelErrorClass.String)
+	}
+	if account.LastChannelErrorAt != nil && r.lastChannelErrorCode.Valid {
+		value := int(r.lastChannelErrorCode.Int64)
+		account.LastChannelErrorStatusCode = &value
+	}
+	if alertStateCurrentForSource(r.alertStateUpdatedAt, effectiveUpdatedAt, r.lastActivity) {
 		account.ProbeFailureStreak = nullInt(r.probeFailureStreak)
 	}
 	if r.recentModel.Valid {
@@ -266,6 +333,30 @@ func (r snapshotRow) account() (*model.Account, error) {
 	return account, nil
 }
 
+func channelErrorResolved(errorAt time.Time, activityAt, probeAt *time.Time, probeStatus string) bool {
+	if activityAt != nil && !activityAt.Before(errorAt) {
+		return true
+	}
+	return probeAt != nil && !probeAt.Before(errorAt) &&
+		(probeStatus == model.StatusOperational || probeStatus == model.StatusDegraded)
+}
+
+func effectiveAccountUpdatedAt(updatedAt, lastActivity sql.NullTime) sql.NullTime {
+	if !updatedAt.Valid {
+		return updatedAt
+	}
+	if !lastActivity.Valid {
+		return updatedAt
+	}
+	updated := updatedAt.Time.UTC()
+	activity := lastActivity.Time.UTC()
+	effective := effectiveSourceUpdatedAt(&updated, &activity)
+	if effective == nil {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: *effective, Valid: true}
+}
+
 func alertStateCurrent(stateUpdatedAt, accountUpdatedAt sql.NullTime) bool {
 	if !stateUpdatedAt.Valid {
 		return false
@@ -274,6 +365,23 @@ func alertStateCurrent(stateUpdatedAt, accountUpdatedAt sql.NullTime) bool {
 		return true
 	}
 	return !stateUpdatedAt.Time.Before(accountUpdatedAt.Time)
+}
+
+func alertStateCurrentForSource(stateUpdatedAt, sourceUpdatedAt, activityAt sql.NullTime) bool {
+	if !stateUpdatedAt.Valid {
+		return false
+	}
+	if !sourceUpdatedAt.Valid {
+		return true
+	}
+	// source_updated_at is set to last_activity_at when the gateway's row
+	// update is only the bookkeeping side effect of a successful request. That
+	// activity must be allowed to consume an earlier probe failure and emit a
+	// recovery alert.
+	if activityAt.Valid && sourceUpdatedAt.Time.Equal(activityAt.Time) {
+		return true
+	}
+	return !stateUpdatedAt.Time.Before(sourceUpdatedAt.Time)
 }
 
 func applyProxy(account *model.Account, row snapshotRow) {
@@ -411,7 +519,8 @@ func accountIsEnabled(account model.Account) bool {
 	return accountIsActive(account.Status) && account.Schedulable
 }
 
-// accountIsMonitored 保留启用账户和错误账户；错误账户仅用于恢复探测，不进入启用统计。
+// accountIsMonitored 保留启用账户和错误账户；错误账户只在有渠道错误证据时
+// 进入恢复探测，不进入启用统计。
 func accountIsMonitored(account model.Account) bool {
 	return strings.EqualFold(strings.TrimSpace(account.Status), "error") || accountIsEnabled(account)
 }

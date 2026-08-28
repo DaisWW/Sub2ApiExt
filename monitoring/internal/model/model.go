@@ -9,6 +9,11 @@ const (
 	KindAccount = "account"
 	KindGroup   = "group"
 	KindModel   = "model"
+
+	// SourceUpdateActivityGrace covers the short lag between recording a
+	// successful request and updating the owning account row.
+	SourceUpdateActivityGrace = 2 * time.Minute
+
 	StatusOperational = "operational"
 	StatusDegraded    = "degraded"
 	StatusFailed      = "failed"
@@ -36,10 +41,16 @@ type Account struct {
 	LastProbeErrorClass string
 	LastProbeStatusCode *int
 	ProbeFailureStreak  int
-	RecentModel         string
-	ChatGPTAccount      string
-	ProxyURL            string
-	ProxyError          string
+	// LastChannelErrorAt is the latest real gateway error attributed to this
+	// account. It is a trigger for recovery probing, never a periodic probe
+	// signal by itself.
+	LastChannelErrorAt         *time.Time
+	LastChannelErrorClass      string
+	LastChannelErrorStatusCode *int
+	RecentModel                string
+	ChatGPTAccount             string
+	ProxyURL                   string
+	ProxyError                 string
 }
 
 // GroupMember 是分组内一个可调度账户的路由元数据和近期真实流量。
@@ -70,13 +81,17 @@ type Snapshot struct {
 }
 
 type Target struct {
-	Key               string     `json:"key"`
-	Kind              string     `json:"kind"`
-	EntityID          int64      `json:"entity_id"`
-	Name              string     `json:"name"`
-	Platform          string     `json:"platform"`
-	SourceStatus      string     `json:"source_status"`
-	ProbeEnabled      bool       `json:"probe_enabled"`
+	Key          string `json:"key"`
+	Kind         string `json:"kind"`
+	EntityID     int64  `json:"entity_id"`
+	Name         string `json:"name"`
+	Platform     string `json:"platform"`
+	SourceStatus string `json:"source_status"`
+	ProbeEnabled bool   `json:"probe_enabled"`
+	// RecoveryTriggerAt is set while a valid channel error has no later
+	// successful request or recovery probe. It lets the UI distinguish an active
+	// recovery incident from an old account error that must wait for new evidence.
+	RecoveryTriggerAt *time.Time `json:"recovery_trigger_at,omitempty"`
 	LastCheckedAt     *time.Time `json:"last_checked_at,omitempty"`
 	Status            string     `json:"status"`
 	Stale             bool       `json:"stale"`

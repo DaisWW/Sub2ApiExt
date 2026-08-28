@@ -14,11 +14,23 @@ CREATE TABLE IF NOT EXISTS monitoring_targets (
     probe_enabled BOOLEAN NOT NULL DEFAULT TRUE,
 	active BOOLEAN NOT NULL DEFAULT TRUE,
 	last_activity_at TIMESTAMPTZ,
+	last_channel_error_at TIMESTAMPTZ,
+	last_channel_error_class TEXT NOT NULL DEFAULT '',
+	last_channel_error_status_code INTEGER,
+	last_channel_error_resolved_at TIMESTAMPTZ,
 	source_updated_at TIMESTAMPTZ,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ;
+ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS last_channel_error_at TIMESTAMPTZ;
+ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS last_channel_error_class TEXT NOT NULL DEFAULT '';
+ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS last_channel_error_status_code INTEGER;
+ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS last_channel_error_resolved_at TIMESTAMPTZ;
 ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS monitoring_checks (

@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
@@ -19,8 +20,9 @@ type cycleBatch struct {
 }
 
 const (
-	recoveryProbeInterval    = 15 * time.Minute
-	successEvidenceFreshness = 24 * time.Hour
+	recoveryProbeInterval     = 15 * time.Minute
+	idleRecoveryProbeInterval = 2 * time.Hour
+	idleActivityWindow        = 6 * time.Hour
 )
 
 type accountEvidence struct {
@@ -72,46 +74,53 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 		persisted:      make([]model.ProbeResult, 0, len(snapshot.Accounts)+len(snapshot.Groups)),
 	}
 	probeAccounts := make([]model.Account, 0, len(snapshot.Accounts))
-	criticalAccounts := routeCriticalAccounts(snapshot)
 	for _, account := range snapshot.Accounts {
-		if !probeEligible(account) {
-			continue
-		}
+		recoveryEligible := probeEligible(account)
 		evidence := latestAccountEvidence(account)
-		if evidence.valid && successfulEvidence(evidence.status) {
-			if evidenceFresh(evidence, now, successEvidenceFreshness) {
-				if shouldObserveHistoryRecovery(account, evidence, now, interval) {
-					batch.addPassiveAccount(account)
-				} else {
-					batch.addCachedEvidence(account.ID, evidence)
-				}
-				batch.verifiedAccounts++
-				continue
+		if evidence.valid && successfulEvidence(evidence.status) && !successfulEvidenceNeedsRecovery(account, evidence) {
+			// A successful real request or probe is sufficient until the next
+			// real channel error. Routine freshness checks would spend upstream
+			// quota while the account is idle.
+			if evidence.source == "history" && shouldObserveHistoryRecovery(account, evidence, now, interval) {
+				batch.addPassiveAccount(account)
+			} else {
+				batch.addCachedEvidence(account.ID, evidence)
 			}
-			if _, critical := criticalAccounts[account.ID]; !critical || !probe.SupportsAccount(account) {
-				batch.addCachedUnknown(account.ID, evidence.checkedAt)
-				batch.deferredAccounts++
-				continue
-			}
-			probeAccounts = append(probeAccounts, account)
+			batch.verifiedAccounts++
 			continue
 		}
-		if !probe.SupportsAccount(account) {
-			continue
-		}
-		probeInterval := probeRetryDelay(account, interval)
-		if evidence.valid && evidence.checkedAt != nil && !probeDue(evidence.checkedAt, now, probeInterval) {
+
+		if evidence.valid && (evidence.status == model.StatusFailed || evidence.status == model.StatusError) {
+			// Preserve a known failure for group aggregation, but never retry it
+			// unless the gateway has reported a channel error (or the account is
+			// already in its error state).
 			batch.addCachedEvidence(account.ID, evidence)
+		}
+		if !recoveryEligible || !probe.SupportsAccount(account) {
+			continue
+		}
+
+		// A new error after successful evidence is the first recovery check for
+		// this incident and should run immediately. Once a probe has failed,
+		// later error-log rows belong to the same incident and must obey the
+		// retry/idle backoff below.
+		immediateRecovery := recoveryProbeImmediate(account, evidence, now)
+		lastAttempt := account.LastProbeAt
+		if evidence.valid && evidence.checkedAt != nil {
+			lastAttempt = evidence.checkedAt
+		} else if !probeEvidenceStatus(account.LastProbeStatus) {
+			// A timestamp without a usable result is not a recovery attempt we
+			// should back off from. Let the first error-triggered verification run.
+			lastAttempt = nil
+		}
+		probeInterval := probeRetryDelayForAccount(account, interval, now)
+		if !immediateRecovery && lastAttempt != nil && !probeDue(lastAttempt, now, probeInterval) {
 			batch.deferredAccounts++
 			continue
 		}
 		probeAccounts = append(probeAccounts, account)
 	}
 	return batch, probeAccounts
-}
-
-func evidenceFresh(evidence accountEvidence, now time.Time, freshness time.Duration) bool {
-	return evidence.checkedAt != nil && !evidence.checkedAt.Add(freshness).Before(now)
 }
 
 func probeRetryInterval(account model.Account, interval time.Duration) time.Duration {
@@ -131,14 +140,104 @@ func probeRetryInterval(account model.Account, interval time.Duration) time.Dura
 	return max(interval, retry)
 }
 
-func probeRetryDelay(account model.Account, interval time.Duration) time.Duration {
+// probeRetryDelayForAccount applies a larger floor after a long idle period.
+// The first recovery attempt remains immediate; only subsequent retries are
+// slowed down when no real traffic has arrived for several hours.
+func probeRetryDelayForAccount(account model.Account, interval time.Duration, now time.Time) time.Duration {
 	base := probeRetryInterval(account, interval)
+	if account.LastProbeAt != nil && accountIdle(account, now) && base < idleRecoveryProbeInterval {
+		base = idleRecoveryProbeInterval
+	}
+	return addProbeJitter(account, base)
+}
+
+func addProbeJitter(account model.Account, base time.Duration) time.Duration {
 	accountID := account.ID
 	if accountID < 0 {
 		accountID = -accountID
 	}
 	jitterPercent := accountID % 11
 	return base + time.Duration(jitterPercent)*base/100
+}
+
+func accountIdle(account model.Account, now time.Time) bool {
+	return account.LastActivityAt == nil || now.Sub(*account.LastActivityAt) >= idleActivityWindow
+}
+
+func successfulEvidenceNeedsRecovery(account model.Account, evidence accountEvidence) bool {
+	if !probeEligible(account) {
+		return false
+	}
+	return evidence.checkedAt == nil || account.LastChannelErrorAt.After(*evidence.checkedAt)
+}
+
+func recoveryProbeImmediate(account model.Account, evidence accountEvidence, now time.Time) bool {
+	if !probeEligible(account) {
+		return false
+	}
+	if account.LastChannelErrorAt != nil &&
+		(account.LastProbeAt == nil || account.LastChannelErrorAt.After(*account.LastProbeAt)) {
+		if account.LastProbeAt == nil {
+			return true
+		}
+		// A failed recovery probe already belongs to this incident. New log
+		// rows must not bypass its retry and idle backoff.
+		if account.LastProbeStatus == model.StatusFailed || account.LastProbeStatus == model.StatusError {
+			return false
+		}
+		if !probeEvidenceStatus(account.LastProbeStatus) {
+			return true
+		}
+		// A source/configuration update invalidated the old successful probe;
+		// the next channel error is therefore a fresh recovery trigger.
+		if account.UpdatedAt != nil && account.LastProbeAt.Before(*account.UpdatedAt) &&
+			account.UpdatedAt.Sub(*account.LastProbeAt) > model.SourceUpdateActivityGrace {
+			return true
+		}
+		// A new channel error starts recovery promptly unless a probe for the
+		// same incident ran within the minimum cooldown.
+		return probeDue(account.LastProbeAt, now, recoveryProbeInterval)
+	}
+	if !evidence.valid || !successfulEvidence(evidence.status) ||
+		!successfulEvidenceNeedsRecovery(account, evidence) {
+		return false
+	}
+	if account.LastProbeAt == nil || !probeEvidenceStatus(account.LastProbeStatus) {
+		return true
+	}
+	// A stream of gateway errors is one recovery incident until the minimum
+	// cooldown has elapsed. This prevents each new error-log row from forcing an
+	// upstream request while still allowing a later incident to be checked
+	// promptly.
+	return probeDue(account.LastProbeAt, now, recoveryProbeInterval)
+}
+
+// probeEligible deliberately has a narrow meaning: an account is probed only
+// to recover from a recorded real gateway channel error. An account status of
+// error without that evidence remains visible, but never causes an upstream
+// request by itself.
+func probeEligible(account model.Account) bool {
+	if !accountIsEnabled(account) && !strings.EqualFold(strings.TrimSpace(account.Status), "error") {
+		return false
+	}
+	if account.LastChannelErrorAt == nil {
+		return false
+	}
+	if account.UpdatedAt != nil && account.LastChannelErrorAt.Before(*account.UpdatedAt) {
+		// A gateway status update can land a few seconds after the error row.
+		// Treat that small accounting lag as the same incident, but discard an
+		// error that predates a real configuration/source change.
+		if account.UpdatedAt.Sub(*account.LastChannelErrorAt) > model.SourceUpdateActivityGrace {
+			return false
+		}
+	}
+	if account.LastProbeAt == nil || account.LastChannelErrorAt.After(*account.LastProbeAt) {
+		return true
+	}
+	// Keep retrying an active account only while the recovery probe itself is
+	// still failing. A successful probe closes the error-triggered window until
+	// the gateway reports another real channel error.
+	return account.LastProbeStatus == model.StatusFailed || account.LastProbeStatus == model.StatusError
 }
 
 func configurationFailure(account model.Account) bool {
@@ -153,34 +252,6 @@ func configurationFailure(account model.Account) bool {
 	}
 }
 
-func routeCriticalAccounts(snapshot model.Snapshot) map[int64]struct{} {
-	critical := make(map[int64]struct{})
-	for _, group := range snapshot.Groups {
-		if !group.ProbeEnabled || len(group.Members) == 0 {
-			if group.ProbeEnabled {
-				for _, accountID := range group.AccountIDs {
-					critical[accountID] = struct{}{}
-				}
-			}
-			continue
-		}
-		primaryAccountPriority, primaryGroupPriority := 0, 0
-		for index, member := range group.Members {
-			if index == 0 || member.AccountPriority < primaryAccountPriority ||
-				(member.AccountPriority == primaryAccountPriority && member.GroupPriority < primaryGroupPriority) {
-				primaryAccountPriority = member.AccountPriority
-				primaryGroupPriority = member.GroupPriority
-			}
-		}
-		for _, member := range group.Members {
-			if member.AccountPriority == primaryAccountPriority && member.GroupPriority == primaryGroupPriority {
-				critical[member.AccountID] = struct{}{}
-			}
-		}
-	}
-	return critical
-}
-
 func latestAccountEvidence(account model.Account) accountEvidence {
 	var evidence accountEvidence
 	if evidenceTimeValid(account.LastActivityAt, account.UpdatedAt) {
@@ -189,6 +260,7 @@ func latestAccountEvidence(account model.Account) accountEvidence {
 		}
 	}
 	if evidenceTimeValid(account.LastProbeAt, account.UpdatedAt) &&
+		probeEvidenceStatus(account.LastProbeStatus) &&
 		(evidence.checkedAt == nil || account.LastProbeAt.After(*evidence.checkedAt)) {
 		evidence = accountEvidence{
 			status: account.LastProbeStatus, source: "probe", checkedAt: account.LastProbeAt,
@@ -199,7 +271,13 @@ func latestAccountEvidence(account model.Account) accountEvidence {
 }
 
 func evidenceTimeValid(value, changedAt *time.Time) bool {
-	return value != nil && (changedAt == nil || !value.Before(*changedAt))
+	if value == nil || changedAt == nil || !value.Before(*changedAt) {
+		return value != nil
+	}
+	// The gateway can commit updated_at a few seconds after the usage row. Keep
+	// that request as valid evidence, while treating larger gaps as a real
+	// configuration/source change.
+	return changedAt.Sub(*value) <= model.SourceUpdateActivityGrace
 }
 
 func successfulEvidence(status string) bool {
@@ -214,11 +292,19 @@ func shouldObserveHistoryRecovery(account model.Account, evidence accountEvidenc
 	if evidence.source != "history" || evidence.checkedAt == nil {
 		return false
 	}
-	if now.Sub(*evidence.checkedAt) < interval {
+	if account.LastProbeAt == nil || !evidence.checkedAt.After(*account.LastProbeAt) ||
+		(account.LastProbeStatus != model.StatusFailed && account.LastProbeStatus != model.StatusError) {
+		return false
+	}
+	// ProbeFailureStreak is reset by EvaluateAlert after this recovery evidence
+	// is consumed. It prevents the same unchanged usage row from generating a
+	// recovery observation on every scan cycle.
+	if account.ProbeFailureStreak > 0 {
 		return true
 	}
-	return account.LastProbeAt != nil && evidence.checkedAt.After(*account.LastProbeAt) &&
-		(account.LastProbeStatus == model.StatusFailed || account.LastProbeStatus == model.StatusError)
+	// A just-arrived request can be observed before the alert-state write from
+	// the preceding probe is visible in the next snapshot.
+	return now.Sub(*evidence.checkedAt) < interval
 }
 
 func probeDue(lastProbeAt *time.Time, now time.Time, interval time.Duration) bool {
@@ -250,20 +336,6 @@ func (b *cycleBatch) addCachedEvidence(accountID int64, evidence accountEvidence
 		EntityID:  accountID,
 		Status:    evidence.status,
 		CheckedAt: *evidence.checkedAt,
-		Source:    "cache",
-	}
-}
-
-func (b *cycleBatch) addCachedUnknown(accountID int64, checkedAt *time.Time) {
-	if checkedAt == nil {
-		return
-	}
-	b.accountResults[accountID] = model.ProbeResult{
-		TargetKey: model.TargetKey(model.KindAccount, accountID),
-		Kind:      model.KindAccount,
-		EntityID:  accountID,
-		Status:    model.StatusUnknown,
-		CheckedAt: *checkedAt,
 		Source:    "cache",
 	}
 }
@@ -422,15 +494,6 @@ func targetNames(snapshot model.Snapshot) map[string]string {
 func containsPersistableObservation(results []model.ProbeResult) bool {
 	for _, result := range results {
 		if result.Source == "probe" || result.Source == "history" {
-			return true
-		}
-	}
-	return false
-}
-
-func containsProbe(results []model.ProbeResult) bool {
-	for _, result := range results {
-		if result.Source == "probe" {
 			return true
 		}
 	}

@@ -167,6 +167,23 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 		"p.expires_at > NOW()",
 		"last_probe.error_class",
 		"last_probe.status_code",
+		"LEFT JOIN LATERAL (",
+		"monitoring_targets persisted_target",
+		"persisted_target.active = TRUE",
+		"persisted_target.last_channel_error_at",
+		"persisted_target.last_channel_error_resolved_at",
+		"UNION ALL",
+		"persisted_target.source_updated_at",
+		"ops_error_logs",
+		"oe.created_at >= NOW() - INTERVAL '24 hours'",
+		"oe.created_at >= persisted_target.source_updated_at",
+		"oe.created_at > persisted_target.last_channel_error_resolved_at",
+		"oe.is_business_limited",
+		"LOWER(BTRIM(COALESCE(oe.error_owner, ''))) = 'provider'",
+		"IN ('account_auth', 'network', 'upstream')",
+		"IN ('upstream_http', 'upstream_network')",
+		"COALESCE(NULLIF(oe.upstream_status_code, 0), oe.status_code, 0) <> 429",
+		"channel_error.created_at",
 		"failure_streak",
 		"g.updated_at",
 	} {
@@ -176,6 +193,91 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 	}
 	if strings.Contains(snapshotQuery, "COUNT(*)::bigint AS request_count\n    FROM usage_logs ul\n    WHERE ul.account_id = a.id") {
 		t.Fatal("snapshot query must not count usage once per account-group row")
+	}
+}
+
+func TestSnapshotRowCarriesChannelErrorTrigger(t *testing.T) {
+	errorAt := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	row := snapshotRow{
+		id:                    sql.NullInt64{Int64: 9, Valid: true},
+		status:                sql.NullString{String: "active", Valid: true},
+		schedulable:           true,
+		lastChannelError:      sql.NullTime{Time: errorAt, Valid: true},
+		lastChannelErrorClass: sql.NullString{String: "upstream_5xx", Valid: true},
+		lastChannelErrorCode:  sql.NullInt64{Int64: 502, Valid: true},
+		credentials:           []byte(`{}`),
+	}
+	account, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.LastChannelErrorAt == nil || !account.LastChannelErrorAt.Equal(errorAt) ||
+		account.LastChannelErrorClass != "upstream_5xx" || account.LastChannelErrorStatusCode == nil || *account.LastChannelErrorStatusCode != 502 {
+		t.Fatalf("channel error evidence = %+v", account)
+	}
+}
+
+func TestSnapshotRowDropsChannelErrorAfterSuccessfulEvidence(t *testing.T) {
+	errorAt := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	probeAt := errorAt.Add(time.Minute)
+	row := snapshotRow{
+		id:                    sql.NullInt64{Int64: 11, Valid: true},
+		status:                sql.NullString{String: "active", Valid: true},
+		schedulable:           true,
+		lastProbe:             sql.NullTime{Time: probeAt, Valid: true},
+		lastProbeStatus:       sql.NullString{String: model.StatusOperational, Valid: true},
+		lastChannelError:      sql.NullTime{Time: errorAt, Valid: true},
+		lastChannelErrorClass: sql.NullString{String: "upstream_error", Valid: true},
+		lastChannelErrorCode:  sql.NullInt64{Int64: 502, Valid: true},
+		credentials:           []byte(`{}`),
+	}
+	account, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.LastChannelErrorAt != nil || account.LastChannelErrorClass != "" || account.LastChannelErrorStatusCode != nil {
+		t.Fatalf("resolved channel error was retained: %+v", account)
+	}
+}
+
+func TestSnapshotRowDropsChannelErrorAfterSuccessfulRequest(t *testing.T) {
+	errorAt := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	activity := errorAt.Add(time.Minute)
+	row := snapshotRow{
+		id:                    sql.NullInt64{Int64: 12, Valid: true},
+		status:                sql.NullString{String: "active", Valid: true},
+		schedulable:           true,
+		lastActivity:          sql.NullTime{Time: activity, Valid: true},
+		lastChannelError:      sql.NullTime{Time: errorAt, Valid: true},
+		lastChannelErrorClass: sql.NullString{String: "upstream_error", Valid: true},
+		credentials:           []byte(`{}`),
+	}
+	account, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.LastChannelErrorAt != nil {
+		t.Fatalf("resolved request error was retained: %+v", account)
+	}
+}
+
+func TestSnapshotRowUsesRecentRequestAsEffectiveUpdate(t *testing.T) {
+	activity := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	updated := activity.Add(10 * time.Second)
+	row := snapshotRow{
+		id:           sql.NullInt64{Int64: 10, Valid: true},
+		status:       sql.NullString{String: "active", Valid: true},
+		schedulable:  true,
+		updatedAt:    sql.NullTime{Time: updated, Valid: true},
+		lastActivity: sql.NullTime{Time: activity, Valid: true},
+		credentials:  []byte(`{}`),
+	}
+	account, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.UpdatedAt == nil || !account.UpdatedAt.Equal(activity) {
+		t.Fatalf("effective account update = %v, want request time %s", account.UpdatedAt, activity)
 	}
 }
 
@@ -228,6 +330,17 @@ func TestAlertStateFailureStreakIgnoresStateBeforeAccountUpdate(t *testing.T) {
 	}
 	if !alertStateCurrent(currentState, sql.NullTime{}) {
 		t.Fatal("account without update timestamp should accept a valid alert state")
+	}
+}
+
+func TestAlertStateSurvivesActivityCoupledAccountUpdate(t *testing.T) {
+	activity := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	stateBeforeActivity := sql.NullTime{Time: activity.Add(-time.Hour), Valid: true}
+	activitySourceUpdate := sql.NullTime{Time: activity, Valid: true}
+	activityAt := sql.NullTime{Time: activity, Valid: true}
+
+	if !alertStateCurrentForSource(stateBeforeActivity, activitySourceUpdate, activityAt) {
+		t.Fatal("probe failure state must survive an activity-coupled account update")
 	}
 }
 
