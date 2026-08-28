@@ -24,7 +24,7 @@ func TestValidTargetKeyRejectsMalformedValues(t *testing.T) {
 
 func TestMonitoringWebServiceRejectsMutatingMethods(t *testing.T) {
 	server := New((*monitor.Service)(nil))
-	for _, path := range []string{"/", "/api/v1/monitor/probe", "/api/v1/monitor/alerts/1/ack"} {
+	for _, path := range []string{"/", "/api/v1/monitor/probe", "/api/v1/monitor/activity", "/api/v1/monitor/alerts/1/ack"} {
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		response := httptest.NewRecorder()
 		server.Handler().ServeHTTP(response, request)

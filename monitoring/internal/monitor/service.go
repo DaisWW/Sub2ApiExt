@@ -85,6 +85,10 @@ func (s *Service) Dashboard(ctx context.Context) (model.Dashboard, error) {
 	return dashboard, nil
 }
 
+func (s *Service) LiveActivity(ctx context.Context) (model.LiveActivity, error) {
+	return s.store.LiveActivity(ctx)
+}
+
 func (s *Service) setNextProbe(value time.Time) {
 	s.nextProbe.Store(value.UTC().UnixMilli())
 }

@@ -36,6 +36,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/", spaFiles(staticFS))
 	mux.HandleFunc("/healthz", s.health)
 	mux.HandleFunc("/api/v1/monitor/dashboard", s.dashboard)
+	mux.HandleFunc("/api/v1/monitor/activity", s.activity)
 	mux.HandleFunc("/api/v1/monitor/usage-ranking", s.usageRanking)
 	mux.HandleFunc("/api/v1/monitor/history", s.history)
 	mux.HandleFunc("/api/v1/monitor/alerts", s.alerts)
@@ -77,6 +78,15 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, dashboard)
+}
+
+func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
+	activity, err := s.service.LiveActivity(r.Context())
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "实时活动数据暂时不可用")
+		return
+	}
+	writeJSON(w, http.StatusOK, activity)
 }
 
 func (s *Server) usageRanking(w http.ResponseWriter, r *http.Request) {

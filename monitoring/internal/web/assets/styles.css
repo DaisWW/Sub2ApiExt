@@ -80,6 +80,33 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .probe-status-copy strong { color: var(--soft); font-size: 11px; font-weight: 650; }
 .probe-status-copy span { white-space: nowrap; }
 @keyframes probe-spin { to { transform: rotate(360deg); } }
+.activity-section { margin-top: 34px; }
+.activity-section .activity-kpi-grid, .activity-section .activity-detail-grid { transition: opacity .18s ease; }
+.activity-section.is-loading .activity-kpi-grid, .activity-section.is-loading .activity-detail-grid { opacity: .4; pointer-events: none; }
+.activity-heading { margin: 0 0 16px; }
+.activity-kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.activity-kpi { min-height: 92px; border: 1px solid var(--line); border-top: 2px solid var(--blue); border-radius: 8px; background: var(--surface); padding: 14px 16px; }
+.activity-kpi:nth-child(1) { border-top-color: var(--mint); }
+.activity-kpi:nth-child(2) { border-top-color: var(--blue); }
+.activity-kpi:nth-child(3) { border-top-color: var(--amber); }
+.activity-kpi:nth-child(4) { border-top-color: #c18df0; }
+.activity-kpi-value { margin-top: 8px; color: var(--text); font-size: 24px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.activity-detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.activity-panel { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 18px; }
+.activity-list { display: grid; margin-top: 13px; }
+.activity-row, .activity-route-row { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.activity-row:first-child, .activity-route-row:first-child { border-top: 0; padding-top: 0; }
+.activity-row-main, .activity-row-meta, .activity-route-names { min-width: 0; display: grid; gap: 4px; }
+.activity-row-main { flex: 1 1 auto; }
+.activity-row-main strong, .activity-route-names strong { min-width: 0; overflow: hidden; color: var(--soft); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.activity-row-main span, .activity-row-meta span { color: var(--muted); font-size: 10px; }
+.activity-row-meta { flex: 0 0 auto; justify-items: end; text-align: right; }
+.activity-row-meta strong { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.activity-route-row { align-items: flex-start; }
+.activity-route-names { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; overflow: hidden; }
+.activity-route-names span { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.activity-empty { min-height: 96px; display: grid; place-items: center; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); font-size: 11px; text-align: center; }
+.loading-state.activity-loading { min-height: 92px; }
 .usage-section { margin-top: 52px; }
 .usage-section .usage-chart-grid, .usage-section .usage-entity-section { transition: opacity .18s ease; }
 .usage-section.is-loading .usage-chart-grid, .usage-section.is-loading .usage-entity-section { opacity: .4; pointer-events: none; }
@@ -313,6 +340,8 @@ td { color: var(--soft); }
 
 @media (max-width: 1060px) {
   .target-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .activity-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .activity-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .usage-entity-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -323,6 +352,7 @@ td { color: var(--soft); }
   .overview-row { display: block; }
   .overview-controls { justify-content: flex-start; margin-top: 22px; }
   .target-grid { grid-template-columns: 1fr; }
+  .activity-detail-grid { grid-template-columns: 1fr; }
   .usage-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-entity-grid { grid-template-columns: 1fr; }
   .usage-card-primary-metric strong { font-size: 19px; }

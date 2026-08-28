@@ -151,6 +151,50 @@ type Dashboard struct {
 	ProbeRunning bool              `json:"probe_running"`
 }
 
+// LiveActivity 是最近活动请求的聚合视图，不包含用户标识或请求明细。
+// 活跃用户表示窗口内至少有一条有效请求的不同用户，不等同于进行中的请求数。
+type LiveActivity struct {
+	GeneratedAt   time.Time             `json:"generated_at"`
+	WindowStart   time.Time             `json:"window_start"`
+	WindowSeconds int                   `json:"window_seconds"`
+	Summary       LiveActivitySummary   `json:"summary"`
+	Channels      []LiveActivityChannel `json:"channels"`
+	Accounts      []LiveActivityAccount `json:"accounts"`
+	Routes        []LiveActivityRoute   `json:"routes"`
+}
+
+type LiveActivitySummary struct {
+	ActiveUsers int64 `json:"active_users"`
+	Requests    int64 `json:"requests"`
+	Channels    int64 `json:"channels"`
+	Accounts    int64 `json:"accounts"`
+}
+
+type LiveActivityChannel struct {
+	ID          *int64 `json:"id,omitempty"`
+	Name        string `json:"name"`
+	ActiveUsers int64  `json:"active_users"`
+	Requests    int64  `json:"requests"`
+	Accounts    int64  `json:"accounts"`
+}
+
+type LiveActivityAccount struct {
+	ID          *int64 `json:"id,omitempty"`
+	Name        string `json:"name"`
+	ActiveUsers int64  `json:"active_users"`
+	Requests    int64  `json:"requests"`
+	Channels    int64  `json:"channels"`
+}
+
+type LiveActivityRoute struct {
+	ChannelID   *int64 `json:"channel_id,omitempty"`
+	ChannelName string `json:"channel_name"`
+	AccountID   *int64 `json:"account_id,omitempty"`
+	AccountName string `json:"account_name"`
+	ActiveUsers int64  `json:"active_users"`
+	Requests    int64  `json:"requests"`
+}
+
 // UsageRanking 是由网关 usage_logs 生成的只读用量视图。
 // Token 数量保持整数，成本保持浮点数，浏览器无需推断单位。
 type UsageRanking struct {

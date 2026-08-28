@@ -60,6 +60,37 @@
           <div class="loading-state">连接监控服务中<span class="loading-dots">...</span></div>
         </section>
 
+        <section class="activity-section" id="activitySection" aria-labelledby="activityTitle" aria-busy="false">
+          <div class="section-heading activity-heading">
+            <div>
+              <p class="eyebrow">LIVE TRAFFIC</p>
+              <h2 id="activityTitle">实时流量</h2>
+            </div>
+            <span class="section-meta" id="activityMeta"></span>
+          </div>
+          <div class="activity-kpi-grid" id="activityKpiGrid" aria-live="polite"></div>
+          <div class="activity-detail-grid">
+            <article class="activity-panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">CHANNELS</p><h3>渠道活跃用户</h3></div>
+              </div>
+              <div class="activity-list" id="activityChannelList" aria-live="polite"></div>
+            </article>
+            <article class="activity-panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">ACCOUNTS</p><h3>账户活跃用户</h3></div>
+              </div>
+              <div class="activity-list" id="activityAccountList" aria-live="polite"></div>
+            </article>
+            <article class="activity-panel activity-route-panel">
+              <div class="panel-heading">
+                <div><p class="eyebrow">ROUTING</p><h3>渠道到账户</h3></div>
+              </div>
+              <div class="activity-list" id="activityRouteList" aria-live="polite"></div>
+            </article>
+          </div>
+        </section>
+
         <section class="usage-section" id="usageSection" aria-labelledby="usageTitle" aria-busy="false">
           <div class="section-heading usage-heading">
             <div>
