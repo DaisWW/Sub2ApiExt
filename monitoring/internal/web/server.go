@@ -87,7 +87,7 @@ func (s *Server) usageRanking(w http.ResponseWriter, r *http.Request) {
 	ranking, err := s.service.UsageRanking(r.Context(), period, boundedQueryInt(r, "limit", 10, 1, 50))
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidUsagePeriod) {
-			writeError(w, http.StatusBadRequest, "period must be 1h, 24h, today, 7d, 15d, or 30d")
+			writeError(w, http.StatusBadRequest, "period must be 1h, 24h, today, yesterday, 7d, 15d, or 30d")
 			return
 		}
 		writeError(w, http.StatusServiceUnavailable, "用量数据暂时不可用")

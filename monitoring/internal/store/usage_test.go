@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
@@ -26,6 +27,7 @@ func TestParseUsagePeriod(t *testing.T) {
 		{value: "1h", bucket: "minute"},
 		{value: "24h", bucket: "hour"},
 		{value: "today", bucket: "hour"},
+		{value: "yesterday", bucket: "hour"},
 		{value: "7d", bucket: "day"},
 		{value: "15d", bucket: "day"},
 		{value: "30d", bucket: "day"},
@@ -53,6 +55,24 @@ func TestParseUsagePeriodUsesDefault(t *testing.T) {
 	}
 	if period.key != "24h" {
 		t.Fatalf("默认周期为 %q，期望 24h", period.key)
+	}
+}
+
+func TestResolveUsageBoundsUsesPreviousCalendarDay(t *testing.T) {
+	period, err := parseUsagePeriod("yesterday")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 3, 9, 12, 0, 0, 0, time.FixedZone("UTC-4", -4*60*60))
+	todayStart := time.Date(2026, 3, 9, 0, 0, 0, 0, time.FixedZone("UTC-4", -4*60*60))
+	yesterdayStart := time.Date(2026, 3, 8, 0, 0, 0, 0, time.FixedZone("UTC-5", -5*60*60))
+
+	bounds := resolveUsageBounds(period, now, todayStart, yesterdayStart)
+	if !bounds.start.Equal(yesterdayStart) || !bounds.end.Equal(todayStart) {
+		t.Fatalf("昨天窗口为 [%v, %v)，期望 [%v, %v)", bounds.start, bounds.end, yesterdayStart, todayStart)
+	}
+	if got := bounds.end.Sub(bounds.start); got != 23*time.Hour {
+		t.Fatalf("夏令时切换日窗口长度为 %v，期望 23h", got)
 	}
 }
 

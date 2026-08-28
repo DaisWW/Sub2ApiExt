@@ -102,6 +102,8 @@ func parseUsagePeriod(value string) (usagePeriod, error) {
 		return usagePeriod{key: key, label: "最近 24 小时", bucket: "hour", duration: 24 * time.Hour}, nil
 	case "today":
 		return usagePeriod{key: key, label: "今天", bucket: "hour"}, nil
+	case "yesterday":
+		return usagePeriod{key: key, label: "昨天", bucket: "hour"}, nil
 	case "7d":
 		return usagePeriod{key: key, label: "最近 1 周", bucket: "day", duration: 7 * 24 * time.Hour}, nil
 	case "15d":
@@ -118,19 +120,30 @@ func (s *Store) usageBounds(ctx context.Context, value string) (usageBounds, err
 	if err != nil {
 		return usageBounds{}, err
 	}
-	var now, todayStart time.Time
-	if err := s.db.QueryRowContext(ctx, `SELECT NOW(), CURRENT_DATE::timestamptz`).Scan(&now, &todayStart); err != nil {
+	var now, todayStart, yesterdayStart time.Time
+	if err := s.db.QueryRowContext(ctx, `SELECT NOW(), CURRENT_DATE::timestamptz, (CURRENT_DATE - 1)::timestamptz`).Scan(&now, &todayStart, &yesterdayStart); err != nil {
 		return usageBounds{}, err
 	}
+	return resolveUsageBounds(period, now, todayStart, yesterdayStart), nil
+}
+
+func resolveUsageBounds(period usagePeriod, now, todayStart, yesterdayStart time.Time) usageBounds {
 	now = now.UTC()
+	todayStart = todayStart.UTC()
+	yesterdayStart = yesterdayStart.UTC()
 	start := now.Add(-period.duration)
+	end := now
 	if period.key == "today" {
-		start = todayStart.UTC()
+		start = todayStart
+	}
+	if period.key == "yesterday" {
+		start = yesterdayStart
+		end = todayStart
 	}
 	return usageBounds{
 		period: period.key, label: period.label, bucket: period.bucket,
-		start: start, end: now,
-	}, nil
+		start: start, end: end,
+	}
 }
 
 func (s *Store) loadUsageSummary(ctx context.Context, summary *model.UsageSummary, bounds usageBounds) error {
