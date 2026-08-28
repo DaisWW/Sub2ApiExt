@@ -4,6 +4,7 @@ import {
   api,
   availabilityClass,
   escapeHTML,
+  formatCount,
   formatMedianMs,
   formatMs,
   formatPct,
@@ -18,7 +19,11 @@ export class DashboardPanel {
   dashboard = null;
   filter = 'group';
   #requests = new LatestRequest();
+  #activityRequests = new LatestRequest();
   #openHistory;
+  #activeUsers = new Map();
+  #activityLoaded = false;
+  #activityWindowSeconds = 300;
   #nextProbeAt = 0;
   #intervalSeconds = 0;
   #probeRunning = false;
@@ -47,6 +52,26 @@ export class DashboardPanel {
       if (!this.#requests.isCurrent(requestId)) return;
       $('#targetGrid').innerHTML = `<div class="empty-state">${escapeHTML(error.message)}</div>`;
       toast(error.message);
+    }
+  }
+
+  async loadActivity({ silent = false } = {}) {
+    const requestId = this.#activityRequests.begin();
+    try {
+      const activity = await api('/api/v1/monitor/activity');
+      if (!this.#activityRequests.isCurrent(requestId)) return;
+      const targets = Array.isArray(activity.targets) ? activity.targets : [];
+      this.#activeUsers = new Map(
+        targets
+          .map((target) => [String(target?.target_key || ''), normalizeCount(target?.active_users)])
+          .filter(([key]) => key)
+      );
+      this.#activityWindowSeconds = normalizeWindowSeconds(activity.window_seconds);
+      this.#activityLoaded = true;
+      this.render();
+    } catch (error) {
+      if (!this.#activityRequests.isCurrent(requestId)) return;
+      if (!silent) toast(error.message || '实时人数读取失败');
     }
   }
 
@@ -152,6 +177,11 @@ export class DashboardPanel {
     const groupNote = item.kind === 'group' && item.latest_message
       ? `<div class="target-note">${escapeHTML(item.latest_message)}</div>`
       : '';
+    const activeUsers = this.#activityLoaded ? (this.#activeUsers.get(item.key) || 0) : null;
+    const activeUsersValue = activeUsers === null ? '—' : `${formatCount(activeUsers)} 人`;
+    const activeUsersTitle = this.#activityLoaded
+      ? `${formatActivityWindow(this.#activityWindowSeconds)}内有效请求的去重用户数`
+      : '正在读取实时人数';
     return `
       <article class="target-card target-${status}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
         role="button" tabindex="0" aria-label="查看 ${escapeHTML(item.name)} 的历史记录">
@@ -170,6 +200,10 @@ export class DashboardPanel {
         <div class="availability">
           <span class="availability-label">24 小时窗口观测通过率 · ${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
+        </div>
+        <div class="target-live" title="${escapeHTML(activeUsersTitle)}">
+          <span class="target-live-label">${formatActivityWindow(this.#activityWindowSeconds)}活跃用户</span>
+          <strong class="target-live-value${activeUsers !== null && activeUsers > 0 ? ' has-users' : ''}">${activeUsersValue}</strong>
         </div>
         <div class="metrics">
           ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 24 小时成功样本的首字/首字节中位数')}
@@ -201,6 +235,20 @@ function formatCountdown(seconds) {
   if (seconds < 60) return String(seconds);
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function normalizeCount(value) {
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0;
+}
+
+function normalizeWindowSeconds(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : 300;
+}
+
+function formatActivityWindow(seconds) {
+  return `近 ${Math.max(1, Math.round(seconds / 60))} 分钟`;
 }
 
 function formatCurrentRate(value) {
