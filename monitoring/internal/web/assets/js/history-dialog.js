@@ -74,6 +74,7 @@ function renderHistoryRow(item) {
 }
 
 function historyStatusLabel(item, status) {
+  if (status === 'unknown') return '暂无请求';
   if (item.kind !== 'group' || item.source !== 'aggregate') return statusLabel(status);
   if (status === 'degraded') return '可用但有风险';
   if (status === 'failed' || status === 'error') return '候选检查失败';
@@ -83,5 +84,8 @@ function historyStatusLabel(item, status) {
 function sourceLabel(source) {
   if (source === 'history') return '真实请求';
   if (source === 'aggregate') return '分组候选检查';
-  return '主动探测';
+  if (source === 'probe') return '主动探测';
+  if (source === 'request_error') return '真实请求错误';
+  if (source === 'cache') return '沿用状态';
+  return '暂无请求';
 }

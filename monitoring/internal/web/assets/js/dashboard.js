@@ -89,7 +89,7 @@ export class DashboardPanel {
   #renderOverview() {
     const summary = this.dashboard.summary || {};
     $('#overallTitle').textContent = summary.targets ? '服务状态' : '等待探测数据';
-    $('#overallMeta').textContent = `${summary.targets || 0} 个对象 · 24 小时统计 · 最近更新 ${formatTime(this.dashboard.generated_at)}`;
+    $('#overallMeta').textContent = `${summary.targets || 0} 个对象 · 真实请求优先，错误才探测 · 最近更新 ${formatTime(this.dashboard.generated_at)}`;
     this.#probeRunning = Boolean(this.dashboard.probe_running);
     this.#intervalSeconds = Math.max(0, Number(this.dashboard.interval_seconds || 0));
     const nextProbeAt = new Date(this.dashboard.next_probe_at || '');
@@ -117,8 +117,8 @@ export class DashboardPanel {
       status.style.setProperty('--cooldown-progress', '0turn');
       if (this.#countdownState !== 'idle') {
         $('#probeCountdown').textContent = '--';
-        $('#probeStatusText').textContent = '等待调度';
-        $('#nextProbeText').textContent = '正在同步周期';
+        $('#probeStatusText').textContent = '后台扫描';
+        $('#nextProbeText').textContent = '无渠道错误不发送上游请求';
         $('#nextProbeText').hidden = false;
         this.#countdownState = 'idle';
         this.#countdownSeconds = null;
@@ -131,8 +131,8 @@ export class DashboardPanel {
     status.style.setProperty('--cooldown-progress', `${progress}turn`);
     if (this.#countdownState !== 'cooldown' || this.#countdownSeconds !== remaining) {
       $('#probeCountdown').textContent = formatCountdown(remaining);
-      $('#probeStatusText').textContent = remaining ? '下次巡检' : '即将巡检';
-      $('#nextProbeText').textContent = remaining ? `${remaining} 秒后` : '等待本轮开始';
+      $('#probeStatusText').textContent = remaining ? '后台扫描' : '错误恢复巡检';
+      $('#nextProbeText').textContent = remaining ? `${remaining} 秒后 · 仅错误触发上游请求` : '等待本轮开始';
       $('#nextProbeText').hidden = Boolean(remaining);
       this.#countdownState = 'cooldown';
       this.#countdownSeconds = remaining;
@@ -164,24 +164,24 @@ export class DashboardPanel {
     const firstByte = stats.first_byte || {};
     const latency = stats.latency || {};
     const status = normalizeStatus(item.status);
-    const source = sourceLabel(item.latest_source);
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
-    const availabilityLabel = hasSamples ? `${samples} 次样本` : '暂无样本';
+    const availabilityLabel = hasSamples ? `${samples} 次样本` : '暂无真实请求';
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
     const availabilityStatus = item.kind === 'group' && status === 'degraded' ? '' : status;
     const availabilityTone = hasSamples ? availabilityClass(stats.availability, availabilityStatus) : 'neutral';
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
-    const groupNote = item.kind === 'group' && item.latest_message
-      ? `<div class="target-note">${escapeHTML(item.latest_message)}</div>`
-      : '';
     const activeUsers = this.#activityLoaded ? (this.#activeUsers.get(item.key) || 0) : null;
     const activeUsersValue = activeUsers === null ? '—' : `${formatCount(activeUsers)} 人`;
     const activeUsersTitle = this.#activityLoaded
       ? `${formatActivityWindow(this.#activityWindowSeconds)}内有效请求的去重用户数`
       : '正在读取实时人数';
+    const targetNote = evidenceNote(item, status);
+    const note = targetNote
+      ? `<div class="target-note">${escapeHTML(targetNote)}</div>`
+      : '';
     return `
       <article class="target-card target-${status}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
         role="button" tabindex="0" aria-label="查看 ${escapeHTML(item.name)} 的历史记录">
@@ -190,7 +190,7 @@ export class DashboardPanel {
             <div class="target-kind">${item.kind === 'group' ? 'GROUP' : 'ACCOUNT'}</div>
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
             <div class="target-platform">${escapeHTML(item.platform || 'mixed')}${item.stale ? `<span class="stale-label">● ${escapeHTML(staleLabel(item, status))}</span>` : ''}</div>
-            ${groupNote}
+            ${note}
           </div>
           <div class="target-head-meta">
             ${currentRate ? `<span class="current-rate" title="${currentRateTitle}">${currentRateLabel} ${currentRate}</span>` : ''}
@@ -212,8 +212,8 @@ export class DashboardPanel {
           ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值')}
         </div>
         <div class="card-foot">
-          ${renderStatusHistory(item.recent_samples || [])}
-          <span>最新证据 · ${source} · ${formatTime(item.last_checked_at)}</span>
+          ${renderStatusHistory(item.recent_samples || [], item)}
+          <span>${evidenceFooter(item, status)}</span>
         </div>
       </article>`;
   }
@@ -257,24 +257,60 @@ function formatCurrentRate(value) {
   return Number.isFinite(rate) ? rate.toFixed(4) : '';
 }
 
-function renderStatusHistory(samples) {
+function renderStatusHistory(samples, item) {
   const recent = samples.slice(-24);
-  const empty = Array.from({ length: 24 - recent.length }, () => '<i aria-hidden="true"></i>');
+  const gatewayError = String(item?.source_status || '').trim().toLowerCase() === 'error';
+  const recoveryPending = hasRecoveryTrigger(item);
+  const pendingClass = recoveryPending ? 'pending-recovery' : 'idle';
+  const pendingLabel = recoveryPending
+    ? '渠道报错，等待恢复探测'
+    : gatewayError
+      ? '账户处于错误状态，等待真实请求或新的渠道错误'
+      : '暂无真实请求，等待渠道错误或下一次请求确认';
+  const empty = Array.from({ length: 24 - recent.length }, () => `<i class="${pendingClass}" role="img" aria-label="${escapeHTML(pendingLabel)}" title="${escapeHTML(pendingLabel)}"></i>`);
   const items = recent.map((sample) => {
     const degraded = sample.status === 'degraded';
     const successful = sample.status === 'operational' || sample.status === 'degraded';
     const failed = sample.status === 'failed' || sample.status === 'error';
     const carried = Boolean(sample.carried_from) && (failed || successful);
     const label = carried
-      ? `截至 ${formatTime(sample.checked_at)} · 无新采样，沿用 ${formatTime(sample.carried_from)} 的${statusLabel(sample.status)}状态 · ${sourceLabel(sample.source)}`
+      ? `截至 ${formatTime(sample.checked_at)} · 无新请求，沿用 ${formatTime(sample.carried_from)} 的${statusLabel(sample.status)}状态 · ${sourceLabel(sample.source)}`
       : failed || successful
         ? `${formatTime(sample.checked_at)} · ${statusLabel(sample.status)} · ${sourceLabel(sample.source)}`
-        : `${formatTime(sample.checked_at)} · 暂无采样`;
-    const tone = degraded ? 'warn' : successful ? 'ok' : failed ? 'bad' : '';
+        : `${formatTime(sample.checked_at)} · ${pendingLabel}`;
+    const tone = degraded ? 'warn' : successful ? 'ok' : failed ? 'bad' : pendingClass;
     const classes = [tone, carried ? 'carried' : ''].filter(Boolean).join(' ');
     return `<i${classes ? ` class="${classes}"` : ''} role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
   });
-  return `<div class="status-history" aria-label="24 小时内 24 段状态轨迹">${empty.concat(items).join('')}</div>`;
+  const caption = statusHistoryCaption(recent, item, gatewayError, recoveryPending);
+  return `<div class="status-history-block">
+    <div class="status-history" aria-label="24 小时内 24 段状态轨迹">${empty.concat(items).join('')}</div>
+    <span class="status-history-caption">${escapeHTML(caption)}</span>
+  </div>`;
+}
+
+function statusHistoryCaption(samples, item, gatewayError, recoveryPending) {
+  const observedCount = samples.filter((sample) => ['operational', 'degraded', 'failed', 'error'].includes(sample.status)).length;
+  const unknownCount = Math.max(0, 24 - observedCount);
+  if (recoveryPending) {
+    return recoveryProbeFailed(item)
+      ? '恢复失败 · 按退避策略重试'
+      : '等待恢复验证 · 仅渠道错误触发';
+  }
+  if (gatewayError) {
+    return '等待新的渠道证据 · 当前不探测';
+  }
+  if (observedCount === 0) {
+    return item?.kind === 'group' ? '24 段未观测 · 等待真实请求或候选检查' : '24 段未观测 · 无请求不探测';
+  }
+  if (samples.some((sample) => sample.carried_from)) return '无新请求 · 沿用最近状态';
+  if (item?.kind === 'account' && samples.some((sample) => sample.status === 'failed' || sample.status === 'error')) {
+    return '探测失败 · 等待新的渠道证据';
+  }
+  if (unknownCount > 0) return `已观测 ${observedCount} 段 · 其余 ${unknownCount} 段未观测`;
+  if (item?.latest_source === 'history') return '真实请求证据';
+  if (item?.latest_source === 'probe') return '主动探测证据';
+  return '已有观测';
 }
 
 function renderMetric(label, value, help = '') {
@@ -285,10 +321,24 @@ function renderMetric(label, value, help = '') {
 function sourceLabel(source) {
   if (source === 'history') return '真实请求';
   if (source === 'aggregate') return '分组候选检查';
-  return source ? '主动探测' : '暂无来源';
+  if (source === 'probe') return '主动探测';
+  if (source === 'request_error') return '真实请求错误';
+  if (source === 'cache') return '沿用状态';
+  return '暂无请求';
 }
 
 function targetStatusLabel(item, status) {
+  const gatewayError = String(item.source_status || '').trim().toLowerCase() === 'error';
+  const recoveryTrigger = hasRecoveryTrigger(item);
+  if (recoveryProbeFailed(item, status)) return '恢复失败';
+  if (recoveryTrigger && (status === 'failed' || status === 'error')) return '等待恢复';
+  if (recoveryTrigger && status === 'unknown') return '等待恢复';
+  if (gatewayError && status === 'operational' && item.latest_source === 'probe') return '已验证恢复';
+  if (gatewayError && status === 'operational' && item.latest_source === 'history') return '请求已恢复';
+  if (gatewayError && !recoveryTrigger && (status === 'failed' || status === 'error')) return '等待渠道证据';
+  if (gatewayError && status === 'unknown') return recoveryTrigger ? '等待恢复' : '等待渠道证据';
+  if (status === 'unknown') return item.last_checked_at ? '待真实请求确认' : '暂无流量';
+  if ((status === 'failed' || status === 'error') && item.latest_source === 'probe' && !recoveryTrigger) return '历史探测失败';
   if (item.kind !== 'group') return statusLabel(status);
   if (status === 'degraded' && item.latest_source === 'aggregate' && isPendingAggregateFailure(item.latest_message)) {
     return '候选待确认';
@@ -302,8 +352,65 @@ function isPendingAggregateFailure(message) {
 }
 
 function staleLabel(item, status) {
-  if (status === 'failed' || status === 'error') return '等待恢复巡检';
-  if (item.latest_source === 'probe') return '无流量，已验证';
-  if (item.latest_source === 'history') return '无近期请求';
-  return '无近期数据';
+  const gatewayError = String(item.source_status || '').trim().toLowerCase() === 'error';
+  if (hasRecoveryTrigger(item)) {
+    if (recoveryProbeFailed(item, status)) return '恢复探测退避中';
+    return status === 'operational' ? '已验证恢复' : '等待首次恢复探测';
+  }
+  if (gatewayError) {
+    if (status === 'operational' && (item.latest_source === 'probe' || item.latest_source === 'history')) return '已验证恢复';
+    return '等待真实请求或渠道错误';
+  }
+  if ((status === 'failed' || status === 'error') && item.latest_source === 'probe') return '历史探测失败 · 当前不探测';
+  if (status === 'failed' || status === 'error') return '等待恢复确认';
+  if (item.latest_source === 'probe') return '主动探测已确认';
+  if (item.latest_source === 'history') return '真实请求已确认';
+  return '暂无请求';
+}
+
+function evidenceNote(item, status) {
+  if (item.latest_message) return item.latest_message;
+  const gatewayError = String(item.source_status || '').trim().toLowerCase() === 'error';
+  const recoveryTrigger = hasRecoveryTrigger(item);
+  if (recoveryProbeFailed(item, status)) return '恢复探测失败，按退避策略重试';
+  if (recoveryTrigger && (status === 'failed' || status === 'error' || status === 'unknown')) return '渠道报错，等待恢复探测';
+  if (gatewayError && status === 'operational' && item.latest_source === 'probe') return '已由主动探测确认恢复，等待网关状态同步';
+  if (gatewayError && status === 'operational' && item.latest_source === 'history') return '已由真实请求确认恢复，等待网关状态同步';
+  if (gatewayError && !recoveryTrigger && (status === 'failed' || status === 'error' || status === 'unknown')) {
+    return '账户处于错误状态；没有新的渠道错误，暂不发送上游请求';
+  }
+  if (status === 'unknown') {
+    return item.last_checked_at ? '暂无新的真实请求，沿用最近状态' : '暂无真实请求；仅在渠道报错后主动探测';
+  }
+  if (status === 'operational' && item.latest_source === 'history') return '已由真实请求确认可用';
+  if (status === 'operational' && item.latest_source === 'probe') return '已由主动探测确认恢复';
+  if ((status === 'failed' || status === 'error') && item.latest_source === 'request_error') return '真实请求报错，等待恢复确认';
+  if ((status === 'failed' || status === 'error') && item.latest_source === 'probe') return '探测失败；没有新的渠道错误，当前不重试';
+  return '';
+}
+
+function evidenceFooter(item, status) {
+  if (!item.latest_source) {
+    return String(item.source_status || '').trim().toLowerCase() === 'error'
+      ? (hasRecoveryTrigger(item) ? '等待恢复探测 · 尚无恢复证据' : '等待真实请求或渠道错误 · 当前不探测')
+      : '暂无真实请求 · 错误后才主动探测';
+  }
+  if (recoveryProbeFailed(item, status)) {
+    return `恢复失败 · 主动探测 · ${formatTime(item.last_checked_at)}`;
+  }
+  if (hasRecoveryTrigger(item)) return `等待恢复探测 · 尚无恢复证据`;
+  if ((status === 'failed' || status === 'error') && item.latest_source === 'probe' && !hasRecoveryTrigger(item)) {
+    return `历史探测失败 · 当前不重试 · ${formatTime(item.last_checked_at)}`;
+  }
+  const label = status === 'operational' && item.latest_source === 'probe' ? '恢复证据' : '最新证据';
+  return `${label} · ${sourceLabel(item.latest_source)} · ${formatTime(item.last_checked_at)}`;
+}
+
+function hasRecoveryTrigger(item) {
+  return Boolean(item?.recovery_trigger_at);
+}
+
+function recoveryProbeFailed(item, status = normalizeStatus(item?.status)) {
+  return hasRecoveryTrigger(item) && item.latest_source === 'probe' &&
+    (status === 'failed' || status === 'error');
 }

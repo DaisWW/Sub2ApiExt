@@ -38,8 +38,17 @@ func TestApplyLatestTargetStateSanitizesGroupMessage(t *testing.T) {
 	account := model.DashboardTarget{Target: model.Target{Kind: model.KindAccount, ProbeEnabled: true}}
 	applyLatestTargetStateWithMessage(&account, sql.NullString{}, sql.NullString{},
 		sql.NullString{String: "secret", Valid: true}, sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
-	if account.LatestMessage != "" {
-		t.Fatalf("account message should not be exposed: %q", account.LatestMessage)
+	if account.LatestMessage != "暂无真实请求；仅在渠道报错后主动探测" {
+		t.Fatalf("account missing-evidence message = %q", account.LatestMessage)
+	}
+
+	applyLatestTargetStateWithMessage(&account,
+		sql.NullString{String: model.StatusFailed, Valid: true},
+		sql.NullString{String: "request_error", Valid: true},
+		sql.NullString{String: "真实请求报错，等待恢复探测", Valid: true},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{Time: now, Valid: true}, now, time.Minute)
+	if account.LatestMessage != "真实请求报错，等待恢复探测" {
+		t.Fatalf("request error message should be safe to expose: %q", account.LatestMessage)
 	}
 }
 
@@ -71,6 +80,59 @@ func TestApplyLatestTargetStateMarksUnroutableGroupFailed(t *testing.T) {
 	}
 }
 
+func TestApplyLatestTargetStateExplainsMissingTrafficEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	target := model.DashboardTarget{Target: model.Target{Kind: model.KindAccount, ProbeEnabled: true}}
+	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
+	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无真实请求；仅在渠道报错后主动探测" {
+		t.Fatalf("missing evidence state = %+v", target.Target)
+	}
+}
+
+func TestApplyLatestTargetStateExplainsMissingGroupEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	target := model.DashboardTarget{Target: model.Target{Kind: model.KindGroup, ProbeEnabled: true}}
+	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
+	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无真实请求；仅在候选检查或真实请求后更新" {
+		t.Fatalf("missing group evidence = %+v", target.Target)
+	}
+}
+
+func TestApplyLatestTargetStateExplainsErrorAccountRecovery(t *testing.T) {
+	now := time.Now().UTC()
+	target := model.DashboardTarget{Target: model.Target{
+		Kind: model.KindAccount, SourceStatus: "error", ProbeEnabled: true,
+	}}
+	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
+	if target.Status != model.StatusUnknown || target.LatestMessage != "账户处于错误状态；等待真实请求或新的渠道错误" {
+		t.Fatalf("error account without channel trigger = %+v, want waiting for new evidence", target.Target)
+	}
+
+	errorAt := now.Add(-time.Minute)
+	target.RecoveryTriggerAt = &errorAt
+	target.LatestMessage = ""
+	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
+	if target.LatestMessage != "渠道报错，等待恢复探测" {
+		t.Fatalf("error account with channel trigger = %q, want recovery wait", target.LatestMessage)
+	}
+
+	probeTarget := model.DashboardTarget{Target: model.Target{
+		Kind: model.KindAccount, SourceStatus: "error", ProbeEnabled: true,
+	}}
+	applyLatestTargetStateWithMessage(&probeTarget,
+		sql.NullString{String: model.StatusFailed, Valid: true},
+		sql.NullString{String: "probe", Valid: true},
+		sql.NullString{String: "上游请求失败：HTTP 502: secret", Valid: true},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{Time: now, Valid: true}, now, time.Minute)
+	if probeTarget.LatestMessage != "" {
+		t.Fatalf("account probe response must not be exposed: %q", probeTarget.LatestMessage)
+	}
+}
+
 func TestUnroutableActiveGroupContributesZeroAvailability(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{
 		Kind: model.KindGroup, SourceStatus: "active", ProbeEnabled: false, Status: model.StatusFailed,
@@ -85,8 +147,27 @@ func TestUnroutableActiveGroupContributesZeroAvailability(t *testing.T) {
 	}
 }
 
+func TestErrorAccountDoesNotContributeAvailability(t *testing.T) {
+	target := model.DashboardTarget{Target: model.Target{
+		Kind: model.KindAccount, SourceStatus: "error", ProbeEnabled: true,
+	}, Stats: model.TargetStats{Samples: 2, Successful: 2, Availability: 100}}
+	if targetContributesAvailability(target) {
+		t.Fatal("error account must not contribute to business availability")
+	}
+	var summary model.Summary
+	addDashboardSummary(&summary, target)
+	if summary.Availability != 0 || summary.Targets != 1 {
+		t.Fatalf("error account summary = %+v, want no availability contribution", summary)
+	}
+}
+
 func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T) {
 	for _, fragment := range []string{
+		"visible_targets AS MATERIALIZED",
+		"OR (kind = 'account' AND LOWER(TRIM(source_status)) = 'error')",
+		"FROM visible_targets targets",
+		"(schedulable = TRUE AND LOWER(TRIM(status)) = 'active')",
+		"OR LOWER(TRIM(status)) = 'error'",
 		"percentile_cont(0.95)",
 		"status IN ('operational','degraded') AND first_byte_ms IS NOT NULL",
 		"status IN ('operational','degraded') AND latency_ms IS NOT NULL",
@@ -101,6 +182,17 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"ORDER BY mc.checked_at DESC, mc.id DESC",
 		"targets.last_activity_at >= latest_checks.checked_at",
 		"targets.source_updated_at",
+		"targets.last_channel_error_at",
+		"targets.last_channel_error_resolved_at",
+		"channel_error_wins",
+		"recovery_active",
+		"recovery_trigger_at",
+		"e.recovery_trigger_at",
+		"latest_checks.checked_at < targets.last_channel_error_at",
+		"targets.last_channel_error_at > targets.last_channel_error_resolved_at",
+		"COALESCE(latest_checks.status, '') NOT IN ('operational', 'degraded')",
+		"THEN 'request_error'",
+		"真实请求报错，等待恢复探测",
 		"mc.checked_at >= targets.source_updated_at",
 		"targets.last_activity_at >= targets.source_updated_at",
 		"THEN 'degraded'",
@@ -146,6 +238,20 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	if strings.Contains(dashboardQuery, "AND NOT (") {
 		t.Fatal("a newer successful request must be allowed to prove that a group still has a working route")
 	}
+	if strings.Contains(dashboardQuery, "FROM monitoring_targets targets\n\tCROSS JOIN bounds\n\tCROSS JOIN bucket_positions") {
+		t.Fatal("error accounts must remain visible for recovery status")
+	}
+	selectStart := strings.Index(dashboardQuery, "SELECT t.target_key")
+	if selectStart < 0 {
+		t.Fatal("dashboard query select list is missing")
+	}
+	selectList := dashboardQuery[selectStart:]
+	if strings.Contains(selectList, "t.last_channel_error_at") {
+		t.Fatal("dashboard must not expose an old channel error as an active recovery trigger")
+	}
+	if !strings.Contains(selectList, "e.recovery_trigger_at") {
+		t.Fatal("dashboard must expose only the currently winning recovery trigger")
+	}
 }
 
 func TestEffectiveDashboardStatusRequiresConfirmedAggregateFailures(t *testing.T) {
@@ -189,11 +295,8 @@ func TestCarryForwardStatusSamples(t *testing.T) {
 
 	carryForwardStatusSamples(samples)
 
-	if samples[0].Status != model.StatusUnknown || samples[0].Source != "" {
-		t.Fatalf("leading sample without an in-window observation must stay unknown: %+v", samples[0])
-	}
-	if samples[0].CarriedFrom != nil {
-		t.Fatalf("leading unknown sample must not be marked as carried: %+v", samples[0])
+	if samples[0].Status != model.StatusUnknown || samples[0].CarriedFrom != nil {
+		t.Fatalf("leading sample should remain waiting before the first observation: %+v", samples[0])
 	}
 	if samples[1].CarriedFrom != nil {
 		t.Fatalf("observed sample must not be marked as carried: %+v", samples[1])
@@ -219,5 +322,55 @@ func TestCarryForwardStatusSamplesLeavesUnknownWithoutPriorState(t *testing.T) {
 	carryForwardStatusSamples(samples)
 	if samples[0].Status != model.StatusUnknown || samples[0].CarriedFrom != nil {
 		t.Fatalf("sample without any prior state must stay unknown: %+v", samples[0])
+	}
+}
+
+func TestCarryForwardTargetStatusDoesNotMaskOlderWindow(t *testing.T) {
+	windowStart := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	samples := []model.StatusSample{
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(time.Hour)},
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(2 * time.Hour)},
+	}
+	carryForwardTargetStatus(samples, model.StatusOperational, "probe", windowStart.Add(-time.Minute), windowStart)
+	for index, sample := range samples {
+		if sample.Status != model.StatusUnknown || sample.CarriedFrom != nil {
+			t.Fatalf("sample %d should remain unknown for older evidence: %+v", index, sample)
+		}
+	}
+}
+
+func TestCarryForwardTargetStatusUsesEvidenceInsideWindow(t *testing.T) {
+	windowStart := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	checkedAt := windowStart.Add(90 * time.Minute)
+	samples := []model.StatusSample{
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(time.Hour)},
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(2 * time.Hour)},
+	}
+	carryForwardTargetStatus(samples, model.StatusOperational, "probe", checkedAt, windowStart)
+	if samples[0].Status != model.StatusUnknown {
+		t.Fatalf("sample before evidence should remain unknown: %+v", samples[0])
+	}
+	if samples[1].Status != model.StatusOperational || samples[1].CarriedFrom == nil ||
+		!samples[1].CarriedFrom.Equal(checkedAt) {
+		t.Fatalf("sample after evidence was not carried: %+v", samples[1])
+	}
+}
+
+func TestOverlayLatestRequestErrorReplacesCarriedHealthyBuckets(t *testing.T) {
+	windowStart := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	samples := []model.StatusSample{
+		{Status: model.StatusOperational, CheckedAt: windowStart.Add(time.Hour), Source: "history"},
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(2 * time.Hour)},
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(3 * time.Hour)},
+	}
+	carryForwardStatusSamples(samples)
+	overlayLatestTargetStatus(samples, model.StatusFailed, "request_error", windowStart.Add(150*time.Minute), windowStart)
+	if samples[0].Status != model.StatusOperational {
+		t.Fatalf("bucket before request error changed: %+v", samples[0])
+	}
+	for index := 1; index < len(samples); index++ {
+		if samples[index].Status != model.StatusFailed || samples[index].Source != "request_error" || samples[index].CarriedFrom != nil {
+			t.Fatalf("bucket %d did not show winning request error: %+v", index, samples[index])
+		}
 	}
 }

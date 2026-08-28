@@ -5,28 +5,43 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
+
+const dashboardWindow = 24 * time.Hour
+const dashboardBucket = dashboardWindow / 24
 
 const dashboardQuery = `
 WITH bounds AS (
     SELECT NOW() - INTERVAL '24 hours' AS start_at,
            NOW() AS end_at,
            EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds
+), visible_targets AS MATERIALIZED (
+    SELECT target_key, kind, source_updated_at
+    FROM monitoring_targets
+    WHERE active = TRUE
+      AND (
+          LOWER(TRIM(source_status)) = 'active'
+          OR (kind = 'account' AND LOWER(TRIM(source_status)) = 'error')
+      )
 ), active_accounts AS MATERIALIZED (
 	SELECT id
 	FROM accounts
-	WHERE deleted_at IS NULL AND schedulable = TRUE AND LOWER(TRIM(status)) = 'active'
+	WHERE deleted_at IS NULL
+	  AND (
+	      (schedulable = TRUE AND LOWER(TRIM(status)) = 'active')
+	      OR LOWER(TRIM(status)) = 'error'
+	  )
 ), active_groups AS MATERIALIZED (
 	SELECT id
 	FROM groups
 	WHERE deleted_at IS NULL AND LOWER(TRIM(status)) = 'active'
 ), active_targets AS MATERIALIZED (
     SELECT target_key, source_updated_at
-    FROM monitoring_targets
-    WHERE active = TRUE AND LOWER(TRIM(source_status)) = 'active'
+    FROM visible_targets
 ), period_usage AS MATERIALIZED (
 	SELECT ul.account_id, ul.group_id, ul.duration_ms, ul.first_token_ms, ul.created_at
 	FROM usage_logs ul
@@ -92,14 +107,13 @@ WITH bounds AS (
 	           ),
 	           'source', COALESCE(recent_ranked.source, '')
 	       ) ORDER BY bucket_positions.bucket_index) AS samples
-	FROM monitoring_targets targets
+	FROM visible_targets targets
 	CROSS JOIN bounds
 	CROSS JOIN bucket_positions
 	LEFT JOIN recent_ranked
 	       ON recent_ranked.target_key = targets.target_key
 	      AND recent_ranked.bucket_index = bucket_positions.bucket_index
 	      AND recent_ranked.position = 1
-	WHERE targets.active = TRUE AND LOWER(TRIM(targets.source_status)) = 'active'
 	GROUP BY targets.target_key
 ), latest_checks AS (
     SELECT targets.target_key, checks.status, checks.latency_ms, checks.first_byte_ms,
@@ -115,9 +129,34 @@ WITH bounds AS (
     ) checks ON TRUE
 ), latest_evidence_inputs AS (
     SELECT targets.target_key, targets.kind, targets.last_activity_at, targets.source_updated_at,
+           targets.last_channel_error_at, targets.last_channel_error_class,
+           targets.last_channel_error_status_code, targets.last_channel_error_resolved_at,
            latest_checks.status, latest_checks.latency_ms, latest_checks.first_byte_ms,
            latest_checks.checked_at, latest_checks.source, latest_checks.message,
            COALESCE(alert_states.failure_streak, 0) AS failure_streak,
+            CASE WHEN targets.last_channel_error_at IS NOT NULL
+                       AND (targets.source_updated_at IS NULL
+                            OR targets.last_channel_error_at >= targets.source_updated_at)
+                       AND (targets.last_channel_error_resolved_at IS NULL
+                            OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
+                       AND (latest_checks.checked_at IS NULL
+                            OR targets.last_channel_error_at > latest_checks.checked_at)
+                       AND (targets.last_activity_at IS NULL
+                            OR targets.last_channel_error_at > targets.last_activity_at)
+                 THEN TRUE ELSE FALSE END AS channel_error_wins,
+            CASE WHEN targets.last_channel_error_at IS NOT NULL
+                       AND (targets.source_updated_at IS NULL
+                            OR targets.last_channel_error_at >= targets.source_updated_at)
+                       AND (targets.last_channel_error_resolved_at IS NULL
+                            OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
+                       AND (targets.last_activity_at IS NULL
+                            OR targets.last_activity_at < targets.last_channel_error_at)
+                       AND (
+                           latest_checks.checked_at IS NULL
+                           OR latest_checks.checked_at < targets.last_channel_error_at
+                           OR COALESCE(latest_checks.status, '') NOT IN ('operational', 'degraded')
+                       )
+                 THEN TRUE ELSE FALSE END AS recovery_active,
             CASE WHEN targets.last_activity_at IS NOT NULL
                        AND (targets.source_updated_at IS NULL
                             OR targets.last_activity_at >= targets.source_updated_at)
@@ -127,30 +166,37 @@ WITH bounds AS (
     FROM monitoring_targets targets
     CROSS JOIN bounds
     LEFT JOIN latest_checks ON latest_checks.target_key = targets.target_key
-    LEFT JOIN monitoring_alert_states alert_states
-           ON alert_states.target_key = targets.target_key
-          AND (targets.source_updated_at IS NULL
-               OR alert_states.updated_at >= targets.source_updated_at)
+	    LEFT JOIN monitoring_alert_states alert_states
+	           ON alert_states.target_key = targets.target_key
+	          AND (targets.source_updated_at IS NULL
+               OR alert_states.updated_at >= targets.source_updated_at
+               OR (targets.last_activity_at IS NOT NULL
+                   AND targets.source_updated_at = targets.last_activity_at))
 ), latest_evidence AS (
     SELECT target_key,
-           CASE WHEN history_wins
+           CASE WHEN channel_error_wins THEN 'failed'
+                WHEN history_wins
                      AND kind = 'group'
                      AND source = 'aggregate'
                      AND COALESCE(status, '') IN ('degraded', 'failed', 'error')
                 THEN 'degraded'
                 WHEN history_wins THEN 'operational'
                 ELSE status END AS status,
-           CASE WHEN history_wins THEN NULL ELSE latency_ms END AS latency_ms,
-           CASE WHEN history_wins THEN NULL ELSE first_byte_ms END AS first_byte_ms,
-           CASE WHEN history_wins THEN last_activity_at ELSE checked_at END AS checked_at,
-           CASE WHEN history_wins
+           CASE WHEN channel_error_wins OR history_wins THEN NULL ELSE latency_ms END AS latency_ms,
+           CASE WHEN channel_error_wins OR history_wins THEN NULL ELSE first_byte_ms END AS first_byte_ms,
+           CASE WHEN channel_error_wins THEN last_channel_error_at
+                WHEN history_wins THEN last_activity_at ELSE checked_at END AS checked_at,
+           CASE WHEN recovery_active THEN last_channel_error_at ELSE NULL END AS recovery_trigger_at,
+           CASE WHEN channel_error_wins THEN 'request_error'
+                WHEN history_wins
                      AND kind = 'group'
                      AND source = 'aggregate'
                      AND COALESCE(status, '') IN ('degraded', 'failed', 'error')
                 THEN source
                 WHEN history_wins THEN 'history'
                 ELSE source END AS source,
-           CASE WHEN history_wins
+           CASE WHEN channel_error_wins THEN '真实请求报错，等待恢复探测'
+                WHEN history_wins
                      AND kind = 'group'
                      AND source = 'aggregate'
                      AND COALESCE(status, '') IN ('degraded', 'failed', 'error')
@@ -161,6 +207,7 @@ WITH bounds AS (
     FROM latest_evidence_inputs
 )
 SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t.probe_enabled,
+       e.recovery_trigger_at,
        CASE
            WHEN t.kind = 'group' THEN g.rate_multiplier::double precision
            WHEN t.kind = 'account' THEN a.rate_multiplier::double precision
@@ -177,7 +224,11 @@ LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at I
 LEFT JOIN latest_evidence e ON e.target_key = t.target_key
 LEFT JOIN stats s ON s.target_key = t.target_key
 LEFT JOIN recent r ON r.target_key = t.target_key
-WHERE t.active = TRUE AND LOWER(TRIM(t.source_status)) = 'active'
+WHERE t.active = TRUE
+  AND (
+      LOWER(TRIM(t.source_status)) = 'active'
+      OR (t.kind = 'account' AND LOWER(TRIM(t.source_status)) = 'error')
+  )
 ORDER BY CASE WHEN t.kind = 'group' THEN 0 ELSE 1 END, t.name, t.entity_id`
 
 func (s *Store) Dashboard(ctx context.Context, staleAfter time.Duration, intervalSec int, failureThreshold ...int) (model.Dashboard, error) {
@@ -234,9 +285,10 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	var firstMedian, firstP95, latencyMedian, latencyP95 sql.NullFloat64
 	var recentJSON []byte
 	var currentRate sql.NullFloat64
+	var recoveryTrigger sql.NullTime
 	if err := rows.Scan(
 		&target.Key, &target.Kind, &target.EntityID, &target.Name, &target.Platform,
-		&target.SourceStatus, &target.ProbeEnabled,
+		&target.SourceStatus, &target.ProbeEnabled, &recoveryTrigger,
 		&currentRate,
 		&latestStatus, &latestLatency,
 		&latestFirst, &latestAt, &latestSource, &latestMessage, &latestFailureStreak, &samples, &successful,
@@ -248,6 +300,10 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	if currentRate.Valid {
 		value := currentRate.Float64
 		target.RateMultiplier = &value
+	}
+	if recoveryTrigger.Valid {
+		value := recoveryTrigger.Time.UTC()
+		target.RecoveryTriggerAt = &value
 	}
 	applyLatestTargetStateWithMessage(&target, latestStatus, latestSource, latestMessage, latestLatency, latestFirst, latestAt, now, staleAfter)
 	if latestStatus.Valid && latestSource.Valid {
@@ -262,6 +318,17 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 		return model.DashboardTarget{}, false, fmt.Errorf("decode recent samples: %w", err)
 	}
 	carryForwardStatusSamples(target.RecentSamples)
+	if target.LastCheckedAt != nil && isObservedStatus(target.Status) &&
+		!target.LastCheckedAt.Before(now.Add(-dashboardWindow)) {
+		if target.LatestSource == "request_error" {
+			// Channel errors are stored as trigger metadata rather than samples.
+			// Overlay the winning error on the current and later buckets so the
+			// timeline cannot remain green merely because an older sample exists.
+			overlayLatestTargetStatus(target.RecentSamples, target.Status, target.LatestSource, *target.LastCheckedAt, now.Add(-dashboardWindow))
+		} else if !hasObservedStatusSample(target.RecentSamples) {
+			carryForwardTargetStatus(target.RecentSamples, target.Status, target.LatestSource, *target.LastCheckedAt, now.Add(-dashboardWindow))
+		}
+	}
 	return target, targetContributesAvailability(target), nil
 }
 
@@ -288,11 +355,14 @@ func pendingAggregateFailureMessage(message sql.NullString) string {
 }
 
 func carryForwardStatusSamples(samples []model.StatusSample) {
+	// Only carry a known state forward. Leading buckets stay in a waiting
+	// state because an observation at the end of the window cannot prove what
+	// happened before it.
 	var previous *model.StatusSample
 	for i := range samples {
 		sample := &samples[i]
-		switch sample.Status {
-		case model.StatusOperational, model.StatusDegraded, model.StatusFailed, model.StatusError:
+		switch {
+		case isObservedStatus(sample.Status):
 			observed := *sample
 			previous = &observed
 		default:
@@ -304,6 +374,58 @@ func carryForwardStatusSamples(samples []model.StatusSample) {
 			sample.Source = previous.Source
 			sample.CarriedFrom = &carriedFrom
 		}
+	}
+}
+
+func carryForwardTargetStatus(samples []model.StatusSample, status, source string, checkedAt, windowStart time.Time) {
+	if checkedAt.Before(windowStart) {
+		return
+	}
+	for index := range samples {
+		if samples[index].Status != model.StatusUnknown || samples[index].CheckedAt.Before(checkedAt) {
+			continue
+		}
+		samples[index].Status = status
+		samples[index].Source = source
+		carriedFrom := checkedAt
+		samples[index].CarriedFrom = &carriedFrom
+	}
+}
+
+func overlayLatestTargetStatus(samples []model.StatusSample, status, source string, checkedAt, windowStart time.Time) {
+	if checkedAt.Before(windowStart) {
+		return
+	}
+	for index := range samples {
+		sample := &samples[index]
+		if sample.CheckedAt.Before(checkedAt) {
+			// Empty buckets use their end time as CheckedAt. Include the bucket
+			// containing the trigger, while preserving real observations before it.
+			if sample.CarriedFrom == nil || !sample.CheckedAt.Add(dashboardBucket).After(checkedAt) {
+				continue
+			}
+		}
+		sample.Status = status
+		sample.Source = source
+		sample.CarriedFrom = nil
+	}
+}
+
+func hasObservedStatusSample(samples []model.StatusSample) bool {
+	for _, sample := range samples {
+		if isObservedStatus(sample.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func isObservedStatus(status string) bool {
+	switch status {
+	case model.StatusOperational, model.StatusDegraded, model.StatusFailed, model.StatusError:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -341,6 +463,31 @@ func applyLatestTargetStateWithMessage(
 	}
 	if status.Valid {
 		target.Status = status.String
+		if target.Status == model.StatusUnknown {
+			if target.Kind == model.KindGroup {
+				target.LatestMessage = "暂无真实请求，等待候选检查或下一次请求确认"
+			} else if strings.EqualFold(strings.TrimSpace(target.SourceStatus), "error") {
+				if target.RecoveryTriggerAt != nil {
+					target.LatestMessage = "渠道报错，等待恢复探测"
+				} else {
+					target.LatestMessage = "账户处于错误状态；等待真实请求或新的渠道错误"
+				}
+			} else {
+				target.LatestMessage = "暂无真实请求，等待渠道错误或下一次请求确认"
+			}
+		}
+	} else {
+		if target.Kind == model.KindGroup {
+			target.LatestMessage = "暂无真实请求；仅在候选检查或真实请求后更新"
+		} else if strings.EqualFold(strings.TrimSpace(target.SourceStatus), "error") {
+			if target.RecoveryTriggerAt != nil {
+				target.LatestMessage = "渠道报错，等待恢复探测"
+			} else {
+				target.LatestMessage = "账户处于错误状态；等待真实请求或新的渠道错误"
+			}
+		} else {
+			target.LatestMessage = "暂无真实请求；仅在渠道报错后主动探测"
+		}
 	}
 	if checkedAt.Valid {
 		value := checkedAt.Time.UTC()
@@ -350,8 +497,10 @@ func applyLatestTargetStateWithMessage(
 	if source.Valid {
 		target.LatestSource = source.String
 	}
-	if message.Valid && target.Kind == model.KindGroup {
-		target.LatestMessage = sanitizeUpstreamMessage(message.String)
+	if message.Valid && (target.Kind == model.KindGroup || (source.Valid && source.String == "request_error")) {
+		if sanitized := sanitizeUpstreamMessage(message.String); sanitized != "" {
+			target.LatestMessage = sanitized
+		}
 	}
 	if latency.Valid {
 		value := int(latency.Int64)
@@ -398,6 +547,9 @@ func addDashboardSummary(summary *model.Summary, target model.DashboardTarget) {
 }
 
 func targetContributesAvailability(target model.DashboardTarget) bool {
+	if target.Kind == model.KindAccount && strings.EqualFold(strings.TrimSpace(target.SourceStatus), "error") {
+		return false
+	}
 	if target.Kind == model.KindGroup && groupIsActive(target.SourceStatus) && !target.ProbeEnabled {
 		return true
 	}
