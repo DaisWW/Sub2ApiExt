@@ -12,7 +12,7 @@ import {
 } from './shared.js';
 
 const donutColors = ['#77a9ef', '#54d6ae', '#e8b85f', '#c18df0', '#f27a82', '#8fd3ff', '#a4d17a', '#d8a0ff'];
-const minimumDonutPercent = 0.1;
+const minimumDonutPercent = 0.5;
 const usageMetrics = new Set(['tokens', 'cost', 'unit_cost']);
 
 export class UsagePanel {
