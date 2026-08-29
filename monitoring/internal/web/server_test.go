@@ -83,6 +83,29 @@ func TestStaticResponsesSetContentSecurityPolicy(t *testing.T) {
 	}
 }
 
+func TestUsageShareControlsExcludeUnitCost(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("got status %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, kind := range []string{"model", "group"} {
+		prefix := `data-share-kind="` + kind + `" data-share-metric=`
+		if got := strings.Count(body, prefix); got != 2 {
+			t.Errorf("%s share controls = %d, want Tokens and cost only", kind, got)
+		}
+		if strings.Contains(body, prefix+`"unit_cost"`) {
+			t.Errorf("%s share controls still expose unit_cost", kind)
+		}
+	}
+	if !strings.Contains(body, `data-trend-metric="unit_cost"`) {
+		t.Error("trend controls lost the unit_cost metric")
+	}
+}
+
 func TestStaticResponsesUseConfiguredFrameAncestors(t *testing.T) {
 	server := New((*monitor.Service)(nil), "'self' https://dashboard.example.test:8443")
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
