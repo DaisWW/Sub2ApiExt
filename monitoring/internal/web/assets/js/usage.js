@@ -302,12 +302,38 @@ function shareItems(sourceItems, summary, metric) {
 
 function renderDonutSlice(item, index, percent, offset, total, metric) {
   const label = shareTooltipLabel(item, total, metric);
-  return `<circle class="donut-slice" cx="50" cy="50" r="39" pathLength="100"
-    stroke="${donutColors[index % donutColors.length]}" stroke-dasharray="${percent} ${100 - percent}"
-    stroke-dashoffset="${-offset}" transform="rotate(-90 50 50)"
+  const color = donutColors[index % donutColors.length];
+  return `<path class="donut-slice" d="${donutSlicePath(percent, offset)}"
+    fill="${color}" fill-rule="evenodd"
     data-chart-tooltip="${escapeHTML(label)}">
     <title>${escapeHTML(label)}</title>
-  </circle>`;
+  </path>`;
+}
+
+function donutSlicePath(percent, offset) {
+  const safePercent = Math.min(100, Math.max(0, Number(percent) || 0));
+  const safeOffset = Number(offset) || 0;
+  const center = 50;
+  const outerRadius = 48;
+  const innerRadius = 30;
+  const startAngle = (safeOffset / 100) * Math.PI * 2 - Math.PI / 2;
+  const endAngle = ((safeOffset + safePercent) / 100) * Math.PI * 2 - Math.PI / 2;
+  const point = (radius, angle) => `${(center + radius * Math.cos(angle)).toFixed(4)} ${(center + radius * Math.sin(angle)).toFixed(4)}`;
+
+  if (safePercent >= 99.999) {
+    return `M ${center} ${center - outerRadius}
+      A ${outerRadius} ${outerRadius} 0 1 1 ${center} ${center + outerRadius}
+      A ${outerRadius} ${outerRadius} 0 1 1 ${center} ${center - outerRadius}
+      M ${center} ${center - innerRadius}
+      A ${innerRadius} ${innerRadius} 0 1 0 ${center} ${center + innerRadius}
+      A ${innerRadius} ${innerRadius} 0 1 0 ${center} ${center - innerRadius} Z`;
+  }
+
+  const largeArc = safePercent > 50 ? 1 : 0;
+  return `M ${point(outerRadius, startAngle)}
+    A ${outerRadius} ${outerRadius} 0 ${largeArc} 1 ${point(outerRadius, endAngle)}
+    L ${point(innerRadius, endAngle)}
+    A ${innerRadius} ${innerRadius} 0 ${largeArc} 0 ${point(innerRadius, startAngle)} Z`;
 }
 
 function renderLegendItem(item, total, index, tooltipId, metric) {

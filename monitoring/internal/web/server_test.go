@@ -106,6 +106,25 @@ func TestUsageShareControlsExcludeUnitCost(t *testing.T) {
 	}
 }
 
+func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	request := httptest.NewRequest(http.MethodGet, "/js/usage.js", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("got status %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, marker := range []string{"function donutSlicePath", "<path class=\"donut-slice\"", "fill-rule=\"evenodd\""} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("usage.js is missing %q", marker)
+		}
+	}
+	if strings.Contains(body, "stroke-dasharray") {
+		t.Error("usage.js still relies on dashed circles for donut slices")
+	}
+}
+
 func TestStaticResponsesUseConfiguredFrameAncestors(t *testing.T) {
 	server := New((*monitor.Service)(nil), "'self' https://dashboard.example.test:8443")
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
