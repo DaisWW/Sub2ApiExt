@@ -201,15 +201,27 @@ func TestUsageSummaryExposesCostBreakdown(t *testing.T) {
 	}
 }
 
-func TestModelUsageRankSeparatesRecordedRates(t *testing.T) {
+func TestModelUsageRankAggregatesByModel(t *testing.T) {
 	for _, fragment := range []string{
-		":account-rate:' || COALESCE(ul.account_rate_multiplier, 1)::text",
-		":record-rate:' || COALESCE(ul.rate_multiplier, 1)::text",
-		"COALESCE(ul.rate_multiplier, 1)::text AS context",
-		"COALESCE(ul.account_rate_multiplier, 1), COALESCE(ul.rate_multiplier, 1)",
+		"'model:' || COALESCE(NULLIF(ul.model, ''), 'unknown') AS entity_key",
+		"''::text AS context",
+		"GROUP BY COALESCE(NULLIF(ul.model, ''), 'unknown')",
 	} {
 		if !strings.Contains(modelUsageRankQuery, fragment) {
-			t.Fatalf("model usage rank query missing recorded-rate split %q", fragment)
+			t.Fatalf("model usage rank query missing model aggregation %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		":account:",
+		":channel:",
+		":group:",
+		":account-rate:",
+		":record-rate:",
+		"LEFT JOIN channels c",
+		"ul.account_id, ul.channel_id",
+	} {
+		if strings.Contains(modelUsageRankQuery, fragment) {
+			t.Fatalf("model usage rank query still splits by %q", fragment)
 		}
 	}
 }

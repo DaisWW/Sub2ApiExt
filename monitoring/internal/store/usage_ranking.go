@@ -130,19 +130,10 @@ SELECT entity_id, NULL::text AS entity_key, name, context, platform,
 const modelUsageRankQuery = `
 WITH aggregated AS (
     SELECT NULL::bigint AS entity_id,
-           'model:' || COALESCE(NULLIF(ul.model, ''), 'unknown') ||
-               ':account:' || ul.account_id::text ||
-               ':channel:' || COALESCE(ul.channel_id, 0)::text ||
-               ':group:' || ul.group_id::text ||
-               ':account-rate:' || COALESCE(ul.account_rate_multiplier, 1)::text ||
-               ':record-rate:' || COALESCE(ul.rate_multiplier, 1)::text AS entity_key,
+           'model:' || COALESCE(NULLIF(ul.model, ''), 'unknown') AS entity_key,
            COALESCE(NULLIF(ul.model, ''), 'unknown') AS name,
-           COALESCE(NULLIF(BTRIM(g.name), ''), '分组 #' || ul.group_id::text) || ' / ' ||
-           COALESCE(NULLIF(BTRIM(a.name), ''), '账户 #' || ul.account_id::text) || ' / ' ||
-           COALESCE(NULLIF(BTRIM(c.name), ''), '未归属渠道') || ' / 账号×' ||
-           COALESCE(ul.account_rate_multiplier, 1)::text || ' / 记录×' ||
-           COALESCE(ul.rate_multiplier, 1)::text AS context,
-           COALESCE(a.platform, 'unknown') AS platform,
+           ''::text AS context,
+           ''::text AS platform,
            COUNT(*)::bigint AS requests,
            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
                         COALESCE(ul.output_tokens, 0)::bigint +
@@ -166,11 +157,8 @@ WITH aggregated AS (
       JOIN groups g ON g.id = ul.group_id
                    AND g.deleted_at IS NULL
                    AND LOWER(TRIM(g.status)) = 'active'
-      LEFT JOIN channels c ON c.id = ul.channel_id
-     WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
-     GROUP BY COALESCE(NULLIF(ul.model, ''), 'unknown'),
-              ul.account_id, ul.channel_id, ul.group_id, a.name, a.platform, g.name, c.id, c.name,
-              COALESCE(ul.account_rate_multiplier, 1), COALESCE(ul.rate_multiplier, 1)
+      WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
+      GROUP BY COALESCE(NULLIF(ul.model, ''), 'unknown')
 ), ranked AS (
     SELECT aggregated.*,
            COUNT(*) OVER () AS total_items,

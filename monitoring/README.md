@@ -63,7 +63,7 @@ Bedrock、Service Account、Code Assist project OAuth 等需要专用签名或�
 GET /api/v1/monitor/usage-ranking?period=24h&limit=10
 ```
 
-支持 `1h`、`24h`、`today`、`yesterday`、`7d`、`15d`、`30d`。返回启用账户/分组范围内的请求数、四类 Tokens、原始/实际成本、有效倍率、每百万 Tokens 成本、成本分项、包含渠道明细的分钟/小时/天时间桶，以及账户、模型和分组排行。`input_tokens`/`output_tokens` 已包含图片 Tokens；不要再把 `image_input_tokens`/`image_output_tokens` 子集相加。`1h` 使用分钟时间桶，`24h`、`today` 和 `yesterday` 使用小时时间桶，较长窗口使用天时间桶。`today` 为今天 00:00 到当前时刻，`yesterday` 为前一天 00:00 到今天 00:00。`limit` 是每个排行维度各排序指标的上限；排行数组是 Tokens、成本、每百万 Tokens 成本和缓存上下文等维度前列对象的去重并集，因此数组总数可能大于 `limit`，并附带未展开对象的请求数、Tokens 和实际成本。模型排行按模型、分组、账号、渠道、账号倍率和记录倍率拆分，并在 `context` 中标出分组、渠道及两类倍率；`effective_rate_multiplier` 是该拆分对象按原始成本加权后的实际倍率。账户和分组还附带缓存命中率。
+支持 `1h`、`24h`、`today`、`yesterday`、`7d`、`15d`、`30d`。返回启用账户/分组范围内的请求数、四类 Tokens、原始/实际成本、有效倍率、每百万 Tokens 成本、成本分项、包含渠道明细的分钟/小时/天时间桶，以及账户、模型和分组排行。`input_tokens`/`output_tokens` 已包含图片 Tokens；不要再把 `image_input_tokens`/`image_output_tokens` 子集相加。`1h` 使用分钟时间桶，`24h`、`today` 和 `yesterday` 使用小时时间桶，较长窗口使用天时间桶。`today` 为今天 00:00 到当前时刻，`yesterday` 为前一天 00:00 到今天 00:00。`limit` 是每个排行维度各排序指标的上限；排行数组是 Tokens、成本、每百万 Tokens 成本和缓存上下文等维度前列对象的去重并集，因此数组总数可能大于 `limit`，并附带未展开对象的请求数、Tokens 和实际成本。模型排行按规范化模型名聚合，不再按分组、账号、渠道或倍率拆分；`effective_rate_multiplier` 是该模型按原始成本加权后的实际倍率。账户和分组还附带缓存命中率。
 
 实时活动接口：
 
