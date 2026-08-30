@@ -10,18 +10,10 @@ func (s *Syncer) publishDynamicGroup(
 	group *sub2APIGroup,
 	state *DynamicGroupState,
 	event bool,
-	suspicious bool,
 	reason string,
 	summary dynamicUsageSummary,
 	report *syncReport,
 ) {
-	if suspicious {
-		clearDynamicPending(state)
-		report.markGroup(group.ID, reportStatusSkipped)
-		report.setGroupEvidence(group.ID, reason, "账号倍率仍是待确认的 1.0000，暂停动态调价")
-		s.logger.Printf("[%s] 动态成本暂停: 账号倍率仍是待确认的 1.0000", group.Name)
-		return
-	}
 	if state != nil && state.HasPendingTarget {
 		s.retryDynamicPending(ctx, group, state, reason, report)
 		return

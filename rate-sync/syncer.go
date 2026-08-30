@@ -94,7 +94,11 @@ func (s *Syncer) syncDiscoveredChannels(ctx context.Context, channels []Channel,
 		var usageErr error
 		handledGroups, usageErr = s.syncGroupsFromUsage(ctx, channels, now, handledGroups, report)
 		if usageErr != nil {
-			s.logger.Printf("分组历史成本校准失败，本轮回退到上游探测: %v", usageErr)
+			report.markPendingGroups(reportStatusFailed, "等待下一轮", "分组用量统计失败")
+			for groupID := range buildGroupBindings(channels) {
+				handledGroups[groupID] = true
+			}
+			s.logger.Printf("分组历史成本校准失败: 本轮不探测上游，等待下一轮: %v", usageErr)
 		}
 	}
 	return s.runChannelChecks(ctx, channels, now, handledGroups, report)

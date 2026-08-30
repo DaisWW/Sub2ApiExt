@@ -121,11 +121,9 @@ func classifyLogLine(line string) logStatus {
 		"校准跳过:",
 		"本轮跳过",
 		"保持当前",
-		"回退到上游探测",
 		"等待账户倍率同步",
 		"动态成本初始化等待",
 		"动态成本跳过",
-		"动态成本暂停",
 	) {
 		return logStatusSkip
 	}

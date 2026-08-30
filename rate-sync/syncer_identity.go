@@ -8,14 +8,6 @@ import (
 	"strings"
 )
 
-func (s *Syncer) suspiciousAccountRate(channel *Channel) bool {
-	if channel == nil || s.config == nil || !almostEqual(channel.AccountRateMultiplier, 1) {
-		return false
-	}
-	factor, _, err := s.config.factorForBaseURL(channel.BaseURL)
-	return err == nil && !almostEqual(factor, 1)
-}
-
 func rateChangeSignificant(current, target float64) bool {
 	if almostEqual(current, target) {
 		return false

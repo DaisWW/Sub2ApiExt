@@ -10,11 +10,14 @@ import (
 
 // syncChannel 负责一次渠道的模板识别、价格观测和候选发布。
 func (s *Syncer) syncChannel(ctx context.Context, channel *Channel, ruleState *RuleState, now time.Time, report *syncReport) error {
+	if s.syncTarget() != "account" {
+		return skipError("分组倍率由账户倍率继承或统计校准")
+	}
 	factor, host, err := s.config.factorForBaseURL(channel.BaseURL)
 	if err != nil {
 		return err
 	}
-	if s.syncTarget() == "account" && ruleState.Template == templateUsageRatio {
+	if ruleState.Template == templateUsageRatio {
 		if handled, err := s.tryDirectAccountTemplate(ctx, channel, ruleState, now, factor, report, host); handled {
 			return err
 		}
@@ -90,10 +93,8 @@ func (s *Syncer) probeTemplates(
 }
 
 func (s *Syncer) templateOrder() []string {
-	if s.syncTarget() == "account" {
-		return []string{templateNewAPIRatio, templateUsageRatio}
-	}
-	return []string{templateUsageRatio, templateNewAPIRatio}
+	// 模板探测仅用于账户 worker；分组入口在 syncChannel 开头直接跳过。
+	return []string{templateNewAPIRatio, templateUsageRatio}
 }
 
 func (s *Syncer) applyTemplate(ctx context.Context, channel *Channel, state *RuleState, now time.Time, template string) (bool, error) {
@@ -131,6 +132,9 @@ func (s *Syncer) applyUsageTemplate(ctx context.Context, channel *Channel, state
 }
 
 func (s *Syncer) applyCandidate(ctx context.Context, channel *Channel, state *RuleState, factor float64, report *syncReport) error {
+	if s.syncTarget() != "account" {
+		return skipError("分组倍率由账户倍率继承或统计校准")
+	}
 	if state.CandidateCount < s.config.Confirmations {
 		return nil
 	}
@@ -138,7 +142,7 @@ func (s *Syncer) applyCandidate(ctx context.Context, channel *Channel, state *Ru
 	if err != nil {
 		return err
 	}
-	currentRate := s.currentRate(channel)
+	currentRate := channel.AccountRateMultiplier
 	if almostEqual(currentRate, finalRate) {
 		report.markChannel(channel, reportStatusStable)
 		s.logger.Printf(
@@ -155,10 +159,7 @@ func (s *Syncer) applyCandidate(ctx context.Context, channel *Channel, state *Ru
 		)
 		return nil
 	}
-	if s.syncTarget() == "account" {
-		return s.publishAccountCandidate(ctx, channel, state, factor, finalRate, report)
-	}
-	return s.publishGroupCandidate(ctx, channel, state, factor, finalRate, report)
+	return s.publishAccountCandidate(ctx, channel, state, factor, finalRate, report)
 }
 
 func candidateFinalRate(state *RuleState, factor float64) (float64, error) {
@@ -167,13 +168,6 @@ func candidateFinalRate(state *RuleState, factor float64) (float64, error) {
 		return 0, fmt.Errorf("最终倍率无效: %.8f", rate)
 	}
 	return rate, nil
-}
-
-func (s *Syncer) currentRate(channel *Channel) float64 {
-	if s.syncTarget() == "account" {
-		return channel.AccountRateMultiplier
-	}
-	return channel.Group.RateMultiplier
 }
 
 func (s *Syncer) publishAccountCandidate(ctx context.Context, channel *Channel, state *RuleState, factor, finalRate float64, report *syncReport) error {
@@ -185,20 +179,6 @@ func (s *Syncer) publishAccountCandidate(ctx context.Context, channel *Channel, 
 	s.logger.Printf(
 		"[%s] 已更新账号 %s(%d) 上游倍率: %.4f × 本地系数 %.4f = %.4f",
 		channelLabel(channel), channel.AccountName, channel.AccountID,
-		state.CandidateUpstreamRate, factor, finalRate,
-	)
-	return nil
-}
-
-func (s *Syncer) publishGroupCandidate(ctx context.Context, channel *Channel, state *RuleState, factor, finalRate float64, report *syncReport) error {
-	if err := s.updateGroup(ctx, &channel.Group, finalRate); err != nil {
-		return err
-	}
-	report.updateGroupRate(channel.Group.ID, finalRate)
-	report.markGroup(channel.Group.ID, reportStatusUpdated)
-	s.logger.Printf(
-		"[%s] 已更新分组 %s(%d): 上游 %.4f × 本地系数 %.4f = %.4f",
-		channelLabel(channel), channel.Group.Name, channel.Group.ID,
 		state.CandidateUpstreamRate, factor, finalRate,
 	)
 	return nil

@@ -145,6 +145,22 @@ func (r *syncReport) setGroupEvidence(groupID int64, window, detail string) {
 	}
 }
 
+func (r *syncReport) markPendingGroups(status, window, detail string) {
+	if r == nil || r.target != "group" || status == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, row := range r.rows {
+		if row.status != reportStatusPending {
+			continue
+		}
+		row.status = status
+		row.window = strings.TrimSpace(window)
+		row.detail = strings.TrimSpace(detail)
+	}
+}
+
 func reportStatusRank(status string) int {
 	switch status {
 	case reportStatusFailed:

@@ -36,9 +36,8 @@ type dynamicUsageSummary struct {
 }
 
 type dynamicGroupPlan struct {
-	bindings   map[int64]*groupBinding
-	groupIDs   []int64
-	suspicious map[int64]bool
+	bindings map[int64]*groupBinding
+	groupIDs []int64
 }
 
 func (s *Syncer) syncDynamicGroups(
@@ -50,7 +49,7 @@ func (s *Syncer) syncDynamicGroups(
 	report *syncReport,
 ) (map[int64]bool, error) {
 	handled := ensureHandledGroups(initialHandled)
-	plan := s.buildDynamicGroupPlan(channels, handled)
+	plan := buildDynamicGroupPlan(channels, handled)
 	if len(plan.groupIDs) == 0 {
 		return handled, nil
 	}
@@ -70,10 +69,9 @@ func (s *Syncer) syncDynamicGroups(
 	return handled, nil
 }
 
-func (s *Syncer) buildDynamicGroupPlan(channels []Channel, handled map[int64]bool) dynamicGroupPlan {
+func buildDynamicGroupPlan(channels []Channel, handled map[int64]bool) dynamicGroupPlan {
 	plan := dynamicGroupPlan{
-		bindings:   buildGroupBindings(channels),
-		suspicious: make(map[int64]bool),
+		bindings: buildGroupBindings(channels),
 	}
 	for groupID, binding := range plan.bindings {
 		if len(binding.accounts) < 2 {
@@ -81,12 +79,6 @@ func (s *Syncer) buildDynamicGroupPlan(channels []Channel, handled map[int64]boo
 		}
 		plan.groupIDs = append(plan.groupIDs, groupID)
 		handled[groupID] = true
-		for _, channel := range binding.accounts {
-			if s.suspiciousAccountRate(&channel) {
-				plan.suspicious[groupID] = true
-				break
-			}
-		}
 	}
 	sort.Slice(plan.groupIDs, func(i, j int) bool { return plan.groupIDs[i] < plan.groupIDs[j] })
 	return plan
@@ -134,7 +126,6 @@ func (s *Syncer) reportDynamicBootstrap(
 				&plan.bindings[groupID].group,
 				state,
 				false,
-				plan.suspicious[groupID],
 				"待发布重试",
 				dynamicUsageSummary{},
 				report,
@@ -163,7 +154,6 @@ func (s *Syncer) reportDynamicBootstrap(
 					&plan.bindings[groupID].group,
 					previous,
 					false,
-					plan.suspicious[groupID],
 					"待发布重试",
 					dynamicUsageSummary{},
 					report,
@@ -186,7 +176,6 @@ func (s *Syncer) reportDynamicBootstrap(
 			&plan.bindings[groupID].group,
 			state,
 			true,
-			plan.suspicious[groupID],
 			fmt.Sprintf("初始化%s", formatHistoryWindow(choice.window)),
 			summarizeDynamicUsage(choice.rows),
 			report,
@@ -230,7 +219,6 @@ func (s *Syncer) consumeDynamicUsage(
 			&plan.bindings[groupID].group,
 			state,
 			false,
-			plan.suspicious[groupID],
 			"待发布重试",
 			dynamicUsageSummary{},
 			report,
@@ -286,7 +274,6 @@ func (s *Syncer) consumeDynamicGroup(
 		&plan.bindings[groupID].group,
 		state,
 		newUsage || ratesChanged,
-		plan.suspicious[groupID],
 		reason,
 		summary,
 		report,

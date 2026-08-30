@@ -10,42 +10,48 @@ func (s *Syncer) syncSingleAccountGroups(ctx context.Context, channels []Channel
 		if !ok {
 			continue
 		}
-		if s.syncSingleAccountGroup(ctx, groupID, binding, account, report) {
-			handled[groupID] = true
-		}
+		s.syncSingleAccountGroup(ctx, groupID, binding, account, report)
+		handled[groupID] = true
 	}
 	return handled
 }
 
-// syncSingleAccountGroup 返回 true 表示本轮已明确处理，不应再回退到上游探测。
+// syncSingleAccountGroup 处理单账号分组；无论账户倍率是否有效，本轮都不进入上游探测。
 func (s *Syncer) syncSingleAccountGroup(
 	ctx context.Context,
 	groupID int64,
 	binding *groupBinding,
 	account Channel,
 	report *syncReport,
-) bool {
+) {
 	groupName := binding.group.Name
 	accountRate := account.AccountRateMultiplier
 	if !validPositiveRate(accountRate) {
+		report.markGroup(groupID, reportStatusSkipped)
+		report.setGroupEvidence(groupID, "", "等待账户倍率同步")
 		s.logger.Printf(
-			"[%s] 单账号倍率无效: 账户 %s(%d) 倍率 %.8f，回退到上游探测",
+			"[%s] 单账号分组跳过: 账户 %s(%d) 倍率 %.8f 无效，等待账户 worker 同步",
 			groupName,
 			account.AccountName,
 			account.AccountID,
 			accountRate,
 		)
-		return false
-	}
-	if s.suspiciousAccountRate(&account) {
-		s.logger.Printf(
-			"[%s] 单账号倍率仍为 1.0000 且配置了上游折扣，暂不继承账户倍率，回退到上游探测",
-			groupName,
-		)
-		return false
+		return
 	}
 
 	targetRate := round4(accountRate)
+	if !validPositiveRate(targetRate) {
+		report.markGroup(groupID, reportStatusSkipped)
+		report.setGroupEvidence(groupID, "", "账户倍率四舍五入后无效")
+		s.logger.Printf(
+			"[%s] 单账号分组跳过: 账户 %s(%d) 倍率 %.8f 四舍五入后无效，等待账户 worker 同步",
+			groupName,
+			account.AccountName,
+			account.AccountID,
+			accountRate,
+		)
+		return
+	}
 	currentRate := binding.group.RateMultiplier
 	if almostEqual(currentRate, targetRate) {
 		report.markGroup(groupID, reportStatusStable)
@@ -57,7 +63,7 @@ func (s *Syncer) syncSingleAccountGroup(
 			accountRate,
 			currentRate,
 		)
-		return true
+		return
 	}
 	if s.config.DryRun {
 		report.markGroup(groupID, reportStatusPreview)
@@ -70,7 +76,7 @@ func (s *Syncer) syncSingleAccountGroup(
 			currentRate,
 			targetRate,
 		)
-		return true
+		return
 	}
 	if err := s.updateGroup(ctx, &binding.group, targetRate); err != nil {
 		report.markGroup(groupID, reportStatusFailed)
@@ -80,7 +86,7 @@ func (s *Syncer) syncSingleAccountGroup(
 			currentRate,
 			err,
 		)
-		return true
+		return
 	}
 
 	report.updateGroupRate(groupID, targetRate)
@@ -94,5 +100,4 @@ func (s *Syncer) syncSingleAccountGroup(
 		currentRate,
 		targetRate,
 	)
-	return true
 }

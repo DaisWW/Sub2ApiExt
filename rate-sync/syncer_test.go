@@ -31,10 +31,14 @@ func (s *staticChannelSource) List(context.Context) ([]Channel, error) {
 
 type usageChannelSource struct {
 	*staticChannelSource
-	usage []GroupUsageStats
+	usage    []GroupUsageStats
+	usageErr error
 }
 
 func (s *usageChannelSource) ListGroupUsageStats(context.Context, time.Time, time.Time) ([]GroupUsageStats, error) {
+	if s.usageErr != nil {
+		return nil, s.usageErr
+	}
 	return append([]GroupUsageStats(nil), s.usage...), nil
 }
 
@@ -84,8 +88,12 @@ func TestSyncerDiscoversUsageTemplateAndAppliesFactor(t *testing.T) {
 	}
 	upstreamCall := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/usage" || r.URL.Query().Get("days") != "1" {
-			t.Errorf("unexpected upstream URL: %s", r.URL)
+		if r.URL.Path != "/v1/usage" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("days") != "1" {
+			t.Errorf("unexpected usage query: %s", r.URL)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-upstream" {
 			t.Errorf("Authorization = %q", got)
@@ -99,15 +107,13 @@ func TestSyncerDiscoversUsageTemplateAndAppliesFactor(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	daily := 5.0
-	monthly := 0.0
-	var updated groupUpdate
+	var updated accountUpdate
 	putCount := 0
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("x-api-key"); got != "admin-test" {
 			t.Errorf("x-api-key = %q", got)
 		}
-		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/admin/groups/24" {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/admin/accounts/18" {
 			t.Errorf("unexpected admin request: %s %s", r.Method, r.URL.Path)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
@@ -119,10 +125,9 @@ func TestSyncerDiscoversUsageTemplateAndAppliesFactor(t *testing.T) {
 	defer admin.Close()
 
 	channel := testChannel(upstream.URL, 0.1)
-	channel.Group.DailyLimitUSD = &daily
-	channel.Group.MonthlyLimitUSD = &monthly
 	source := &staticChannelSource{channels: []Channel{channel}}
 	syncer := newTestSyncer(t, source, admin.URL, false, 2, upstream.URL, 0.85)
+	syncer.config.SyncTarget = "account"
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
@@ -135,10 +140,7 @@ func TestSyncerDiscoversUsageTemplateAndAppliesFactor(t *testing.T) {
 	if putCount != 1 || updated.RateMultiplier != 0.085 {
 		t.Fatalf("updates = %d, payload = %+v", putCount, updated)
 	}
-	if updated.DailyLimitUSD != 5 || updated.WeeklyLimitUSD != -1 || updated.MonthlyLimitUSD != 0 {
-		t.Fatalf("limits changed: %+v", updated)
-	}
-	state := syncer.state.Rules["account:18/group:24"]
+	state := syncer.state.Rules["account:18"]
 	if state == nil || state.Template != templateUsageRatio {
 		t.Fatalf("unexpected state: %+v", state)
 	}
@@ -315,9 +317,11 @@ func TestUsageTemplateLogsCurrentLocalRateWithoutNewUsage(t *testing.T) {
 	defer upstream.Close()
 
 	channel := testChannel(upstream.URL, 0.051)
+	channel.AccountRateMultiplier = 0.051
 	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, "http://admin.invalid", false, 2, "", 1)
-	syncer.state.Rules[channelStateKey(&channel)] = &RuleState{
-		Identity:    channelIdentity(&channel),
+	syncer.config.SyncTarget = "account"
+	syncer.state.Rules["account:18"] = &RuleState{
+		Identity:    channelIdentityForTarget(&channel, "account"),
 		Template:    templateUsageRatio,
 		Day:         now.Format("2006-01-02"),
 		Cost:        10,
@@ -347,6 +351,7 @@ func TestChannelRenameKeepsStableState(t *testing.T) {
 
 	source := &staticChannelSource{channels: []Channel{testChannel(upstream.URL, 0.1)}}
 	syncer := newTestSyncer(t, source, admin.URL, false, 2, "", 1)
+	syncer.config.SyncTarget = "account"
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
@@ -397,7 +402,7 @@ func TestSyncerAutomaticallyResolvesNewAPIPriceGroup(t *testing.T) {
 
 	updatedRate := 0.0
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload groupUpdate
+		var payload accountUpdate
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
@@ -407,11 +412,11 @@ func TestSyncerAutomaticallyResolvesNewAPIPriceGroup(t *testing.T) {
 	defer admin.Close()
 
 	source := &staticChannelSource{channels: []Channel{testChannel(upstream.URL, 0.01)}}
-	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer := newAccountTestSyncer(t, source, admin.URL, false, 1, "", 1)
 	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	state := syncer.state.Rules["account:18/group:24"]
+	state := syncer.state.Rules["account:18"]
 	if state.Template != templateNewAPIRatio || state.PriceKey != "kiro-特价" {
 		t.Fatalf("unexpected NewAPI state: %+v", state)
 	}
@@ -446,7 +451,7 @@ func TestNewAPIRefreshesBillingGroupEveryCycle(t *testing.T) {
 	defer upstream.Close()
 
 	source := &staticChannelSource{channels: []Channel{testChannel(upstream.URL, 0.05)}}
-	syncer := newTestSyncer(t, source, "http://admin.invalid", true, 2, "", 1)
+	syncer := newAccountTestSyncer(t, source, "http://admin.invalid", true, 2, "", 1)
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 2; i++ {
 		if err := syncer.RunOnce(context.Background(), now.Add(time.Duration(i)*5*time.Minute)); err != nil {
@@ -456,7 +461,7 @@ func TestNewAPIRefreshesBillingGroupEveryCycle(t *testing.T) {
 	if logCalls != 2 || pricingCalls != 2 {
 		t.Fatalf("log calls = %d, pricing calls = %d", logCalls, pricingCalls)
 	}
-	state := syncer.state.Rules["account:18/group:24"]
+	state := syncer.state.Rules["account:18"]
 	if state.PriceKey != "gptplus" || state.CandidateCount != 2 {
 		t.Fatalf("unexpected live state: %+v", state)
 	}
@@ -494,18 +499,18 @@ func TestNewAPIFallsBackToBillingLogRatioWhenPricingRequiresLogin(t *testing.T) 
 			updatedRate := 0.0
 			putCount := 0
 			admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var payload groupUpdate
+				var payload accountUpdate
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					t.Fatal(err)
 				}
 				updatedRate = payload.RateMultiplier
-				source.channels[0].Group.RateMultiplier = payload.RateMultiplier
+				source.channels[0].AccountRateMultiplier = payload.RateMultiplier
 				putCount++
 				writeJSON(t, w, map[string]any{"code": 0})
 			}))
 			defer admin.Close()
 
-			syncer := newTestSyncer(t, source, admin.URL, false, 2, "", 1)
+			syncer := newAccountTestSyncer(t, source, admin.URL, false, 2, "", 1)
 			now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 			for i := 0; i < 3; i++ {
 				if err := syncer.RunOnce(context.Background(), now.Add(time.Duration(i)*5*time.Minute)); err != nil {
@@ -513,7 +518,7 @@ func TestNewAPIFallsBackToBillingLogRatioWhenPricingRequiresLogin(t *testing.T) 
 				}
 			}
 
-			state := syncer.state.Rules[channelStateKey(&channel)]
+			state := syncer.state.Rules["account:18"]
 			if logCalls != 3 || pricingCalls != 3 || putCount != 1 || updatedRate != 0.1 {
 				t.Fatalf("log=%d pricing=%d puts=%d rate=%.4f", logCalls, pricingCalls, putCount, updatedRate)
 			}
@@ -549,25 +554,26 @@ func TestNewAPIFallbackRefreshesBillingLogEveryCycle(t *testing.T) {
 	defer upstream.Close()
 
 	channel := testChannel(upstream.URL, 0.1)
+	channel.AccountRateMultiplier = 0.1
 	source := &staticChannelSource{channels: []Channel{channel}}
 	updatedRate := 0.0
 	putCount := 0
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload groupUpdate
+		var payload accountUpdate
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
 		updatedRate = payload.RateMultiplier
-		source.channels[0].Group.RateMultiplier = payload.RateMultiplier
+		source.channels[0].AccountRateMultiplier = payload.RateMultiplier
 		putCount++
 		writeJSON(t, w, map[string]any{"code": 0})
 	}))
 	defer admin.Close()
 
-	syncer := newTestSyncer(t, source, admin.URL, false, 2, "", 1)
+	syncer := newAccountTestSyncer(t, source, admin.URL, false, 2, "", 1)
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
-	syncer.state.Rules[channelStateKey(&channel)] = &RuleState{
-		Identity:              channelIdentity(&channel),
+	syncer.state.Rules["account:18"] = &RuleState{
+		Identity:              channelIdentityForTarget(&channel, "account"),
 		Template:              templateNewAPIRatio,
 		PriceKey:              "gptplus",
 		CandidateUpstreamRate: 0.1,
@@ -580,7 +586,7 @@ func TestNewAPIFallbackRefreshesBillingLogEveryCycle(t *testing.T) {
 		}
 	}
 
-	state := syncer.state.Rules[channelStateKey(&channel)]
+	state := syncer.state.Rules["account:18"]
 	if logCalls != len(ratios) || putCount != 1 || updatedRate != 0.035 {
 		t.Fatalf("log=%d puts=%d rate=%.4f", logCalls, putCount, updatedRate)
 	}
@@ -617,10 +623,10 @@ func TestNewAPIFallbackReplacesStoredCandidateWithLiveRate(t *testing.T) {
 	defer admin.Close()
 
 	channel := testChannel(upstream.URL, 0.5)
-	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 2, "", 1)
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 2, "", 1)
 	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
-	syncer.state.Rules[channelStateKey(&channel)] = &RuleState{
-		Identity:              channelIdentity(&channel),
+	syncer.state.Rules["account:18"] = &RuleState{
+		Identity:              channelIdentityForTarget(&channel, "account"),
 		Template:              templateNewAPIRatio,
 		PriceKey:              "gptplus",
 		CandidateUpstreamRate: 0.2,
@@ -630,7 +636,7 @@ func TestNewAPIFallbackReplacesStoredCandidateWithLiveRate(t *testing.T) {
 	if err := syncer.RunOnce(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
-	state := syncer.state.Rules[channelStateKey(&channel)]
+	state := syncer.state.Rules["account:18"]
 	if logCalls != 1 || putCount != 0 || state.CandidateUpstreamRate != 0.1 || state.CandidateCount != 1 {
 		t.Fatalf("log=%d puts=%d state=%+v", logCalls, putCount, state)
 	}
@@ -675,14 +681,14 @@ func TestNewAPILogRatioDoesNotUpdateWithoutValidGroupRatio(t *testing.T) {
 			defer admin.Close()
 
 			channel := testChannel(upstream.URL, 0.5)
-			syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, "", 1)
+			syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, "", 1)
 			var output bytes.Buffer
 			syncer.logger = log.New(&output, "", 0)
 			if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
 				t.Fatal(err)
 			}
 
-			state := syncer.state.Rules[channelStateKey(&channel)]
+			state := syncer.state.Rules["account:18"]
 			if putCount != 0 || state.CandidateUpstreamRate != 0 || state.CandidateCount != 0 {
 				t.Fatalf("unsafe rate was used, puts=%d state=%+v", putCount, state)
 			}
@@ -708,10 +714,10 @@ func TestNewAPIPricingFailsWithoutLiveBillingLog(t *testing.T) {
 
 	channel := testChannel(upstream.URL, 0.08)
 	source := &staticChannelSource{channels: []Channel{channel}}
-	syncer := newTestSyncer(t, source, "http://admin.invalid", false, 1, "", 1)
+	syncer := newAccountTestSyncer(t, source, "http://admin.invalid", false, 1, "", 1)
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	syncer.state.Rules[channelStateKey(&channel)] = &RuleState{
-		Identity:              channelIdentity(&channel),
+	syncer.state.Rules["account:18"] = &RuleState{
+		Identity:              channelIdentityForTarget(&channel, "account"),
 		Template:              templateNewAPIRatio,
 		PriceKey:              "gptplus",
 		CandidateUpstreamRate: 0.1,
@@ -723,7 +729,7 @@ func TestNewAPIPricingFailsWithoutLiveBillingLog(t *testing.T) {
 	if err := syncer.RunOnce(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
-	state := syncer.state.Rules[channelStateKey(&channel)]
+	state := syncer.state.Rules["account:18"]
 	if state.PriceKey != "gptplus" || state.CandidateUpstreamRate != 0 || state.CandidateCount != 0 {
 		t.Fatalf("stale evidence was preserved: %+v", state)
 	}
@@ -733,7 +739,7 @@ func TestNewAPIPricingFailsWithoutLiveBillingLog(t *testing.T) {
 	}
 }
 
-func TestTemplateChangeDropsOldEvidence(t *testing.T) {
+func TestAccountTemplateRefreshPreservesUsageEvidence(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/usage":
@@ -759,10 +765,10 @@ func TestTemplateChangeDropsOldEvidence(t *testing.T) {
 	defer admin.Close()
 
 	channel := testChannel(upstream.URL, 0.5)
-	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 2, "", 1)
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 2, "", 1)
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	syncer.state.Rules[channelStateKey(&channel)] = &RuleState{
-		Identity:              channelIdentity(&channel),
+	syncer.state.Rules["account:18"] = &RuleState{
+		Identity:              channelIdentityForTarget(&channel, "account"),
 		Template:              templateUsageRatio,
 		PriceKey:              "old-group",
 		Day:                   "2026-07-29",
@@ -776,10 +782,10 @@ func TestTemplateChangeDropsOldEvidence(t *testing.T) {
 	if err := syncer.RunOnce(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
-	state := syncer.state.Rules[channelStateKey(&channel)]
+	state := syncer.state.Rules["account:18"]
 	if putCount != 0 || state.Template != templateNewAPIRatio || state.PriceKey != "gptplus" ||
-		state.HasBaseline || state.Day != "" || state.CandidateUpstreamRate != 0.08 || state.CandidateCount != 1 {
-		t.Fatalf("old template evidence was reused, puts=%d state=%+v", putCount, state)
+		!state.HasBaseline || state.Day != "2026-07-29" || state.CandidateUpstreamRate != 0.08 || state.CandidateCount != 1 {
+		t.Fatalf("usage evidence was not preserved during direct template refresh, puts=%d state=%+v", putCount, state)
 	}
 }
 
@@ -810,10 +816,10 @@ func TestNewAPIGroupChangeDropsOldConfirmation(t *testing.T) {
 	defer admin.Close()
 
 	channel := testChannel(upstream.URL, 0.5)
-	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 2, "", 1)
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 2, "", 1)
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	syncer.state.Rules[channelStateKey(&channel)] = &RuleState{
-		Identity:              channelIdentity(&channel),
+	syncer.state.Rules["account:18"] = &RuleState{
+		Identity:              channelIdentityForTarget(&channel, "account"),
 		Template:              templateNewAPIRatio,
 		PriceKey:              "old-group",
 		CandidateUpstreamRate: 0.08,
@@ -823,7 +829,7 @@ func TestNewAPIGroupChangeDropsOldConfirmation(t *testing.T) {
 	if err := syncer.RunOnce(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
-	state := syncer.state.Rules[channelStateKey(&channel)]
+	state := syncer.state.Rules["account:18"]
 	if putCount != 0 || state.PriceKey != "new-group" || state.CandidateUpstreamRate != 0.08 || state.CandidateCount != 1 {
 		t.Fatalf("old group confirmation was reused, puts=%d state=%+v", putCount, state)
 	}
@@ -843,10 +849,10 @@ func TestNewAPIMissingStoredGroupDropsOldEvidence(t *testing.T) {
 	defer upstream.Close()
 
 	channel := testChannel(upstream.URL, 0.08)
-	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, "http://admin.invalid", false, 2, "", 1)
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, "http://admin.invalid", false, 2, "", 1)
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
-	syncer.state.Rules[channelStateKey(&channel)] = &RuleState{
-		Identity:              channelIdentity(&channel),
+	syncer.state.Rules["account:18"] = &RuleState{
+		Identity:              channelIdentityForTarget(&channel, "account"),
 		Template:              templateNewAPIRatio,
 		PriceKey:              "old-group",
 		CandidateUpstreamRate: 0.08,
@@ -856,7 +862,7 @@ func TestNewAPIMissingStoredGroupDropsOldEvidence(t *testing.T) {
 	if err := syncer.RunOnce(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
-	state := syncer.state.Rules[channelStateKey(&channel)]
+	state := syncer.state.Rules["account:18"]
 	if state.PriceKey != "" || state.CandidateUpstreamRate != 0 || state.CandidateCount != 0 {
 		t.Fatalf("missing stored group evidence was preserved: %+v", state)
 	}
@@ -923,13 +929,13 @@ func TestNewAPIPricingDoesNotGuessWithoutBillingLog(t *testing.T) {
 	defer admin.Close()
 
 	source := &staticChannelSource{channels: []Channel{testChannel(upstream.URL, 0.2)}}
-	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer := newAccountTestSyncer(t, source, admin.URL, false, 1, "", 1)
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	state := syncer.state.Rules["account:18/group:24"]
+	state := syncer.state.Rules["account:18"]
 	if putCount != 0 || state.Template != templateNewAPIRatio || state.PriceKey != "" {
 		t.Fatalf("unexpected result, puts=%d state=%+v", putCount, state)
 	}
@@ -956,7 +962,7 @@ func TestUnavailableNewAPILogIsReportedWithoutChangingRate(t *testing.T) {
 	defer admin.Close()
 
 	source := &staticChannelSource{channels: []Channel{testChannel(upstream.URL, 0.5)}}
-	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer := newAccountTestSyncer(t, source, admin.URL, false, 1, "", 1)
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
@@ -978,7 +984,7 @@ func TestKnownTemplateNetworkFailureIsReported(t *testing.T) {
 	}))
 	defer upstream.Close()
 	source := &staticChannelSource{channels: []Channel{testChannel(upstream.URL, 0.1)}}
-	syncer := newTestSyncer(t, source, "http://admin.invalid", false, 2, "", 1)
+	syncer := newAccountTestSyncer(t, source, "http://admin.invalid", false, 2, "", 1)
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
@@ -1038,6 +1044,38 @@ func TestDuplicateGroupBindingsAreSafelySkipped(t *testing.T) {
 	}
 }
 
+func TestGroupUsageFailureDoesNotProbeUpstream(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	first := testChannel(upstream.URL, 0.1)
+	first.AccountRateMultiplier = 0.1
+	second := first
+	second.AccountID = 19
+	second.AccountName = "second"
+	second.AccountRateMultiplier = 0.2
+	source := &usageChannelSource{
+		staticChannelSource: &staticChannelSource{channels: []Channel{first, second}},
+		usageErr:            fmt.Errorf("usage unavailable"),
+	}
+	syncer := newTestSyncer(t, source, "http://admin.invalid", false, 1, "", 1)
+	var output bytes.Buffer
+	syncer.logger = log.New(&output, "", 0)
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("group worker probed upstream after usage failure: calls=%d", upstreamCalls.Load())
+	}
+	if !strings.Contains(output.String(), "本轮不探测上游") || !strings.Contains(output.String(), "失败") {
+		t.Fatalf("usage failure was not surfaced: %s", output.String())
+	}
+}
+
 func TestSingleAccountGroupInheritsAccountRate(t *testing.T) {
 	channel := testChannel("https://lucen.cc", 0.5)
 	channel.AccountRateMultiplier = 0.085
@@ -1070,6 +1108,100 @@ func TestSingleAccountGroupInheritsAccountRate(t *testing.T) {
 	}
 }
 
+func TestSingleAccountGroupDoesNotProbeAtStartup(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	channel := testChannel(upstream.URL, 0.5)
+	channel.AccountRateMultiplier = 1.0
+	source := &staticChannelSource{channels: []Channel{channel}}
+	var updated groupUpdate
+	var groupPuts atomic.Int32
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/admin/groups/24" {
+			t.Errorf("unexpected admin request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+			t.Errorf("decode update: %v", err)
+		}
+		groupPuts.Add(1)
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	syncer := newTestSyncer(t, source, admin.URL, false, 1, upstream.URL, 0.85)
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if upstreamCalls.Load() != 0 {
+		t.Fatalf("group worker probed upstream during startup: calls=%d", upstreamCalls.Load())
+	}
+	if groupPuts.Load() != 1 || !almostEqual(updated.RateMultiplier, 1.0) {
+		t.Fatalf("saved account rate was not copied exactly: puts=%d update=%+v", groupPuts.Load(), updated)
+	}
+}
+
+func TestSingleAccountGroupWaitsForInvalidAccountRate(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	channel := testChannel(upstream.URL, 0.5)
+	channel.AccountRateMultiplier = 0
+	source := &staticChannelSource{channels: []Channel{channel}}
+	var adminCalls atomic.Int32
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		adminCalls.Add(1)
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	syncer := newTestSyncer(t, source, admin.URL, false, 1, upstream.URL, 0.85)
+	var output bytes.Buffer
+	syncer.logger = log.New(&output, "", 0)
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if upstreamCalls.Load() != 0 || adminCalls.Load() != 0 {
+		t.Fatalf("invalid account rate triggered fallback work: upstream=%d admin=%d", upstreamCalls.Load(), adminCalls.Load())
+	}
+	if !strings.Contains(output.String(), "等待账户倍率同步") {
+		t.Fatalf("missing wait evidence: %s", output.String())
+	}
+}
+
+func TestSingleAccountGroupRejectsRateRoundedToZero(t *testing.T) {
+	channel := testChannel("https://lucen.cc", 0.5)
+	channel.AccountRateMultiplier = 0.00001
+	source := &staticChannelSource{channels: []Channel{channel}}
+	var adminCalls atomic.Int32
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		adminCalls.Add(1)
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	var output bytes.Buffer
+	syncer.logger = log.New(&output, "", 0)
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if adminCalls.Load() != 0 {
+		t.Fatalf("rounded-zero account rate was written: calls=%d", adminCalls.Load())
+	}
+	if !strings.Contains(output.String(), "四舍五入后无效") {
+		t.Fatalf("missing rounded-zero evidence: %s", output.String())
+	}
+}
+
 func TestMultipleAccountGroupUsesHistoryCost(t *testing.T) {
 	first := testChannel("https://one.test", 0.5)
 	first.AccountRateMultiplier = 0.1
@@ -1092,7 +1224,7 @@ func TestMultipleAccountGroupUsesHistoryCost(t *testing.T) {
 	}))
 	defer admin.Close()
 
-	syncer := newTestSyncer(t, source, admin.URL, false, 2, "", 1)
+	syncer := newTestSyncer(t, source, admin.URL, false, 2, "https://one.test", 0.85)
 	syncer.config.HistoryWindow = time.Hour
 	syncer.config.MinHistoryCostUSD = 0.01
 	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
@@ -1188,7 +1320,7 @@ func TestRunOnceChecksDifferentGroupsConcurrently(t *testing.T) {
 	second.AccountName = "second"
 	second.Group.Name = "second"
 	source := &staticChannelSource{channels: []Channel{first, second}}
-	syncer := newTestSyncer(t, source, "http://admin.invalid", false, 1, "", 1)
+	syncer := newAccountTestSyncer(t, source, "http://admin.invalid", false, 1, "", 1)
 	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -1271,6 +1403,13 @@ func newTestSyncer(t *testing.T, source ChannelSource, sub2APIURL string, dryRun
 	}
 	store := StateStore{Path: config.StateFile}
 	return NewSyncer(config, source, http.DefaultClient, store, newState(), log.New(io.Discard, "", 0))
+}
+
+func newAccountTestSyncer(t *testing.T, source ChannelSource, sub2APIURL string, dryRun bool, confirmations int, factorURL string, factor float64) *Syncer {
+	t.Helper()
+	syncer := newTestSyncer(t, source, sub2APIURL, dryRun, confirmations, factorURL, factor)
+	syncer.config.SyncTarget = "account"
+	return syncer
 }
 
 func testChannel(baseURL string, rate float64) Channel {

@@ -482,7 +482,7 @@ func TestDynamicPendingTargetRetriesWithoutValidMemory(t *testing.T) {
 	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, "", 1)
 	syncer.state = state
 	report := newSyncReport("group", []Channel{channel})
-	syncer.publishDynamicGroup(context.Background(), &channel.Group, state.DynamicGroups[24], false, false, "待发布重试", dynamicUsageSummary{}, report)
+	syncer.publishDynamicGroup(context.Background(), &channel.Group, state.DynamicGroups[24], false, "待发布重试", dynamicUsageSummary{}, report)
 
 	if !almostEqual(updated.RateMultiplier, 0.17) || state.DynamicGroups[24].HasPendingTarget {
 		t.Fatalf("pending target was not retried independently of memory: update=%+v state=%+v", updated, state.DynamicGroups[24])
@@ -503,8 +503,7 @@ func TestDynamicBootstrapPreservesPendingRetryFailureEvidence(t *testing.T) {
 	}
 	report := newSyncReport("group", []Channel{channel})
 	plan := dynamicGroupPlan{
-		bindings:   buildGroupBindings([]Channel{channel}),
-		suspicious: map[int64]bool{},
+		bindings: buildGroupBindings([]Channel{channel}),
 	}
 
 	syncer.reportDynamicBootstrap(context.Background(), plan, nil, []int64{24}, 100, report)
