@@ -7,6 +7,11 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\scripts\deploy-common.ps1')
 
 $runtimeRoot = Get-ExtensionRuntimeRoot -Service 'monitoring'
+$elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath -ProbePath $runtimeRoot
+if ($null -ne $elevatedExit) {
+    exit [int]$elevatedExit
+}
+
 $composeEnvPath = Join-Path $runtimeRoot '.env'
 $existingComposeEnv = Read-ExtensionEnvFile -Path $composeEnvPath
 $bindHost = if ($existingComposeEnv['MONITORING_BIND_HOST']) {
@@ -35,9 +40,11 @@ if ($port -notmatch '^\d+$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
 }
 $needsFirewallChange = -not (Test-ExtensionLanFirewallRule -Port ([int]$port) -Enabled $lanBind)
 
-$elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath -Force:$needsFirewallChange
-if ($null -ne $elevatedExit) {
-    exit [int]$elevatedExit
+if ($needsFirewallChange) {
+    $elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath -Force
+    if ($null -ne $elevatedExit) {
+        exit [int]$elevatedExit
+    }
 }
 
 Assert-ExtensionDocker

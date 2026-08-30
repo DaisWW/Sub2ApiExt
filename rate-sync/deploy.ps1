@@ -6,14 +6,14 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\scripts\deploy-common.ps1')
 
-$elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath
+$runtimeRoot = Get-ExtensionRuntimeRoot -Service 'rate-sync'
+$elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath -ProbePath $runtimeRoot
 if ($null -ne $elevatedExit) {
     exit [int]$elevatedExit
 }
 
 Assert-ExtensionDocker
 $sub2api = Get-Sub2ApiDockerContext
-$runtimeRoot = Get-ExtensionRuntimeRoot -Service 'rate-sync'
 $image = 'sub2api-ext-rate-sync:local'
 
 Build-ExtensionImage `

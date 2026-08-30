@@ -7,11 +7,14 @@ function Test-ExtensionAdministrator {
 }
 
 function Test-ExtensionRuntimeWritable {
-    $runtimeBase = Join-Path $env:ProgramData 'Sub2API\extensions'
+    param(
+        [string]$Path = (Join-Path $env:ProgramData 'Sub2API\extensions')
+    )
+
     $probePath = $null
     try {
-        New-Item -ItemType Directory -Path $runtimeBase -Force | Out-Null
-        $probePath = Join-Path $runtimeBase ('.write-probe-{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+        $probePath = Join-Path $Path ('.write-probe-{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
         $stream = [IO.File]::Open($probePath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $stream.Dispose()
         [IO.File]::Delete($probePath)
@@ -25,17 +28,47 @@ function Test-ExtensionRuntimeWritable {
     }
 }
 
+# Windows lets an object owner change its DACL without elevation. Keep this
+# preflight read-only; non-owners are handled conservatively to avoid a late
+# icacls failure after credentials have been written.
+function Test-ExtensionRuntimeOwnedByCurrentUser {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    try {
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        return $ownerSid -eq $identity.User.Value
+    }
+    catch {
+        return $false
+    }
+}
+
 function Invoke-ExtensionElevated {
     param(
         [Parameter(Mandatory = $true)][string]$ScriptPath,
-        [switch]$Force
+        [switch]$Force,
+        [string]$ProbePath
     )
 
     if (Test-ExtensionAdministrator) {
         return $null
     }
-    if (-not $Force -and (Test-ExtensionRuntimeWritable)) {
-        return $null
+    if (-not $Force) {
+        $runtimePath = if ([string]::IsNullOrWhiteSpace($ProbePath)) {
+            Join-Path $env:ProgramData 'Sub2API\extensions'
+        } else {
+            $ProbePath
+        }
+        $runtimeWritable = Test-ExtensionRuntimeWritable -Path $runtimePath
+        # The aggregate entry point probes only the parent; service callers
+        # pass ProbePath so an existing service ACL is checked as well.
+        if ($runtimeWritable -and
+                ([string]::IsNullOrWhiteSpace($ProbePath) -or
+                    (Test-ExtensionRuntimeOwnedByCurrentUser -Path $runtimePath))) {
+            return $null
+        }
     }
 
     $powerShell = Get-Command pwsh.exe -ErrorAction SilentlyContinue
