@@ -147,7 +147,6 @@ function usageKPIs(summary) {
   return [
     ['总 Tokens', formatTokens(summary.total_tokens), '', ''],
     ['请求数', formatCount(summary.requests), '', ''],
-    ['成本', formatUSD(summary.base_cost), '', ''],
     ['费用', formatUSD(summary.total_cost), '', ''],
     ['有效倍率', formatMultiplier(summary.effective_rate_multiplier), '实际成本 / 原始成本', ''],
     ['每百万 Tokens 成本', formatUnitCost(summary.cost_per_million_tokens), '实际成本 / 1M Tokens', '']
