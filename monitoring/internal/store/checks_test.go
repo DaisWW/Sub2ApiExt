@@ -31,7 +31,11 @@ func TestSyncTargetsPersistsSourceUpdatedAt(t *testing.T) {
 		"last_activity_at = CASE",
 		"WHEN EXCLUDED.last_activity_at IS NULL THEN monitoring_targets.last_activity_at",
 		"EXCLUDED.last_activity_at >= monitoring_targets.last_activity_at",
-		"VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$9,$10,$11,$12,$13,NOW())",
+		"VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$9,$10,$11,$12,$13,$14,NOW())",
+		"source_fingerprint = EXCLUDED.source_fingerprint",
+		"EXCLUDED.source_fingerprint IS DISTINCT FROM monitoring_targets.source_fingerprint",
+		"THEN EXCLUDED.source_updated_at",
+		"ELSE monitoring_targets.source_updated_at",
 		"EXCLUDED.last_channel_error_at > EXCLUDED.last_channel_error_resolved_at",
 		"monitoring_targets.last_channel_error_at > monitoring_targets.last_channel_error_resolved_at",
 		"EXCLUDED.source_updated_at IS NULL",
@@ -40,7 +44,6 @@ func TestSyncTargetsPersistsSourceUpdatedAt(t *testing.T) {
 		"monitoring_targets.last_channel_error_resolved_at IS NULL",
 		"monitoring_targets.last_channel_error_at",
 		"source_updated_at = CASE",
-		"WHEN EXCLUDED.source_updated_at IS NULL THEN monitoring_targets.source_updated_at",
 	} {
 		if !strings.Contains(syncTargetsUpsert, fragment) {
 			t.Fatalf("sync targets upsert missing %q", fragment)

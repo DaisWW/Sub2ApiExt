@@ -74,6 +74,48 @@ func TestEffectiveSourceUpdatedAtKeepsLargerSourceChange(t *testing.T) {
 	}
 }
 
+func TestResolveTargetSourceUpdatedAtKeepsWatermarkForUnchangedSource(t *testing.T) {
+	watermark := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	candidate := watermark.Add(time.Hour)
+	state := persistedTargetState{exists: true, fingerprint: sourceFingerprintVersion + ":same", sourceUpdatedAt: &watermark}
+
+	got := resolveTargetSourceUpdatedAt(state, sourceFingerprintVersion+":same", &candidate)
+	if got == nil || !got.Equal(watermark) {
+		t.Fatalf("unchanged source watermark = %v, want %s", got, watermark)
+	}
+}
+
+func TestResolveTargetSourceUpdatedAtAdvancesForChangedSource(t *testing.T) {
+	watermark := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	candidate := watermark.Add(time.Hour)
+	state := persistedTargetState{exists: true, fingerprint: sourceFingerprintVersion + ":old", sourceUpdatedAt: &watermark}
+
+	got := resolveTargetSourceUpdatedAt(state, sourceFingerprintVersion+":new", &candidate)
+	if got == nil || !got.Equal(candidate) {
+		t.Fatalf("changed source watermark = %v, want %s", got, candidate)
+	}
+}
+
+func TestResolveTargetSourceUpdatedAtRebaselinesLegacyTarget(t *testing.T) {
+	watermark := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	candidate := watermark.Add(time.Hour)
+	state := persistedTargetState{exists: true, sourceUpdatedAt: &watermark}
+
+	if got := resolveTargetSourceUpdatedAt(state, "new", &candidate); got != nil {
+		t.Fatalf("legacy target watermark = %v, want nil", got)
+	}
+}
+
+func TestResolveTargetSourceUpdatedAtRebaselinesOlderFingerprintVersion(t *testing.T) {
+	watermark := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	candidate := watermark.Add(time.Hour)
+	state := persistedTargetState{exists: true, fingerprint: "old-version:abc", sourceUpdatedAt: &watermark}
+
+	if got := resolveTargetSourceUpdatedAt(state, accountSourceFingerprint(model.Account{}), &candidate); got != nil {
+		t.Fatalf("older fingerprint watermark = %v, want nil", got)
+	}
+}
+
 func TestAccountChannelErrorResolvedAtUsesSuccessfulEvidence(t *testing.T) {
 	activity := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
 	probeAt := activity.Add(10 * time.Minute)

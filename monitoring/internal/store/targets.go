@@ -2,15 +2,17 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
 const syncTargetsUpsert = `
-INSERT INTO monitoring_targets (target_key, kind, entity_id, name, platform, source_status, probe_enabled, active, last_activity_at, last_channel_error_at, last_channel_error_class, last_channel_error_status_code, last_channel_error_resolved_at, source_updated_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$9,$10,$11,$12,$13,NOW())
+INSERT INTO monitoring_targets (target_key, kind, entity_id, name, platform, source_status, probe_enabled, active, last_activity_at, last_channel_error_at, last_channel_error_class, last_channel_error_status_code, last_channel_error_resolved_at, source_fingerprint, source_updated_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$9,$10,$11,$12,$13,$14,NOW())
 ON CONFLICT (target_key) DO UPDATE SET
     kind = EXCLUDED.kind, entity_id = EXCLUDED.entity_id, name = EXCLUDED.name,
     platform = EXCLUDED.platform, source_status = EXCLUDED.source_status,
@@ -89,16 +91,30 @@ ON CONFLICT (target_key) DO UPDATE SET
         THEN EXCLUDED.last_channel_error_resolved_at
         ELSE monitoring_targets.last_channel_error_resolved_at
     END,
+    source_fingerprint = EXCLUDED.source_fingerprint,
     source_updated_at = CASE
-        WHEN EXCLUDED.source_updated_at IS NULL THEN monitoring_targets.source_updated_at
-        WHEN monitoring_targets.source_updated_at IS NULL
-             OR EXCLUDED.source_updated_at >= monitoring_targets.source_updated_at
-        THEN EXCLUDED.source_updated_at
+        -- A blank fingerprint marks a row from before meaningful source
+        -- identity was introduced. Rebaseline it instead of retaining an
+        -- upstream rate-sync timestamp that would hide valid history.
+        WHEN COALESCE(monitoring_targets.source_fingerprint, '') = '' THEN NULL
+        -- A real source change invalidates old evidence even if its timestamp
+        -- is earlier than a stale value left by a previous write.
+        WHEN EXCLUDED.source_fingerprint IS DISTINCT FROM monitoring_targets.source_fingerprint
+            THEN EXCLUDED.source_updated_at
+        -- Activity and rate-only writes must not advance the meaningful
+        -- watermark while the source identity is unchanged.
         ELSE monitoring_targets.source_updated_at
     END,
     updated_at = NOW()`
 
+type persistedTargetState struct {
+	exists          bool
+	fingerprint     string
+	sourceUpdatedAt *time.Time
+}
+
 // SyncTargets 将本轮发现结果同步到监控自有表，不修改网关路由或账户状态。
+// 保持值签名兼容既有 Store 调用方；本函数内部只更新本轮同步所需的水位。
 func (s *Store) SyncTargets(ctx context.Context, snapshot model.Snapshot) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -108,6 +124,10 @@ func (s *Store) SyncTargets(ctx context.Context, snapshot model.Snapshot) error 
 	if _, err := tx.ExecContext(ctx, `UPDATE monitoring_targets SET active = FALSE, updated_at = NOW()`); err != nil {
 		return err
 	}
+	states, err := loadPersistedTargetStates(ctx, tx)
+	if err != nil {
+		return err
+	}
 	accounts := make(map[int64]*model.Account, len(snapshot.Accounts))
 	for index := range snapshot.Accounts {
 		account := &snapshot.Accounts[index]
@@ -115,23 +135,42 @@ func (s *Store) SyncTargets(ctx context.Context, snapshot model.Snapshot) error 
 			continue
 		}
 		accounts[account.ID] = account
+		if account.SourceFingerprint == "" {
+			account.SourceFingerprint = accountSourceFingerprint(*account)
+		}
+		candidate := accountSourceCandidate(*account)
+		sourceUpdatedAt := resolveTargetSourceUpdatedAt(
+			states[model.TargetKey(model.KindAccount, account.ID)],
+			account.SourceFingerprint, candidate,
+		)
+		account.SourceUpdatedAt = cloneTime(sourceUpdatedAt)
 		if _, err := tx.ExecContext(
 			ctx, syncTargetsUpsert, model.TargetKey(model.KindAccount, account.ID), model.KindAccount,
 			account.ID, account.Name, account.Platform, account.Status, accountHistoryEligible(*account), account.LastActivityAt,
 			account.LastChannelErrorAt, account.LastChannelErrorClass, account.LastChannelErrorStatusCode,
-			accountChannelErrorResolvedAt(*account), accountSourceUpdatedAt(*account),
+			accountChannelErrorResolvedAt(*account), account.SourceFingerprint, sourceUpdatedAt,
 		); err != nil {
 			return fmt.Errorf("upsert account target %d: %w", account.ID, err)
 		}
 	}
-	for _, group := range snapshot.Groups {
+	for index := range snapshot.Groups {
+		group := &snapshot.Groups[index]
 		if !groupIsActive(group.Status) {
 			continue
 		}
+		if group.SourceFingerprint == "" {
+			group.SourceFingerprint = groupSourceFingerprint(*group, accounts)
+		}
+		candidate := groupSourceCandidate(*group, accounts)
+		sourceUpdatedAt := resolveTargetSourceUpdatedAt(
+			states[model.TargetKey(model.KindGroup, group.ID)],
+			group.SourceFingerprint, candidate,
+		)
+		group.SourceUpdatedAt = cloneTime(sourceUpdatedAt)
 		if _, err := tx.ExecContext(
 			ctx, syncTargetsUpsert, model.TargetKey(model.KindGroup, group.ID), model.KindGroup,
-			group.ID, group.Name, group.Platform, group.Status, group.ProbeEnabled, groupLastActivity(group, accounts),
-			nil, "", nil, nil, groupSourceUpdatedAt(group, accounts),
+			group.ID, group.Name, group.Platform, group.Status, group.ProbeEnabled, groupLastActivity(*group, accounts),
+			nil, "", nil, nil, group.SourceFingerprint, sourceUpdatedAt,
 		); err != nil {
 			return fmt.Errorf("upsert group target %d: %w", group.ID, err)
 		}
@@ -139,7 +178,72 @@ func (s *Store) SyncTargets(ctx context.Context, snapshot model.Snapshot) error 
 	return tx.Commit()
 }
 
+func loadPersistedTargetStates(ctx context.Context, tx *sql.Tx) (map[string]persistedTargetState, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT target_key, source_fingerprint, source_updated_at FROM monitoring_targets`)
+	if err != nil {
+		return nil, fmt.Errorf("load target watermarks: %w", err)
+	}
+	defer rows.Close()
+	states := make(map[string]persistedTargetState)
+	for rows.Next() {
+		var key, fingerprint sql.NullString
+		var sourceUpdatedAt sql.NullTime
+		if err := rows.Scan(&key, &fingerprint, &sourceUpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan target watermark: %w", err)
+		}
+		if !key.Valid || strings.TrimSpace(key.String) == "" {
+			continue
+		}
+		state := persistedTargetState{exists: true, fingerprint: strings.TrimSpace(fingerprint.String)}
+		if sourceUpdatedAt.Valid {
+			value := sourceUpdatedAt.Time.UTC()
+			state.sourceUpdatedAt = &value
+		}
+		states[key.String] = state
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read target watermarks: %w", err)
+	}
+	return states, nil
+}
+
+// resolveTargetSourceUpdatedAt separates the persisted meaningful watermark
+// from the upstream row's raw updated_at value. A legacy row is rebaselined on
+// its first fingerprinted sync; an unchanged fingerprint keeps its watermark
+// even when rate-sync has advanced updated_at.
+func resolveTargetSourceUpdatedAt(state persistedTargetState, fingerprint string, candidate *time.Time) *time.Time {
+	if !state.exists {
+		// There is no old evidence to invalidate for a newly discovered target.
+		return cloneTime(candidate)
+	}
+	if !currentSourceFingerprint(state.fingerprint) {
+		// A blank or older-version fingerprint predates the current source
+		// identity rules. Clear it once so an implementation upgrade does not
+		// masquerade as a real source change and hide valid history.
+		return nil
+	}
+	if state.fingerprint == fingerprint {
+		return cloneTime(state.sourceUpdatedAt)
+	}
+	return cloneTime(candidate)
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
+}
+
 func groupSourceUpdatedAt(group model.Group, accounts map[int64]*model.Account) *time.Time {
+	if group.SourceFingerprint != "" {
+		return cloneTime(group.SourceUpdatedAt)
+	}
+	return groupSourceCandidate(group, accounts)
+}
+
+func groupSourceCandidate(group model.Group, accounts map[int64]*model.Account) *time.Time {
 	activity := groupLastActivity(group, accounts)
 	var latest *time.Time
 	if group.UpdatedAt != nil {
@@ -150,7 +254,7 @@ func groupSourceUpdatedAt(group model.Group, accounts map[int64]*model.Account) 
 		if !ok || account == nil {
 			continue
 		}
-		accountUpdatedAt := accountSourceUpdatedAt(*account)
+		accountUpdatedAt := accountSourceCandidate(*account)
 		if accountUpdatedAt == nil {
 			continue
 		}
@@ -184,6 +288,13 @@ func effectiveSourceUpdatedAt(updatedAt, activity *time.Time) *time.Time {
 }
 
 func accountSourceUpdatedAt(account model.Account) *time.Time {
+	if account.SourceFingerprint != "" {
+		return cloneTime(account.SourceUpdatedAt)
+	}
+	return accountSourceCandidate(account)
+}
+
+func accountSourceCandidate(account model.Account) *time.Time {
 	return effectiveSourceUpdatedAt(account.UpdatedAt, account.LastActivityAt)
 }
 
@@ -214,11 +325,12 @@ func accountChannelErrorResolvedAt(account model.Account) *time.Time {
 }
 
 func sourceUpdateResolvesChannelError(account model.Account) bool {
-	if account.UpdatedAt == nil || account.LastChannelErrorAt == nil ||
-		!account.UpdatedAt.After(*account.LastChannelErrorAt) {
+	source := accountSourceUpdatedAt(account)
+	if source == nil || account.LastChannelErrorAt == nil ||
+		!source.After(*account.LastChannelErrorAt) {
 		return true
 	}
-	return account.UpdatedAt.Sub(*account.LastChannelErrorAt) > model.SourceUpdateActivityGrace
+	return source.Sub(*account.LastChannelErrorAt) > model.SourceUpdateActivityGrace
 }
 
 func groupLastActivity(group model.Group, accounts map[int64]*model.Account) *time.Time {

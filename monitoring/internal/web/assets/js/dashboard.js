@@ -10,8 +10,8 @@ import {
   formatPct,
   formatTime,
   normalizeStatus,
+  slowLatencyThresholdMs,
   statusClass,
-  statusLabel,
   toast
 } from './shared.js';
 
@@ -164,11 +164,14 @@ export class DashboardPanel {
     const firstByte = stats.first_byte || {};
     const latency = stats.latency || {};
     const status = normalizeStatus(item.status);
+    const displayStatus = displayHealthStatus(item, status);
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
-    const availabilityLabel = hasSamples ? `${samples} 次样本` : '暂无真实请求';
+    const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
-    const availabilityStatus = item.kind === 'group' && status === 'degraded' ? '' : status;
+    const availabilityStatus = displayStatus === 'degraded'
+      ? 'degraded'
+      : item.kind === 'group' && status === 'degraded' ? '' : status;
     const availabilityTone = hasSamples ? availabilityClass(stats.availability, availabilityStatus) : 'neutral';
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
@@ -183,22 +186,22 @@ export class DashboardPanel {
       ? `<div class="target-note">${escapeHTML(targetNote)}</div>`
       : '';
     return `
-      <article class="target-card target-${status}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
+      <article class="target-card target-${displayStatus}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
         role="button" tabindex="0" aria-label="查看 ${escapeHTML(item.name)} 的历史记录">
         <div class="target-head">
           <div class="target-copy">
             <div class="target-kind">${item.kind === 'group' ? 'GROUP' : 'ACCOUNT'}</div>
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
-            <div class="target-platform">${escapeHTML(item.platform || 'mixed')}${item.stale ? `<span class="stale-label">● ${escapeHTML(staleLabel(item, status))}</span>` : ''}</div>
+            <div class="target-platform">${escapeHTML(item.platform || 'mixed')}</div>
             ${note}
           </div>
           <div class="target-head-meta">
             ${currentRate ? `<span class="current-rate" title="${currentRateTitle}">${currentRateLabel} ${currentRate}</span>` : ''}
-            <span class="status-badge ${statusClass(status)}">${targetStatusLabel(item, status)}</span>
+            <span class="status-badge ${statusClass(displayStatus)}">${targetStatusLabel(displayStatus)}</span>
           </div>
         </div>
         <div class="availability">
-          <span class="availability-label">24 小时窗口观测通过率 · ${availabilityLabel}</span>
+          <span class="availability-label">24 小时窗口观测通过率${availabilityDetail}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
         </div>
         <div class="target-live" title="${escapeHTML(activeUsersTitle)}">
@@ -257,60 +260,136 @@ function formatCurrentRate(value) {
   return Number.isFinite(rate) ? rate.toFixed(4) : '';
 }
 
+function displayHealthStatus(item, status, sampleLatencyMs = null, sampleCheckedAt = null) {
+  if (status === 'failed' || status === 'error') return 'failed';
+  if (status === 'disabled') return 'failed';
+  if (status === 'unknown') {
+    if (sampleCheckedAt) {
+      const sampleAt = Date.parse(String(sampleCheckedAt));
+      const triggerAt = Date.parse(String(item?.recovery_trigger_at || ''));
+      if (Number.isFinite(sampleAt) && Number.isFinite(triggerAt)) {
+        return sampleAt >= triggerAt ? 'failed' : 'operational';
+      }
+      return String(item?.source_status || '').trim().toLowerCase() === 'error'
+        ? 'failed'
+        : 'operational';
+    }
+    // An active target is presumed usable until a real channel error says
+    // otherwise. Keep the raw state in the API, but do not expose a fourth
+    // visual state in the dashboard.
+    return String(item?.source_status || '').trim().toLowerCase() === 'error' || hasRecoveryTrigger(item)
+      ? 'failed'
+      : 'operational';
+  }
+  const latency = Number(sampleLatencyMs);
+  if (Number.isFinite(latency) && latency > 0) {
+    return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
+  }
+  // A card can use its latest/median latency as a fallback. A historical
+  // segment without its own latency must keep its recorded status instead of
+  // repainting the whole timeline with the card's current median.
+  if (!sampleCheckedAt && isSlowTarget(item, status)) return 'degraded';
+  // For an individual account, a raw degraded result already means the
+  // account is usable but slow. A group may use `degraded` only for member
+  // routing risk; that case stays green until a measured usable path is slow.
+  if (status === 'degraded' && item?.kind !== 'group') return 'degraded';
+  // Group aggregation can report a routing risk as `degraded` even when the
+  // observed response is fast. Keep the three health colors tied to latency:
+  // a usable, fast route remains green and the explanation stays in the note.
+  return 'operational';
+}
+
+function isSlowTarget(item, status = normalizeStatus(item?.status)) {
+  const latestLatency = Number(item?.latest_latency_ms);
+  if (isSuccessfulStatus(status) && Number.isFinite(latestLatency) && latestLatency > 0) {
+    return latestLatency >= slowLatencyThresholdMs;
+  }
+  const samples = Array.isArray(item?.recent_samples) ? item.recent_samples : [];
+  for (let index = samples.length - 1; index >= 0; index -= 1) {
+    if (!isSuccessfulStatus(samples[index]?.status)) continue;
+    const sampleLatency = Number(samples[index]?.latency_ms);
+    if (Number.isFinite(sampleLatency) && sampleLatency > 0) {
+      return sampleLatency >= slowLatencyThresholdMs;
+    }
+  }
+  const statsLatency = Number(item?.stats?.latency?.median_ms);
+  return Number.isFinite(statsLatency) && statsLatency > 0 && statsLatency >= slowLatencyThresholdMs;
+}
+
+function isSuccessfulStatus(status) {
+  const normalized = normalizeStatus(status);
+  return normalized === 'operational' || normalized === 'degraded';
+}
+
+function healthLabel(status) {
+  if (status === 'failed' || status === 'error') return '错误/不可用';
+  if (status === 'degraded') return '可用但延迟高';
+  return '可用';
+}
+
+function statusTone(status) {
+  if (status === 'failed' || status === 'error') return 'bad';
+  if (status === 'degraded') return 'warn';
+  return 'ok';
+}
+
 function renderStatusHistory(samples, item) {
-  const recent = samples.slice(-24);
+  const recent = Array.isArray(samples) ? samples.slice(-24) : [];
+  const currentStatus = normalizeStatus(item?.status);
+  const currentDisplayStatus = displayHealthStatus(item, currentStatus);
   const gatewayError = String(item?.source_status || '').trim().toLowerCase() === 'error';
   const recoveryPending = hasRecoveryTrigger(item);
-  const pendingClass = recoveryPending ? 'pending-recovery' : 'idle';
-  const pendingLabel = recoveryPending
-    ? '渠道报错，等待恢复探测'
-    : gatewayError
-      ? '账户处于错误状态，等待真实请求或新的渠道错误'
-      : '暂无真实请求，等待渠道错误或下一次请求确认';
-  const empty = Array.from({ length: 24 - recent.length }, () => `<i class="${pendingClass}" role="img" aria-label="${escapeHTML(pendingLabel)}" title="${escapeHTML(pendingLabel)}"></i>`);
+  const emptyTone = recoveryPending ? 'bad' : statusTone(currentDisplayStatus);
+  const emptyLabel = recoveryPending
+    ? '错误/不可用 · 等待恢复探测'
+    : `${healthLabel(currentDisplayStatus)} · ${sourceLabel(item?.latest_source)}`;
+  const empty = Array.from({ length: Math.max(0, 24 - recent.length) }, () => `<i class="${emptyTone}" role="img" aria-label="${escapeHTML(emptyLabel)}" title="${escapeHTML(emptyLabel)}"></i>`);
   const items = recent.map((sample) => {
-    const degraded = sample.status === 'degraded';
-    const successful = sample.status === 'operational' || sample.status === 'degraded';
-    const failed = sample.status === 'failed' || sample.status === 'error';
-    const carried = Boolean(sample.carried_from) && (failed || successful);
-    const label = carried
-      ? `截至 ${formatTime(sample.checked_at)} · 无新请求，沿用 ${formatTime(sample.carried_from)} 的${statusLabel(sample.status)}状态 · ${sourceLabel(sample.source)}`
-      : failed || successful
-        ? `${formatTime(sample.checked_at)} · ${statusLabel(sample.status)} · ${sourceLabel(sample.source)}`
-        : `${formatTime(sample.checked_at)} · ${pendingLabel}`;
-    const tone = degraded ? 'warn' : successful ? 'ok' : failed ? 'bad' : pendingClass;
-    const classes = [tone, carried ? 'carried' : ''].filter(Boolean).join(' ');
-    return `<i${classes ? ` class="${classes}"` : ''} role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
+    const sampleStatus = normalizeStatus(sample?.status);
+    const successful = sampleStatus === 'operational' || sampleStatus === 'degraded';
+    const failed = sampleStatus === 'failed' || sampleStatus === 'error';
+    const displaySampleStatus = displayHealthStatus(
+      item, sampleStatus, sample?.latency_ms, sample?.checked_at
+    );
+    const label = failed || successful
+      ? `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus)} · ${sourceLabel(sample?.source)}`
+      : `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus)}`;
+    const tone = statusTone(displaySampleStatus);
+    return `<i class="${tone}" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
   });
   const caption = statusHistoryCaption(recent, item, gatewayError, recoveryPending);
   return `<div class="status-history-block">
     <div class="status-history" aria-label="24 小时内 24 段状态轨迹">${empty.concat(items).join('')}</div>
+    ${statusHistoryLegend()}
     <span class="status-history-caption">${escapeHTML(caption)}</span>
   </div>`;
 }
 
+function statusHistoryLegend() {
+  return `<div class="status-history-legend" aria-label="状态图例">
+    <span><i class="ok"></i>可用</span>
+    <span><i class="warn"></i>可用但延迟高</span>
+    <span><i class="bad"></i>错误/不可用</span>
+  </div>`;
+}
+
 function statusHistoryCaption(samples, item, gatewayError, recoveryPending) {
-  const observedCount = samples.filter((sample) => ['operational', 'degraded', 'failed', 'error'].includes(sample.status)).length;
-  const unknownCount = Math.max(0, 24 - observedCount);
   if (recoveryPending) {
     return recoveryProbeFailed(item)
       ? '恢复失败 · 按退避策略重试'
       : '等待恢复验证 · 仅渠道错误触发';
   }
-  if (gatewayError) {
-    return '等待新的渠道证据 · 当前不探测';
+  if (gatewayError && displayHealthStatus(item, normalizeStatus(item?.status)) === 'failed') {
+    return '渠道错误 · 等待新的恢复证据';
   }
-  if (observedCount === 0) {
-    return item?.kind === 'group' ? '24 段未观测 · 等待真实请求或候选检查' : '24 段未观测 · 无请求不探测';
-  }
-  if (samples.some((sample) => sample.carried_from)) return '无新请求 · 沿用最近状态';
-  if (item?.kind === 'account' && samples.some((sample) => sample.status === 'failed' || sample.status === 'error')) {
+  if (item?.kind === 'account' && ['failed', 'error'].includes(normalizeStatus(item?.status)) &&
+      samples.some((sample) => ['failed', 'error'].includes(normalizeStatus(sample?.status)))) {
     return '探测失败 · 等待新的渠道证据';
   }
-  if (unknownCount > 0) return `已观测 ${observedCount} 段 · 其余 ${unknownCount} 段未观测`;
   if (item?.latest_source === 'history') return '真实请求证据';
   if (item?.latest_source === 'probe') return '主动探测证据';
-  return '已有观测';
+  if (item?.latest_source === 'aggregate') return '账户候选分析';
+  return '当前状态';
 }
 
 function renderMetric(label, value, help = '') {
@@ -323,64 +402,44 @@ function sourceLabel(source) {
   if (source === 'aggregate') return '分组候选检查';
   if (source === 'probe') return '主动探测';
   if (source === 'request_error') return '真实请求错误';
-  if (source === 'cache') return '沿用状态';
-  return '暂无请求';
+  if (source === 'cache') return '缓存证据';
+  return '当前状态';
 }
 
-function targetStatusLabel(item, status) {
-  const gatewayError = String(item.source_status || '').trim().toLowerCase() === 'error';
-  const recoveryTrigger = hasRecoveryTrigger(item);
-  if (recoveryProbeFailed(item, status)) return '恢复失败';
-  if (recoveryTrigger && (status === 'failed' || status === 'error')) return '等待恢复';
-  if (recoveryTrigger && status === 'unknown') return '等待恢复';
-  if (gatewayError && status === 'operational' && item.latest_source === 'probe') return '已验证恢复';
-  if (gatewayError && status === 'operational' && item.latest_source === 'history') return '请求已恢复';
-  if (gatewayError && !recoveryTrigger && (status === 'failed' || status === 'error')) return '等待渠道证据';
-  if (gatewayError && status === 'unknown') return recoveryTrigger ? '等待恢复' : '等待渠道证据';
-  if (status === 'unknown') return item.last_checked_at ? '待真实请求确认' : '暂无流量';
-  if ((status === 'failed' || status === 'error') && item.latest_source === 'probe' && !recoveryTrigger) return '历史探测失败';
-  if (item.kind !== 'group') return statusLabel(status);
-  if (status === 'degraded' && item.latest_source === 'aggregate' && isPendingAggregateFailure(item.latest_message)) {
-    return '候选待确认';
-  }
-  if ((status === 'failed' || status === 'error') && item.latest_source === 'aggregate') return '候选不可用';
-  return statusLabel(status);
+function displayEvidenceMessage(item, value) {
+  const message = String(value || '').trim();
+  if (item?.kind !== 'group' || !message) return message;
+  // Unknown-member counts remain available in the API for routing decisions,
+  // but they are not a fourth health state in the dashboard copy.
+  const cleaned = message
+    .replace(/[，；]\s*待验证\s*\d+/g, '')
+    .replace(/[，；]\s*\d+\s*个账户待验证/g, '')
+    .replace(/\s*；\s*；/g, '；')
+    .replace(/^[，；]|[，；]$/g, '')
+    .trim();
+  return cleaned || '当前状态';
 }
 
-function isPendingAggregateFailure(message) {
-  return String(message || '').includes('等待下一轮确认');
-}
-
-function staleLabel(item, status) {
-  const gatewayError = String(item.source_status || '').trim().toLowerCase() === 'error';
-  if (hasRecoveryTrigger(item)) {
-    if (recoveryProbeFailed(item, status)) return '恢复探测退避中';
-    return status === 'operational' ? '已验证恢复' : '等待首次恢复探测';
-  }
-  if (gatewayError) {
-    if (status === 'operational' && (item.latest_source === 'probe' || item.latest_source === 'history')) return '已验证恢复';
-    return '等待真实请求或渠道错误';
-  }
-  if ((status === 'failed' || status === 'error') && item.latest_source === 'probe') return '历史探测失败 · 当前不探测';
-  if (status === 'failed' || status === 'error') return '等待恢复确认';
-  if (item.latest_source === 'probe') return '主动探测已确认';
-  if (item.latest_source === 'history') return '真实请求已确认';
-  return '暂无请求';
+function targetStatusLabel(displayStatus) {
+  if (displayStatus === 'failed') return '错误/不可用';
+  if (displayStatus === 'degraded') return '可用但延迟高';
+  return '可用';
 }
 
 function evidenceNote(item, status) {
-  if (item.latest_message) return item.latest_message;
+  const message = displayEvidenceMessage(item, item?.latest_message);
+  // Do not put the empty-window implementation detail on every card. The
+  // health color already represents the current baseline; risk/error details
+  // remain visible when they carry actionable information.
   const gatewayError = String(item.source_status || '').trim().toLowerCase() === 'error';
   const recoveryTrigger = hasRecoveryTrigger(item);
+  if (message && (status !== 'unknown' || gatewayError || recoveryTrigger)) return message;
   if (recoveryProbeFailed(item, status)) return '恢复探测失败，按退避策略重试';
   if (recoveryTrigger && (status === 'failed' || status === 'error' || status === 'unknown')) return '渠道报错，等待恢复探测';
   if (gatewayError && status === 'operational' && item.latest_source === 'probe') return '已由主动探测确认恢复，等待网关状态同步';
   if (gatewayError && status === 'operational' && item.latest_source === 'history') return '已由真实请求确认恢复，等待网关状态同步';
   if (gatewayError && !recoveryTrigger && (status === 'failed' || status === 'error' || status === 'unknown')) {
     return '账户处于错误状态；没有新的渠道错误，暂不发送上游请求';
-  }
-  if (status === 'unknown') {
-    return item.last_checked_at ? '暂无新的真实请求，沿用最近状态' : '暂无真实请求；仅在渠道报错后主动探测';
   }
   if (status === 'operational' && item.latest_source === 'history') return '已由真实请求确认可用';
   if (status === 'operational' && item.latest_source === 'probe') return '已由主动探测确认恢复';
@@ -392,13 +451,13 @@ function evidenceNote(item, status) {
 function evidenceFooter(item, status) {
   if (!item.latest_source) {
     return String(item.source_status || '').trim().toLowerCase() === 'error'
-      ? (hasRecoveryTrigger(item) ? '等待恢复探测 · 尚无恢复证据' : '等待真实请求或渠道错误 · 当前不探测')
-      : '暂无真实请求 · 错误后才主动探测';
+      ? (hasRecoveryTrigger(item) ? '等待恢复探测' : '等待新的渠道错误')
+      : '错误后才主动探测';
   }
   if (recoveryProbeFailed(item, status)) {
     return `恢复失败 · 主动探测 · ${formatTime(item.last_checked_at)}`;
   }
-  if (hasRecoveryTrigger(item)) return `等待恢复探测 · 尚无恢复证据`;
+  if (hasRecoveryTrigger(item)) return '等待恢复探测';
   if ((status === 'failed' || status === 'error') && item.latest_source === 'probe' && !hasRecoveryTrigger(item)) {
     return `历史探测失败 · 当前不重试 · ${formatTime(item.last_checked_at)}`;
   }

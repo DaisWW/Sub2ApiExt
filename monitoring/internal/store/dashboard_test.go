@@ -175,6 +175,7 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"eligible_usage AS MATERIALIZED",
 		"generate_series(0, 23)",
 		"PARTITION BY target_key, bucket_index",
+		"'latency_ms', recent_ranked.latency_ms",
 		"ORDER BY checked_at DESC",
 		"CASE WHEN source = 'history' THEN 0 WHEN source = 'probe' THEN 1 ELSE 2 END",
 		"COALESCE(recent_ranked.status, 'unknown')",
@@ -238,8 +239,9 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	if strings.Contains(dashboardQuery, "AND NOT (") {
 		t.Fatal("a newer successful request must be allowed to prove that a group still has a working route")
 	}
-	if strings.Contains(dashboardQuery, "FROM monitoring_targets targets\n\tCROSS JOIN bounds\n\tCROSS JOIN bucket_positions") {
-		t.Fatal("error accounts must remain visible for recovery status")
+	if !strings.Contains(dashboardQuery, "WHERE active = TRUE\n      AND (") ||
+		!strings.Contains(dashboardQuery, "WHERE t.active = TRUE\n  AND (") {
+		t.Fatal("dashboard target visibility filter is missing")
 	}
 	selectStart := strings.Index(dashboardQuery, "SELECT t.target_key")
 	if selectStart < 0 {
@@ -296,7 +298,7 @@ func TestCarryForwardStatusSamples(t *testing.T) {
 	carryForwardStatusSamples(samples)
 
 	if samples[0].Status != model.StatusUnknown || samples[0].CarriedFrom != nil {
-		t.Fatalf("leading sample should remain waiting before the first observation: %+v", samples[0])
+		t.Fatalf("leading sample should remain unknown before the first observation: %+v", samples[0])
 	}
 	if samples[1].CarriedFrom != nil {
 		t.Fatalf("observed sample must not be marked as carried: %+v", samples[1])
@@ -325,16 +327,20 @@ func TestCarryForwardStatusSamplesLeavesUnknownWithoutPriorState(t *testing.T) {
 	}
 }
 
-func TestCarryForwardTargetStatusDoesNotMaskOlderWindow(t *testing.T) {
+func TestCarryForwardTargetStatusUsesEvidenceOlderThanWindow(t *testing.T) {
 	windowStart := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	samples := []model.StatusSample{
 		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(time.Hour)},
 		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(2 * time.Hour)},
 	}
-	carryForwardTargetStatus(samples, model.StatusOperational, "probe", windowStart.Add(-time.Minute), windowStart)
+	checkedAt := windowStart.Add(-time.Minute)
+	carryForwardTargetStatus(samples, model.StatusOperational, "probe", checkedAt)
 	for index, sample := range samples {
-		if sample.Status != model.StatusUnknown || sample.CarriedFrom != nil {
-			t.Fatalf("sample %d should remain unknown for older evidence: %+v", index, sample)
+		if sample.Status != model.StatusOperational || sample.Source != "probe" {
+			t.Fatalf("sample %d should carry older evidence: %+v", index, sample)
+		}
+		if sample.CarriedFrom == nil || !sample.CarriedFrom.Equal(checkedAt) {
+			t.Fatalf("sample %d has wrong carried origin: %+v", index, sample)
 		}
 	}
 }
@@ -346,13 +352,66 @@ func TestCarryForwardTargetStatusUsesEvidenceInsideWindow(t *testing.T) {
 		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(time.Hour)},
 		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(2 * time.Hour)},
 	}
-	carryForwardTargetStatus(samples, model.StatusOperational, "probe", checkedAt, windowStart)
-	if samples[0].Status != model.StatusUnknown {
-		t.Fatalf("sample before evidence should remain unknown: %+v", samples[0])
+	carryForwardTargetStatus(samples, model.StatusOperational, "probe", checkedAt)
+	if samples[0].Status != model.StatusUnknown || samples[0].CarriedFrom != nil {
+		t.Fatalf("bucket before in-window evidence should remain empty: %+v", samples[0])
 	}
 	if samples[1].Status != model.StatusOperational || samples[1].CarriedFrom == nil ||
 		!samples[1].CarriedFrom.Equal(checkedAt) {
-		t.Fatalf("sample after evidence was not carried: %+v", samples[1])
+		t.Fatalf("bucket after in-window evidence was not carried: %+v", samples[1])
+	}
+}
+
+func TestCarryForwardTargetStatusPreservesRealSamples(t *testing.T) {
+	checkedAt := time.Date(2026, 8, 27, 2, 0, 0, 0, time.UTC)
+	realAt := checkedAt.Add(-time.Hour)
+	samples := []model.StatusSample{
+		{Status: model.StatusFailed, CheckedAt: realAt, Source: "probe"},
+		{Status: model.StatusUnknown, CheckedAt: checkedAt.Add(time.Hour)},
+	}
+	carryForwardTargetStatus(samples, model.StatusOperational, "history", checkedAt)
+	if samples[0].Status != model.StatusFailed || samples[0].Source != "probe" || samples[0].CarriedFrom != nil {
+		t.Fatalf("real sample was overwritten: %+v", samples[0])
+	}
+	if samples[1].Status != model.StatusOperational || samples[1].Source != "history" || samples[1].CarriedFrom == nil ||
+		!samples[1].CarriedFrom.Equal(checkedAt) {
+		t.Fatalf("empty sample was not carried: %+v", samples[1])
+	}
+}
+
+func TestCarryForwardTargetStatusPreservesEarlierCarriedSamples(t *testing.T) {
+	checkedAt := time.Date(2026, 8, 27, 2, 0, 0, 0, time.UTC)
+	carriedAt := checkedAt.Add(-2 * time.Hour)
+	samples := []model.StatusSample{
+		{Status: model.StatusFailed, Source: "probe", CheckedAt: checkedAt.Add(-time.Hour), CarriedFrom: &carriedAt},
+		{Status: model.StatusOperational, Source: "history", CheckedAt: checkedAt.Add(time.Hour)},
+	}
+	carryForwardTargetStatus(samples, model.StatusOperational, "history", checkedAt)
+	if samples[0].Status != model.StatusFailed || samples[0].Source != "probe" || samples[0].CarriedFrom == nil ||
+		!samples[0].CarriedFrom.Equal(carriedAt) {
+		t.Fatalf("earlier carried sample was overwritten: %+v", samples[0])
+	}
+	if samples[1].Status != model.StatusOperational || samples[1].CarriedFrom != nil {
+		t.Fatalf("real sample was unexpectedly marked carried: %+v", samples[1])
+	}
+}
+
+func TestCarryForwardTargetStatusDoesNotPaintBeforeFailure(t *testing.T) {
+	checkedAt := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	samples := []model.StatusSample{
+		{Status: model.StatusUnknown, CheckedAt: checkedAt.Add(-2 * time.Hour)},
+		{Status: model.StatusUnknown, CheckedAt: checkedAt.Add(-time.Hour)},
+		{Status: model.StatusFailed, Source: "aggregate", CheckedAt: checkedAt},
+		{Status: model.StatusUnknown, CheckedAt: checkedAt.Add(time.Hour)},
+	}
+	carryForwardStatusSamples(samples)
+	carryForwardTargetStatus(samples, model.StatusFailed, "aggregate", checkedAt)
+	if samples[0].Status != model.StatusUnknown || samples[1].Status != model.StatusUnknown {
+		t.Fatalf("buckets before failure should not be painted failed: %+v", samples)
+	}
+	if samples[3].Status != model.StatusFailed || samples[3].CarriedFrom == nil ||
+		!samples[3].CarriedFrom.Equal(checkedAt) {
+		t.Fatalf("bucket after failure was not carried: %+v", samples[3])
 	}
 }
 

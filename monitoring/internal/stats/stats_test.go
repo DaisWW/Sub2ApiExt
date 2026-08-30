@@ -51,8 +51,27 @@ func TestAggregateGroup(t *testing.T) {
 		{Status: model.StatusFailed, LatencyMs: intPtr(90)},
 	}
 	got := AggregateGroup("group:3", group, results, now)
-	if got.Status != model.StatusDegraded || got.LatencyMs == nil || *got.LatencyMs != 50 || got.CheckedAt != now {
+	if got.Status != model.StatusDegraded || got.LatencyMs == nil || *got.LatencyMs != 10 || got.CheckedAt != now {
 		t.Fatalf("unexpected group result: %+v", got)
+	}
+}
+
+func TestAggregateGroupUsesHealthyLatencyForMixedRoute(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{ID: 3, Name: "primary"}
+	results := []model.ProbeResult{
+		{Status: model.StatusOperational, LatencyMs: intPtr(1200), FirstByteMs: intPtr(400)},
+		{Status: model.StatusFailed, LatencyMs: intPtr(30000)},
+	}
+	got := AggregateGroup("group:3", group, results, now)
+	if got.Status != model.StatusDegraded {
+		t.Fatalf("mixed group status = %q, want degraded risk", got.Status)
+	}
+	if got.LatencyMs == nil || *got.LatencyMs != 1200 {
+		t.Fatalf("mixed group latency = %+v, want healthy path latency", got.LatencyMs)
+	}
+	if got.FirstByteMs == nil || *got.FirstByteMs != 400 {
+		t.Fatalf("mixed group first-byte latency = %+v, want healthy path latency", got.FirstByteMs)
 	}
 }
 

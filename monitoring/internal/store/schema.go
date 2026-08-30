@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS monitoring_targets (
 	last_channel_error_class TEXT NOT NULL DEFAULT '',
 	last_channel_error_status_code INTEGER,
 	last_channel_error_resolved_at TIMESTAMPTZ,
+	source_fingerprint TEXT NOT NULL DEFAULT '',
 	source_updated_at TIMESTAMPTZ,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -32,7 +33,15 @@ ALTER TABLE monitoring_targets
 ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS last_channel_error_resolved_at TIMESTAMPTZ;
 ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS source_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS source_updated_at TIMESTAMPTZ;
+-- Rows created before source fingerprints existed carried an upstream
+-- updated_at watermark that may have been changed by billing-only writes.
+-- Rebaseline those rows once; the next cycle stores the meaningful identity.
+UPDATE monitoring_targets
+SET source_updated_at = NULL
+WHERE source_fingerprint = '';
 CREATE TABLE IF NOT EXISTS monitoring_checks (
     id BIGSERIAL PRIMARY KEY,
     target_key TEXT NOT NULL,

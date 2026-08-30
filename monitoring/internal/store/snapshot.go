@@ -48,6 +48,7 @@ WITH recent_account_usage AS MATERIALIZED (
 )
 SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.credentials,
        a.updated_at,
+       persisted_target.source_fingerprint, persisted_target.source_updated_at,
        a.proxy_id, p.protocol, p.host, p.port, p.username, p.password, p.status,
        recent.created_at, recent.model,
        last_probe.checked_at, last_probe.status, last_probe.error_class, last_probe.status_code,
@@ -141,6 +142,8 @@ type snapshotRow struct {
 	proxyPassword, proxyStatus            sql.NullString
 	proxyPort                             sql.NullInt64
 	updatedAt, lastActivity, lastProbe    sql.NullTime
+	persistedSourceFingerprint            sql.NullString
+	persistedSourceUpdatedAt              sql.NullTime
 	lastProbeStatus, lastProbeErrorClass  sql.NullString
 	lastProbeStatusCode                   sql.NullInt64
 	lastChannelError                      sql.NullTime
@@ -244,6 +247,7 @@ func (r *snapshotRow) scan(rows *sql.Rows) error {
 	return rows.Scan(
 		&r.id, &r.name, &r.platform, &r.accountType, &r.status, &r.schedulable, &r.accountPriority, &r.credentials,
 		&r.updatedAt,
+		&r.persistedSourceFingerprint, &r.persistedSourceUpdatedAt,
 		&r.proxyID, &r.proxyProtocol, &r.proxyHost, &r.proxyPort, &r.proxyUser, &r.proxyPassword,
 		&r.proxyStatus, &r.lastActivity, &r.recentModel, &r.lastProbe,
 		&r.lastProbeStatus, &r.lastProbeErrorClass, &r.lastProbeStatusCode,
@@ -320,9 +324,6 @@ func (r snapshotRow) account() (*model.Account, error) {
 		value := int(r.lastChannelErrorCode.Int64)
 		account.LastChannelErrorStatusCode = &value
 	}
-	if alertStateCurrentForSource(r.alertStateUpdatedAt, effectiveUpdatedAt, r.lastActivity) {
-		account.ProbeFailureStreak = nullInt(r.probeFailureStreak)
-	}
 	if r.recentModel.Valid {
 		account.RecentModel = strings.TrimSpace(r.recentModel.String)
 	}
@@ -330,7 +331,53 @@ func (r snapshotRow) account() (*model.Account, error) {
 	if r.proxyID.Valid {
 		applyProxy(account, r)
 	}
+	account.SourceFingerprint = accountSourceFingerprint(*account)
+	account.SourceUpdatedAt = resolveSnapshotSourceUpdatedAtForFingerprint(
+		r.persistedSourceFingerprint, r.persistedSourceUpdatedAt,
+		account.SourceFingerprint, accountSourceCandidate(*account),
+	)
+	if alertStateCurrentForSource(
+		r.alertStateUpdatedAt, nullableTime(account.SourceUpdatedAt), r.lastActivity,
+	) {
+		account.ProbeFailureStreak = nullInt(r.probeFailureStreak)
+	}
 	return account, nil
+}
+
+func resolveSnapshotSourceUpdatedAtForFingerprint(
+	persistedFingerprint sql.NullString,
+	persistedSourceUpdatedAt sql.NullTime,
+	currentFingerprint string,
+	candidate *time.Time,
+) *time.Time {
+	if !persistedFingerprint.Valid {
+		return cloneTime(candidate)
+	}
+	fingerprint := strings.TrimSpace(persistedFingerprint.String)
+	if !currentSourceFingerprint(fingerprint) {
+		// Rebaseline fingerprints written by an older implementation. The
+		// target sync will persist the new identity without filtering history.
+		return nil
+	}
+	if fingerprint == currentFingerprint {
+		return cloneNullableTime(persistedSourceUpdatedAt)
+	}
+	return cloneTime(candidate)
+}
+
+func cloneNullableTime(value sql.NullTime) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	result := value.Time.UTC()
+	return &result
+}
+
+func nullableTime(value *time.Time) sql.NullTime {
+	if value == nil {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: value.UTC(), Valid: true}
 }
 
 func channelErrorResolved(errorAt time.Time, activityAt, probeAt *time.Time, probeStatus string) bool {
@@ -465,10 +512,13 @@ func buildSnapshot(accounts map[int64]*model.Account, groups map[int64]*model.Gr
 		copy := *group
 		// Keep source changes from members that are filtered out below. A
 		// disabled/error member must still invalidate older group evidence.
-		copy.UpdatedAt = groupSourceUpdatedAt(*group, accounts)
+		copy.UpdatedAt = groupSourceCandidate(*group, accounts)
 		copy.AccountIDs = filterAccountIDs(group.AccountIDs, enabledAccounts)
 		copy.Members = filterGroupMembers(*group, enabledAccounts)
 		copy.ProbeEnabled = groupProbeEnabled(copy, enabledAccounts)
+		fingerprintGroup := *group
+		fingerprintGroup.ProbeEnabled = copy.ProbeEnabled
+		copy.SourceFingerprint = groupSourceFingerprint(fingerprintGroup, accounts)
 		activeGroups[id] = &copy
 	}
 

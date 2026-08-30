@@ -281,6 +281,77 @@ func TestSnapshotRowUsesRecentRequestAsEffectiveUpdate(t *testing.T) {
 	}
 }
 
+func TestSnapshotRowUsesPersistedWatermarkForUnchangedSource(t *testing.T) {
+	activity := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	updated := activity.Add(10 * time.Second)
+	row := snapshotRow{
+		id:           sql.NullInt64{Int64: 10, Valid: true},
+		status:       sql.NullString{String: "active", Valid: true},
+		schedulable:  true,
+		updatedAt:    sql.NullTime{Time: updated, Valid: true},
+		lastActivity: sql.NullTime{Time: activity, Valid: true},
+		credentials:  []byte(`{}`),
+	}
+	first, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	watermark := activity.Add(-time.Hour)
+	row.persistedSourceFingerprint = sql.NullString{String: first.SourceFingerprint, Valid: true}
+	row.persistedSourceUpdatedAt = sql.NullTime{Time: watermark, Valid: true}
+	got, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SourceUpdatedAt == nil || !got.SourceUpdatedAt.Equal(watermark) {
+		t.Fatalf("unchanged source watermark = %v, want %s", got.SourceUpdatedAt, watermark)
+	}
+}
+
+func TestSnapshotRowUsesCandidateWatermarkForChangedSource(t *testing.T) {
+	activity := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	row := snapshotRow{
+		id:           sql.NullInt64{Int64: 10, Valid: true},
+		status:       sql.NullString{String: "active", Valid: true},
+		schedulable:  true,
+		updatedAt:    sql.NullTime{Time: activity, Valid: true},
+		lastActivity: sql.NullTime{Time: activity, Valid: true},
+		credentials:  []byte(`{}`),
+		persistedSourceFingerprint: sql.NullString{
+			String: sourceFingerprintVersion + ":different", Valid: true,
+		},
+	}
+	got, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SourceUpdatedAt == nil || !got.SourceUpdatedAt.Equal(activity) {
+		t.Fatalf("changed source watermark = %v, want %s", got.SourceUpdatedAt, activity)
+	}
+}
+
+func TestSnapshotRowRebaselinesOlderSourceFingerprintVersion(t *testing.T) {
+	activity := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	row := snapshotRow{
+		id:           sql.NullInt64{Int64: 10, Valid: true},
+		status:       sql.NullString{String: "active", Valid: true},
+		schedulable:  true,
+		updatedAt:    sql.NullTime{Time: activity, Valid: true},
+		lastActivity: sql.NullTime{Time: activity, Valid: true},
+		credentials:  []byte(`{}`),
+		persistedSourceFingerprint: sql.NullString{
+			String: "old-version:different", Valid: true,
+		},
+	}
+	got, err := row.account()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SourceUpdatedAt != nil {
+		t.Fatalf("older fingerprint watermark = %v, want nil", got.SourceUpdatedAt)
+	}
+}
+
 func TestGroupSnapshotQueryIncludesUnboundGroups(t *testing.T) {
 	for _, fragment := range []string{
 		"FROM groups g",

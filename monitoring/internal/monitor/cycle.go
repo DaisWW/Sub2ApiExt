@@ -190,8 +190,9 @@ func recoveryProbeImmediate(account model.Account, evidence accountEvidence, now
 		}
 		// A source/configuration update invalidated the old successful probe;
 		// the next channel error is therefore a fresh recovery trigger.
-		if account.UpdatedAt != nil && account.LastProbeAt.Before(*account.UpdatedAt) &&
-			account.UpdatedAt.Sub(*account.LastProbeAt) > model.SourceUpdateActivityGrace {
+		sourceUpdatedAt := accountEvidenceSourceUpdatedAt(account)
+		if sourceUpdatedAt != nil && account.LastProbeAt.Before(*sourceUpdatedAt) &&
+			sourceUpdatedAt.Sub(*account.LastProbeAt) > model.SourceUpdateActivityGrace {
 			return true
 		}
 		// A new channel error starts recovery promptly unless a probe for the
@@ -223,11 +224,12 @@ func probeEligible(account model.Account) bool {
 	if account.LastChannelErrorAt == nil {
 		return false
 	}
-	if account.UpdatedAt != nil && account.LastChannelErrorAt.Before(*account.UpdatedAt) {
+	sourceUpdatedAt := accountEvidenceSourceUpdatedAt(account)
+	if sourceUpdatedAt != nil && account.LastChannelErrorAt.Before(*sourceUpdatedAt) {
 		// A gateway status update can land a few seconds after the error row.
 		// Treat that small accounting lag as the same incident, but discard an
 		// error that predates a real configuration/source change.
-		if account.UpdatedAt.Sub(*account.LastChannelErrorAt) > model.SourceUpdateActivityGrace {
+		if sourceUpdatedAt.Sub(*account.LastChannelErrorAt) > model.SourceUpdateActivityGrace {
 			return false
 		}
 	}
@@ -254,12 +256,13 @@ func configurationFailure(account model.Account) bool {
 
 func latestAccountEvidence(account model.Account) accountEvidence {
 	var evidence accountEvidence
-	if evidenceTimeValid(account.LastActivityAt, account.UpdatedAt) {
+	sourceUpdatedAt := accountEvidenceSourceUpdatedAt(account)
+	if evidenceTimeValid(account.LastActivityAt, sourceUpdatedAt) {
 		evidence = accountEvidence{
 			status: model.StatusOperational, source: "history", checkedAt: account.LastActivityAt, valid: true,
 		}
 	}
-	if evidenceTimeValid(account.LastProbeAt, account.UpdatedAt) &&
+	if evidenceTimeValid(account.LastProbeAt, sourceUpdatedAt) &&
 		probeEvidenceStatus(account.LastProbeStatus) &&
 		(evidence.checkedAt == nil || account.LastProbeAt.After(*evidence.checkedAt)) {
 		evidence = accountEvidence{
@@ -268,6 +271,16 @@ func latestAccountEvidence(account model.Account) accountEvidence {
 		}
 	}
 	return evidence
+}
+
+// accountEvidenceSourceUpdatedAt prefers the monitoring-owned watermark. Test
+// and compatibility callers that construct an account without a fingerprint
+// retain the historical raw UpdatedAt behavior.
+func accountEvidenceSourceUpdatedAt(account model.Account) *time.Time {
+	if strings.TrimSpace(account.SourceFingerprint) != "" {
+		return account.SourceUpdatedAt
+	}
+	return account.UpdatedAt
 }
 
 func evidenceTimeValid(value, changedAt *time.Time) bool {

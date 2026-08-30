@@ -88,7 +88,8 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 		tierIndex[tier] = index
 	}
 
-	var latency, firstByte []int
+	var allLatency, allFirstByte []int
+	var healthyLatency, healthyFirstByte []int
 	healthy, failed, unknown := 0, 0, 0
 	primaryHealthy := false
 	primaryUnknown := false
@@ -100,12 +101,12 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 		status := model.StatusUnknown
 		if exists {
 			status = result.Status
-			// 失败样本的实测延迟也参与分组统计，确保全失败分组仍能展示超时或响应耗时。
+			// 保留失败样本耗时供全失败分组诊断；混合分组最终只使用健康路径。
 			if result.LatencyMs != nil {
-				latency = append(latency, *result.LatencyMs)
+				allLatency = append(allLatency, *result.LatencyMs)
 			}
 			if result.FirstByteMs != nil {
-				firstByte = append(firstByte, *result.FirstByteMs)
+				allFirstByte = append(allFirstByte, *result.FirstByteMs)
 			}
 		}
 		tier := tierIndex[routeTier{GroupPriority: member.GroupPriority, AccountPriority: member.AccountPriority}]
@@ -137,6 +138,14 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 		switch {
 		case isHealthyStatus(status):
 			healthy++
+			if exists {
+				if result.LatencyMs != nil {
+					healthyLatency = append(healthyLatency, *result.LatencyMs)
+				}
+				if result.FirstByteMs != nil {
+					healthyFirstByte = append(healthyFirstByte, *result.FirstByteMs)
+				}
+			}
 		case status == model.StatusFailed || status == model.StatusError:
 			failed++
 			failedRiskWeight += weight
@@ -156,12 +165,21 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 		Message:   routingGroupMessage(group, status, len(members), healthy, failed, unknown, failedRiskWeight, totalRiskWeight),
 		Source:    "aggregate",
 	}
-	if len(latency) > 0 {
-		value := int(medianValue(Summarize(latency)))
+	latencySamples := allLatency
+	firstByteSamples := allFirstByte
+	if healthy > 0 {
+		// A usable account is the route the channel can actually serve. Do not
+		// let a failed fallback's timeout make a mixed, usable group look slow.
+		// If every candidate failed, retain all measured timings for diagnosis.
+		latencySamples = healthyLatency
+		firstByteSamples = healthyFirstByte
+	}
+	if len(latencySamples) > 0 {
+		value := int(medianValue(Summarize(latencySamples)))
 		result.LatencyMs = &value
 	}
-	if len(firstByte) > 0 {
-		value := int(medianValue(Summarize(firstByte)))
+	if len(firstByteSamples) > 0 {
+		value := int(medianValue(Summarize(firstByteSamples)))
 		result.FirstByteMs = &value
 	}
 	return result

@@ -84,13 +84,13 @@ WITH bounds AS (
 ), bucket_positions AS (
 	SELECT generate_series(0, 23)::int AS bucket_index
 ), recent_bucketed AS (
-	SELECT samples.target_key, samples.status, samples.checked_at, samples.source,
+	SELECT samples.target_key, samples.status, samples.latency_ms, samples.checked_at, samples.source,
 	       LEAST(23, FLOOR(EXTRACT(EPOCH FROM (samples.checked_at - bounds.start_at)) / bounds.bucket_seconds)::int) AS bucket_index
 	FROM samples
 	CROSS JOIN bounds
 	WHERE samples.status NOT IN ('unknown','disabled')
 ), recent_ranked AS (
-	SELECT target_key, status, checked_at, source, bucket_index,
+	SELECT target_key, status, latency_ms, checked_at, source, bucket_index,
 	       ROW_NUMBER() OVER (
 	           PARTITION BY target_key, bucket_index
 	           ORDER BY checked_at DESC,
@@ -101,6 +101,7 @@ WITH bounds AS (
 	SELECT targets.target_key,
 	       jsonb_agg(jsonb_build_object(
 	           'status', COALESCE(recent_ranked.status, 'unknown'),
+	           'latency_ms', recent_ranked.latency_ms,
 	           'checked_at', COALESCE(
 	               recent_ranked.checked_at,
 	               bounds.start_at + ((bucket_positions.bucket_index + 1) * bounds.bucket_seconds) * INTERVAL '1 second'
@@ -318,15 +319,23 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 		return model.DashboardTarget{}, false, fmt.Errorf("decode recent samples: %w", err)
 	}
 	carryForwardStatusSamples(target.RecentSamples)
-	if target.LastCheckedAt != nil && isObservedStatus(target.Status) &&
-		!target.LastCheckedAt.Before(now.Add(-dashboardWindow)) {
-		if target.LatestSource == "request_error" {
+	if target.LastCheckedAt != nil && isObservedStatus(target.Status) {
+		// A target can have valid evidence older than the fixed 24-hour
+		// display window. Keep the trajectory continuous by using that latest
+		// status as a carried baseline for any buckets still empty after the
+		// in-window carry-forward pass. The carried marker makes the age of the
+		// evidence visible without pretending those buckets were freshly probed.
+		carrySource := target.LatestSource
+		if carrySource == "" {
+			carrySource = "cache"
+		}
+		carryForwardTargetStatus(target.RecentSamples, target.Status, carrySource, *target.LastCheckedAt)
+		if target.LatestSource == "request_error" &&
+			!target.LastCheckedAt.Before(now.Add(-dashboardWindow)) {
 			// Channel errors are stored as trigger metadata rather than samples.
 			// Overlay the winning error on the current and later buckets so the
 			// timeline cannot remain green merely because an older sample exists.
 			overlayLatestTargetStatus(target.RecentSamples, target.Status, target.LatestSource, *target.LastCheckedAt, now.Add(-dashboardWindow))
-		} else if !hasObservedStatusSample(target.RecentSamples) {
-			carryForwardTargetStatus(target.RecentSamples, target.Status, target.LatestSource, *target.LastCheckedAt, now.Add(-dashboardWindow))
 		}
 	}
 	return target, targetContributesAvailability(target), nil
@@ -355,41 +364,59 @@ func pendingAggregateFailureMessage(message sql.NullString) string {
 }
 
 func carryForwardStatusSamples(samples []model.StatusSample) {
-	// Only carry a known state forward. Leading buckets stay in a waiting
-	// state because an observation at the end of the window cannot prove what
-	// happened before it.
+	// Carry a known state forward through gaps after the first observation.
+	// Leading buckets stay unknown internally: an observation later in the
+	// window cannot prove what happened before it. The web layer renders those
+	// empty buckets with the normal usable color, so the user still sees only
+	// the three health colors without inventing a historical failure.
 	var previous *model.StatusSample
 	for i := range samples {
 		sample := &samples[i]
-		switch {
-		case isObservedStatus(sample.Status):
+		if isObservedStatus(sample.Status) {
 			observed := *sample
 			previous = &observed
-		default:
-			if previous == nil {
-				continue
-			}
-			carriedFrom := previous.CheckedAt
-			sample.Status = previous.Status
-			sample.Source = previous.Source
-			sample.CarriedFrom = &carriedFrom
+			continue
+		}
+		if previous != nil {
+			carryStatusSample(sample, *previous)
 		}
 	}
 }
 
-func carryForwardTargetStatus(samples []model.StatusSample, status, source string, checkedAt, windowStart time.Time) {
-	if checkedAt.Before(windowStart) {
+func carryForwardTargetStatus(samples []model.StatusSample, status, source string, checkedAt time.Time) {
+	if !isObservedStatus(status) || checkedAt.IsZero() {
 		return
 	}
+	baseline := model.StatusSample{Status: status, Source: source, CheckedAt: checkedAt}
 	for index := range samples {
-		if samples[index].Status != model.StatusUnknown || samples[index].CheckedAt.Before(checkedAt) {
+		// Preserve both real observations and gaps that were already carried
+		// from an earlier observation. Only genuinely empty buckets at or after
+		// the target-level evidence can use this baseline. In particular, do not
+		// paint buckets before a first failure red.
+		if isObservedStatus(samples[index].Status) || samples[index].CarriedFrom != nil {
 			continue
 		}
-		samples[index].Status = status
-		samples[index].Source = source
-		carriedFrom := checkedAt
-		samples[index].CarriedFrom = &carriedFrom
+		if samples[index].CheckedAt.Before(checkedAt) {
+			continue
+		}
+		carryStatusSample(&samples[index], baseline)
 	}
+}
+
+func carryStatusSample(sample *model.StatusSample, previous model.StatusSample) {
+	if sample == nil {
+		return
+	}
+	sample.Status = previous.Status
+	sample.Source = previous.Source
+	if previous.LatencyMs == nil {
+		sample.LatencyMs = nil
+	} else {
+		latency := *previous.LatencyMs
+		sample.LatencyMs = &latency
+	}
+	carriedFrom := previous.CheckedAt
+	sample.CarriedFrom = &carriedFrom
 }
 
 func overlayLatestTargetStatus(samples []model.StatusSample, status, source string, checkedAt, windowStart time.Time) {

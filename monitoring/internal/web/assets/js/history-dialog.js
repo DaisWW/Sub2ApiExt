@@ -8,6 +8,7 @@ import {
   formatTime,
   historyStatusClass,
   normalizeStatus,
+  slowLatencyThresholdMs,
   statusLabel
 } from './shared.js';
 
@@ -51,7 +52,7 @@ export class HistoryDialog {
     $('#historySummary').innerHTML = `
       <span>最近 24 小时 · 列表样本 ${items.length}</span>
       <span>列表样本可用率 ${formatPct(availability)}</span>
-      <span>真实请求为首字，主动探测为首字节近似值；分组“可用但有风险”仅表示候选异常，不代表分组整体不可用</span>`;
+      <span>真实请求为首字，主动探测为首字节近似值；健康颜色只表示可用、延迟高或错误/不可用</span>`;
     $('#historyBody').innerHTML = items.length
       ? items.map(renderHistoryRow).join('')
       : '<tr><td colspan="4">最近 24 小时没有历史记录</td></tr>';
@@ -59,26 +60,36 @@ export class HistoryDialog {
 }
 
 function isSuccessful(item) {
-  return item.status === 'operational' || item.status === 'degraded';
+  const status = displayHistoryStatus(item);
+  return status === 'operational' || status === 'degraded';
 }
 
 function renderHistoryRow(item) {
-  const status = normalizeStatus(item.status);
+  const status = displayHistoryStatus(item);
   const message = String(item.message || '请求失败');
   const error = isSuccessful(item) ? '' : `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>`;
   return `<tr>
     <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small></td>
-    <td class="table-status ${historyStatusClass(status)}">${historyStatusLabel(item, status)}${error}</td>
+    <td class="table-status ${historyStatusClass(status)}">${historyStatusLabel(status)}${error}</td>
     <td>${formatMs(item.first_byte_ms)}</td><td>${formatMs(item.latency_ms)}</td>
   </tr>`;
 }
 
-function historyStatusLabel(item, status) {
-  if (status === 'unknown') return '暂无请求';
-  if (item.kind !== 'group' || item.source !== 'aggregate') return statusLabel(status);
-  if (status === 'degraded') return '可用但有风险';
-  if (status === 'failed' || status === 'error') return '候选检查失败';
-  return '候选正常';
+function historyStatusLabel(status) {
+  return statusLabel(status);
+}
+
+function displayHistoryStatus(item) {
+  const normalized = normalizeStatus(item?.status);
+  if (normalized === 'failed' || normalized === 'error' || normalized === 'disabled') return 'failed';
+  const latency = Number(item?.latency_ms);
+  if (Number.isFinite(latency) && latency > 0) {
+    return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
+  }
+  // A group's degraded aggregate can mean a member risk rather than a slow
+  // response. Keep the channel green when the measured path is otherwise OK.
+  if (normalized === 'degraded' && item?.source !== 'aggregate') return 'degraded';
+  return 'operational';
 }
 
 function sourceLabel(source) {
@@ -86,6 +97,6 @@ function sourceLabel(source) {
   if (source === 'aggregate') return '分组候选检查';
   if (source === 'probe') return '主动探测';
   if (source === 'request_error') return '真实请求错误';
-  if (source === 'cache') return '沿用状态';
-  return '暂无请求';
+  if (source === 'cache') return '缓存证据';
+  return '当前状态';
 }

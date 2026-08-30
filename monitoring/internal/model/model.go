@@ -51,6 +51,11 @@ type Account struct {
 	ChatGPTAccount             string
 	ProxyURL                   string
 	ProxyError                 string
+	// SourceFingerprint and SourceUpdatedAt belong to the monitoring layer.
+	// They exclude upstream bookkeeping such as rate-only writes, so evidence
+	// is invalidated only when the probe/routing source changes.
+	SourceFingerprint string     `json:"-"`
+	SourceUpdatedAt   *time.Time `json:"-"`
 }
 
 // GroupMember 是分组内一个可调度账户的路由元数据和近期真实流量。
@@ -73,6 +78,11 @@ type Group struct {
 	Members          []GroupMember
 	HasActiveChannel bool
 	ProbeEnabled     bool
+	// SourceFingerprint and SourceUpdatedAt are monitoring-owned source
+	// identity and evidence watermark. UpdatedAt remains the upstream raw
+	// timestamp for compatibility and diagnostics.
+	SourceFingerprint string     `json:"-"`
+	SourceUpdatedAt   *time.Time `json:"-"`
 }
 
 type Snapshot struct {
@@ -141,10 +151,12 @@ type DashboardTarget struct {
 }
 
 // StatusSample 是目标最近一次观测的紧凑状态，用于绘制状态轨迹。
+// LatencyMs 让每个时间桶按自己的响应耗时着色，而不是套用整卡中位数。
 type StatusSample struct {
 	Status      string     `json:"status"`
 	CheckedAt   time.Time  `json:"checked_at"`
 	Source      string     `json:"source"`
+	LatencyMs   *int       `json:"latency_ms,omitempty"`
 	CarriedFrom *time.Time `json:"carried_from,omitempty"`
 }
 

@@ -1,5 +1,9 @@
 export const $ = (selector) => document.querySelector(selector);
 
+// A slow response is still usable; the dashboard only promotes it to yellow
+// once the end-to-end latency reaches twenty seconds.
+export const slowLatencyThresholdMs = 20000;
+
 export class LatestRequest {
   #version = 0;
 
@@ -39,23 +43,30 @@ export function normalizeStatus(status) {
 
 export function statusLabel(status) {
   return {
-    operational: '正常',
-    degraded: '可用但有风险',
-    failed: '失败',
-    error: '错误',
-    unknown: '等待验证',
-    disabled: '已暂停'
+    operational: '可用',
+    degraded: '可用但延迟高',
+    failed: '错误/不可用',
+    error: '错误/不可用',
+    // Active targets without a fresh request keep their last usable route.
+    // Unknown is therefore rendered as the normal usable baseline; the
+    // monitoring data still retains the raw unknown state for decisions.
+    unknown: '可用',
+    disabled: '错误/不可用'
   }[normalizeStatus(status)];
 }
 
 export function statusClass(status) {
-  return `status-${normalizeStatus(status)}`;
+  const normalized = normalizeStatus(status);
+  if (normalized === 'unknown') return 'status-operational';
+  if (normalized === 'disabled') return 'status-failed';
+  return `status-${normalized}`;
 }
 
 export function historyStatusClass(status) {
   const normalized = normalizeStatus(status);
   if (normalized === 'operational') return 'ok';
   if (normalized === 'degraded') return 'warn';
+  if (normalized === 'unknown') return 'ok';
   return 'bad';
 }
 
@@ -87,7 +98,7 @@ export function formatPct(value) {
 }
 
 export function formatTime(value) {
-  if (!value) return '尚未探测';
+  if (!value) return '—';
   return new Date(value).toLocaleString('zh-CN', {
     month: 'numeric',
     day: 'numeric',
