@@ -2,9 +2,5 @@
   "sync_target": "group",
   "interval": "60s",
   "history_window": "24h",
-  "min_history_cost_usd": 0.01,
-  "factors": {
-    "lucen.cc": 0.85,
-    "xixiapi.io": 0.85
-  }
+  "min_history_cost_usd": 0.01
 }
