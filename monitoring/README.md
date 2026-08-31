@@ -99,9 +99,31 @@ GET /api/v1/monitor/activity
 deploy.bat
 ```
 
-安装器只读取现有 Sub2API 的 Docker 网络和 PostgreSQL 连接信息，不会重建主服务、数据库或 Redis。它会构建 `sub2api-ext-monitoring:local`，并把独立 Compose、设置及数据库运行环境安装到 `C:\ProgramData\Sub2API\extensions\monitoring`。账户凭据只在当前探测请求的内存中使用，不由监控服务另行持久化。
+安装器只读取现有 Sub2API 的 Docker 网络、PostgreSQL 和 Redis 连接信息，不会重建主服务、数据库或 Redis。它会构建 `sub2api-ext-monitoring:local`，并把独立 Compose、设置及数据库/Redis 运行环境安装到 `C:\ProgramData\Sub2API\extensions\monitoring`。账户凭据只在当前探测请求的内存中使用，不由监控服务另行持久化。
 
-部署脚本不会自动修改 Sub2API 的菜单或其他系统设置；如需入口，请在 Sub2API 的“自定义菜单页面”中手动填写监控地址。首次部署时，脚本会从 `frontend_url` / `api_base_url` 提取站点来源并加入 iframe 白名单；已有自定义 `MONITORING_FRAME_ANCESTORS` 不会被覆盖。若两个地址均未配置，部署会保留仅允许同源的安全默认值并给出警告。
+部署脚本不会修改 Sub2API 的菜单或其他系统设置。“渠道监控”菜单请在 Sub2API 中手动添加。监控部署和根目录的一键部署会自动运行 `fix-monitoring-access.ps1`：它读取 Sub2API PostgreSQL 的 `frontend_url` / `api_base_url`、Docker 实际端口以及监控 `.env` / `settings.env`，合并 iframe 白名单，校验绑定地址和 Windows 防火墙，并在配置改变时重启监控；不会调用 Admin API，也不会回写网关数据库。
+
+需要单独修复时，在仓库本地运行：
+
+```bat
+fix-monitoring-access.bat
+```
+
+有域名的机器建议使用同为 HTTPS 的站点和监控域名；在 Sub2API 自定义菜单中手动填写：
+
+```powershell
+https://monitor.example.com
+```
+
+没有域名的机器使用该机可被局域网访问的 IP，在 Sub2API 自定义菜单中手动填写：
+
+```powershell
+http://192.168.1.20:18090
+```
+
+没有域名的机器建议做 DHCP 保留或设置静态 IP；如果 IP 变更，重新运行 `fix-monitoring-access.bat`，并同步修改 Sub2API 菜单 URL。也可以使用公司内网 DNS/稳定主机名替代 IP。
+
+如果通过别名打开 Sub2API，而该别名没有写在数据库的 `frontend_url` / `api_base_url` 中，请把该来源追加到 `C:\ProgramData\Sub2API\extensions\monitoring\settings.env` 的 `MONITORING_FRAME_ANCESTORS`，然后运行修复脚本；不要使用 `*`。父页面是 HTTPS 时，菜单中的监控地址也必须使用 HTTPS，否则浏览器会阻止混合内容 iframe。
 
 如果存在原工作目录部署的 `sub2api-monitoring-standalone`，安装器会在新容器健康后移除旧容器，避免两个监控 Worker 同时运行。监控历史保存在 PostgreSQL，不随旧容器删除。
 

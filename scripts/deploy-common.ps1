@@ -102,7 +102,25 @@ function Invoke-ExtensionDocker {
     }
 }
 
+function Add-ExtensionDockerPath {
+    $candidatePaths = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+        $candidatePaths += Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $candidatePaths += Join-Path $env:LOCALAPPDATA 'Programs\Docker\Docker\resources\bin'
+    }
+
+    foreach ($path in $candidatePaths) {
+        if ((Test-Path -LiteralPath $path -PathType Container) -and
+                -not (($env:Path -split ';') -contains $path)) {
+            $env:Path = "$path;$env:Path"
+        }
+    }
+}
+
 function Assert-ExtensionDocker {
+    Add-ExtensionDockerPath
     if ($null -eq (Get-Command docker.exe -ErrorAction SilentlyContinue)) {
         throw 'Docker was not found. Install and start Docker Desktop first.'
     }

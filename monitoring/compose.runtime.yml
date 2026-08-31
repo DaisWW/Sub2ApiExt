@@ -11,6 +11,9 @@ services:
       - path: database.runtime.env
         required: true
         format: raw
+      - path: redis.runtime.env
+        required: true
+        format: raw
       - path: settings.env
         required: true
         format: raw

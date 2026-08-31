@@ -49,6 +49,38 @@ if ($needsFirewallChange) {
 
 Assert-ExtensionDocker
 $sub2api = Get-Sub2ApiDockerContext
+$application = Get-ExtensionContainerInspect -Name 'sub2api'
+$redis = Get-ExtensionContainerInspect -Name 'sub2api-redis'
+if (-not $redis.State.Running) {
+    throw 'The sub2api-redis container must be running.'
+}
+$applicationEnvironment = Get-ExtensionContainerEnvironment -Inspect $application
+$redisEnvironment = Get-ExtensionContainerEnvironment -Inspect $redis
+$redisHost = if ($applicationEnvironment['REDIS_HOST']) {
+    [string]$applicationEnvironment['REDIS_HOST']
+} else {
+    ([string]$redis.Name).TrimStart('/')
+}
+$redisPort = if ($applicationEnvironment['REDIS_PORT']) { [string]$applicationEnvironment['REDIS_PORT'] } else { '6379' }
+if ($redisPort -notmatch '^\d+$' -or [int]$redisPort -lt 1 -or [int]$redisPort -gt 65535) {
+    throw 'Could not determine the Redis port.'
+}
+$redisDB = if ($applicationEnvironment['REDIS_DB']) { [string]$applicationEnvironment['REDIS_DB'] } else { '0' }
+if ($redisDB -notmatch '^\d+$') {
+    throw 'Could not determine the Redis database.'
+}
+$redisPassword = if ($applicationEnvironment.ContainsKey('REDIS_PASSWORD')) {
+    [string]$applicationEnvironment['REDIS_PASSWORD']
+} elseif ($redisEnvironment.ContainsKey('REDIS_PASSWORD')) {
+    [string]$redisEnvironment['REDIS_PASSWORD']
+} else {
+    ''
+}
+$redisTLS = if ($applicationEnvironment['REDIS_ENABLE_TLS']) {
+    [string]$applicationEnvironment['REDIS_ENABLE_TLS']
+} else {
+    'false'
+}
 $image = 'sub2api-ext-monitoring:local'
 
 Build-ExtensionImage `
@@ -75,67 +107,6 @@ if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
     Copy-Item -LiteralPath $settingsSource -Destination $settingsPath
 }
 
-$settingsValues = Read-ExtensionEnvFile -Path $settingsPath
-$frameAncestors = [string]$settingsValues['MONITORING_FRAME_ANCESTORS']
-if ([string]::IsNullOrWhiteSpace($frameAncestors) -or $frameAncestors.Trim() -eq "'self'") {
-    $siteOrigins = @()
-    try {
-        $siteURLQuery = @'
-SELECT value
-FROM settings
-WHERE key IN ('frontend_url', 'api_base_url')
-  AND btrim(value) <> ''
-ORDER BY CASE key WHEN 'frontend_url' THEN 0 ELSE 1 END;
-'@
-        $siteURLs = @(Invoke-ExtensionDocker -Arguments @(
-            'exec', 'sub2api-postgres', 'psql',
-            '-U', $sub2api.PostgresUser,
-            '-d', $sub2api.PostgresDatabase,
-            '-At', '-c', $siteURLQuery
-        ) -Capture | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne '' })
-
-        foreach ($siteURL in $siteURLs) {
-            [Uri]$siteUri = $null
-            if ([Uri]::TryCreate($siteURL, [UriKind]::Absolute, [ref]$siteUri) -and
-                    ($siteUri.Scheme -eq 'http' -or $siteUri.Scheme -eq 'https') -and
-                    -not [string]::IsNullOrWhiteSpace($siteUri.Host) -and
-                    [string]::IsNullOrEmpty($siteUri.UserInfo)) {
-                $origin = $siteUri.GetLeftPart([UriPartial]::Authority).ToLowerInvariant()
-                if ($siteOrigins -notcontains $origin) {
-                    $siteOrigins += $origin
-                }
-                break
-            }
-        }
-    }
-    catch {
-        Write-Warning "Could not discover the Sub2API site origin. $($_.Exception.Message)"
-    }
-
-    if ($siteOrigins.Count -gt 0) {
-        $frameAncestors = (@("'self'") + $siteOrigins) -join ' '
-        $settingsLines = [Collections.Generic.List[string]]::new()
-        $updatedFrameAncestors = $false
-        foreach ($line in [IO.File]::ReadAllLines($settingsPath)) {
-            if ($line -match '^\s*MONITORING_FRAME_ANCESTORS=') {
-                $settingsLines.Add("MONITORING_FRAME_ANCESTORS=$frameAncestors")
-                $updatedFrameAncestors = $true
-            }
-            else {
-                $settingsLines.Add($line)
-            }
-        }
-        if (-not $updatedFrameAncestors) {
-            $settingsLines.Add("MONITORING_FRAME_ANCESTORS=$frameAncestors")
-        }
-        [IO.File]::WriteAllLines($settingsPath, $settingsLines, [Text.UTF8Encoding]::new($false))
-        Write-Host "Monitoring iframe: allowing $($siteOrigins -join ', ')." -ForegroundColor DarkGray
-    }
-    else {
-        Write-Warning 'Sub2API frontend_url/api_base_url is empty or invalid. Configure MONITORING_FRAME_ANCESTORS before embedding the monitoring page.'
-    }
-}
-
 Write-ExtensionEnvFile -Path $composeEnvPath -Values ([ordered]@{
     SUB2API_NETWORK = $sub2api.Network
     MONITORING_BIND_HOST = $bindHost
@@ -149,6 +120,25 @@ Write-ExtensionEnvFile -Path (Join-Path $runtimeRoot 'database.runtime.env') -Va
     DATABASE_DBNAME = $sub2api.PostgresDatabase
     DATABASE_SSLMODE = 'disable'
 })
+Write-ExtensionEnvFile -Path (Join-Path $runtimeRoot 'redis.runtime.env') -Values ([ordered]@{
+    REDIS_HOST = $redisHost
+    REDIS_PORT = $redisPort
+    REDIS_PASSWORD = $redisPassword
+    REDIS_DB = $redisDB
+    REDIS_ENABLE_TLS = $redisTLS
+})
+
+# Keep all iframe/access repair in one local-only script.  It reads the
+# current Sub2API settings and monitoring runtime files; it never writes a
+# Sub2API menu or calls the Sub2API Admin API.
+$fixScript = Join-Path $PSScriptRoot 'fix-monitoring-access.ps1'
+try {
+    & $fixScript -RuntimeRoot $runtimeRoot -PrepareOnly -SkipFirewall -SkipElevation
+}
+catch {
+    throw "监控访问配置修复失败：$($_.Exception.Message)"
+}
+
 Grant-ExtensionRuntimeAccess -Path $runtimeRoot
 
 # Replace the pre-Compose verification container from the original workspace.
