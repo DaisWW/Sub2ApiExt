@@ -57,8 +57,8 @@ func (s *Syncer) syncDynamicGroups(
 	if err != nil {
 		return handled, err
 	}
-	watermarks, uninitialized := s.prepareDynamicStates(plan.groupIDs, snapshotID)
-	choices, insufficient, err := loadDynamicBootstrap(ctx, source, now, snapshotID, uninitialized)
+	watermarks, uninitialized := s.prepareDynamicStates(plan.groupIDs, plan.bindings, snapshotID)
+	choices, insufficient, err := loadDynamicBootstrap(ctx, source, now, snapshotID, uninitialized, plan.bindings)
 	if err != nil {
 		return handled, err
 	}
@@ -84,7 +84,7 @@ func buildDynamicGroupPlan(channels []Channel, handled map[int64]bool) dynamicGr
 	return plan
 }
 
-func (s *Syncer) prepareDynamicStates(groupIDs []int64, snapshotID int64) (map[int64]int64, []int64) {
+func (s *Syncer) prepareDynamicStates(groupIDs []int64, bindings map[int64]*groupBinding, snapshotID int64) (map[int64]int64, []int64) {
 	if s.state.DynamicGroups == nil {
 		s.state.DynamicGroups = make(map[int64]*DynamicGroupState)
 	}
@@ -92,7 +92,7 @@ func (s *Syncer) prepareDynamicStates(groupIDs []int64, snapshotID int64) (map[i
 	uninitialized := make([]int64, 0)
 	for _, groupID := range groupIDs {
 		state := s.state.DynamicGroups[groupID]
-		if !usableDynamicGroupState(state) || state.LastUsageID > snapshotID {
+		if !usableDynamicGroupState(state) || state.LastUsageID > snapshotID || !dynamicAccountSetMatches(state, bindings[groupID]) {
 			pendingTarget, hasPendingTarget := preservedPendingTarget(state)
 			state = newDynamicGroupState()
 			if hasPendingTarget {

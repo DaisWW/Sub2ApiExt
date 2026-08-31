@@ -163,6 +163,31 @@ func relevantAccountRatesChanged(state *DynamicGroupState, rates map[int64]float
 	return false
 }
 
+func dynamicAccountSetMatches(state *DynamicGroupState, binding *groupBinding) bool {
+	if state == nil || binding == nil {
+		return false
+	}
+	stateAccounts := make(map[int64]struct{}, len(state.LastAccountRates))
+	for accountID := range state.LastAccountRates {
+		stateAccounts[accountID] = struct{}{}
+	}
+	for accountID := range state.Fast.AccountBase {
+		stateAccounts[accountID] = struct{}{}
+	}
+	for accountID := range state.Slow.AccountBase {
+		stateAccounts[accountID] = struct{}{}
+	}
+	if len(stateAccounts) != len(binding.accounts) {
+		return false
+	}
+	for accountID := range binding.accounts {
+		if _, ok := stateAccounts[accountID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func accountRateChanged(previous, current map[int64]float64, accountID int64) bool {
 	oldRate, oldOK := previous[accountID]
 	newRate, newOK := current[accountID]
@@ -194,6 +219,19 @@ func groupDynamicUsage(rows []GroupUsageAccountStats) map[int64][]GroupUsageAcco
 		result[row.GroupID] = append(result[row.GroupID], row)
 	}
 	return result
+}
+
+func filterDynamicUsageAccounts(rows []GroupUsageAccountStats, binding *groupBinding) []GroupUsageAccountStats {
+	if binding == nil {
+		return nil
+	}
+	filtered := make([]GroupUsageAccountStats, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := binding.accounts[row.AccountID]; ok {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered
 }
 
 func summarizeDynamicUsage(rows []GroupUsageAccountStats) dynamicUsageSummary {

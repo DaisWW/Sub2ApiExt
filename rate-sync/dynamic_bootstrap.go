@@ -11,6 +11,7 @@ func loadDynamicBootstrap(
 	now time.Time,
 	snapshotID int64,
 	groupIDs []int64,
+	bindings map[int64]*groupBinding,
 ) (map[int64]dynamicBootstrapChoice, []int64, error) {
 	choices := make(map[int64]dynamicBootstrapChoice)
 	if len(groupIDs) == 0 {
@@ -34,7 +35,7 @@ func loadDynamicBootstrap(
 		usageByGroup := groupDynamicUsage(rows)
 		next := make([]int64, 0, len(unresolved))
 		for _, groupID := range unresolved {
-			groupRows := usageByGroup[groupID]
+			groupRows := filterDynamicUsageAccounts(usageByGroup[groupID], bindings[groupID])
 			if dynamicBootstrapSufficient(groupRows) {
 				choices[groupID] = dynamicBootstrapChoice{rows: groupRows, window: window}
 				continue

@@ -164,6 +164,11 @@ func TestDynamicBootstrapChoosesShortestSufficientWindow(t *testing.T) {
 		time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC),
 		1,
 		[]int64{24, 25, 26},
+		map[int64]*groupBinding{
+			24: {accounts: map[int64]Channel{1: {}}},
+			25: {accounts: map[int64]Channel{1: {}}},
+			26: {accounts: map[int64]Channel{1: {}}},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +184,41 @@ func TestDynamicBootstrapChoosesShortestSufficientWindow(t *testing.T) {
 	}
 	if len(source.groups[0]) != 3 || len(source.groups[1]) != 2 || len(source.groups[2]) != 1 || source.groups[1][0] != 25 || source.groups[2][0] != 26 {
 		t.Fatalf("bootstrap did not narrow unresolved groups: %v", source.groups)
+	}
+}
+
+func TestDynamicBootstrapFiltersAccountsOutsideCurrentBinding(t *testing.T) {
+	source := &bootstrapWindowSource{
+		rowsByWindow: map[time.Duration][]GroupUsageAccountStats{
+			time.Hour: {
+				{GroupID: 24, AccountID: 2, Requests: 60, StandardCost: 12, BaseCost: 12, AccountCost: 10.8, CurrentAccountRate: 0.9},
+			},
+			6 * time.Hour: {
+				{GroupID: 24, AccountID: 1, Requests: 20, StandardCost: 3, BaseCost: 3, AccountCost: 0.3, CurrentAccountRate: 0.1},
+				{GroupID: 24, AccountID: 3, Requests: 20, StandardCost: 3, BaseCost: 3, AccountCost: 0.6, CurrentAccountRate: 0.2},
+			},
+		},
+	}
+	bindings := map[int64]*groupBinding{
+		24: {accounts: map[int64]Channel{1: {}, 3: {}}},
+	}
+	choices, insufficient, err := loadDynamicBootstrap(
+		context.Background(),
+		source,
+		time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC),
+		1,
+		[]int64{24},
+		bindings,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice, ok := choices[24]
+	if !ok || choice.window != 6*time.Hour || len(insufficient) != 0 {
+		t.Fatalf("unexpected filtered bootstrap result: choices=%+v insufficient=%v", choices, insufficient)
+	}
+	if len(choice.rows) != 2 || choice.rows[0].AccountID == 2 || choice.rows[1].AccountID == 2 {
+		t.Fatalf("removed account was included in bootstrap rows: %+v", choice.rows)
 	}
 }
 
@@ -456,13 +496,45 @@ func TestDynamicPendingTargetSurvivesInvalidStateReset(t *testing.T) {
 	}
 	syncer := &Syncer{state: state}
 
-	watermarks, uninitialized := syncer.prepareDynamicStates([]int64{24}, 99)
+	watermarks, uninitialized := syncer.prepareDynamicStates([]int64{24}, map[int64]*groupBinding{
+		24: {accounts: map[int64]Channel{1: {}}},
+	}, 99)
 	recovered := state.DynamicGroups[24]
 	if len(watermarks) != 0 || len(uninitialized) != 1 || recovered == nil {
 		t.Fatalf("invalid state was not reinitialized: watermarks=%v uninitialized=%v state=%+v", watermarks, uninitialized, recovered)
 	}
 	if !recovered.HasPendingTarget || !almostEqual(recovered.PendingTarget, 0.17) {
 		t.Fatalf("pending target was lost during state reset: %+v", recovered)
+	}
+}
+
+func TestPrepareDynamicStatesRebuildsWhenBindingAccountsChange(t *testing.T) {
+	state := seedDynamicGroupState([]GroupUsageAccountStats{
+		{GroupID: 24, AccountID: 1, Requests: 20, StandardCost: 50, BaseCost: 50, AccountCost: 5, CurrentAccountRate: 0.1},
+		{GroupID: 24, AccountID: 2, Requests: 20, StandardCost: 50, BaseCost: 50, AccountCost: 10, CurrentAccountRate: 0.2},
+	}, 100)
+	if state == nil {
+		t.Fatal("failed to seed dynamic state")
+	}
+	state.PendingTarget = 0.17
+	state.HasPendingTarget = true
+	allState := newState()
+	allState.DynamicGroups[24] = state
+	syncer := &Syncer{state: allState}
+
+	bindings := map[int64]*groupBinding{
+		24: {accounts: map[int64]Channel{1: {}, 3: {}}},
+	}
+	watermarks, uninitialized := syncer.prepareDynamicStates([]int64{24}, bindings, 100)
+	rebuilt := allState.DynamicGroups[24]
+	if len(watermarks) != 0 || len(uninitialized) != 1 || rebuilt == state {
+		t.Fatalf("account set change did not rebuild state: watermarks=%v uninitialized=%v state=%+v", watermarks, uninitialized, rebuilt)
+	}
+	if rebuilt.Initialized || rebuilt.LastUsageID != 0 || len(rebuilt.Fast.AccountBase) != 0 || len(rebuilt.Slow.AccountBase) != 0 {
+		t.Fatalf("rebuilt state retained old memory: %+v", rebuilt)
+	}
+	if !rebuilt.HasPendingTarget || !almostEqual(rebuilt.PendingTarget, 0.17) {
+		t.Fatalf("pending target was lost during account set rebuild: %+v", rebuilt)
 	}
 }
 
