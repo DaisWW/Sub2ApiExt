@@ -18,31 +18,32 @@ func (s *Syncer) publishDynamicGroup(
 		s.retryDynamicPending(ctx, group, state, reason, report)
 		return
 	}
-	fast, slow, ok := dynamicRates(state)
+	fast, slow, predicted, ok := dynamicRates(state)
 	if !ok {
 		skipDynamicGroup(report, group, "记忆状态无效，等待重新初始化")
 		s.logger.Printf("[%s] 动态成本跳过: 记忆状态无效，保持 %.4f", group.Name, group.RateMultiplier)
 		return
 	}
-	rawTarget := dynamicRawTarget(fast, slow)
+	observedTarget := dynamicRawTarget(fast, slow)
+	rawTarget := (1-dynamicPredictionWeight)*observedTarget + dynamicPredictionWeight*predicted
 	if !validPositiveRate(rawTarget) {
 		skipDynamicGroup(report, group, "计算结果无效")
 		return
 	}
 	target := dynamicTarget(group, state, rawTarget, event)
-	detail := fmt.Sprintf("新增=$%.4f F=%.4f S=%.4f 目标=%.4f", summary.standardCost, fast, slow, target)
+	detail := fmt.Sprintf("新增=$%.4f F=%.4f M=%.4f P=%.4f 目标=%.4f", summary.standardCost, fast, slow, predicted, target)
 	report.setGroupEvidence(group.ID, reason, detail)
 	if !event && !state.HasPendingTarget {
 		report.markGroup(group.ID, reportStatusStable)
-		s.logger.Printf("[%s] 动态成本冻结: 无新增用量，F=%.4f S=%.4f 分组=%.4f", group.Name, fast, slow, group.RateMultiplier)
+		s.logger.Printf("[%s] 动态成本冻结: 无新增用量，F=%.4f M=%.4f P=%.4f 分组=%.4f", group.Name, fast, slow, predicted, group.RateMultiplier)
 		return
 	}
 	if !state.HasPendingTarget || !dynamicGroupRateChangeSignificant(group.RateMultiplier, target) {
 		clearDynamicPending(state)
 		report.markGroup(group.ID, reportStatusStable)
 		s.logger.Printf(
-			"[%s] 动态成本稳定: %s 请求=%d 标准=%.6f F=%.4f S=%.4f raw=%.4f 分组=%.4f",
-			group.Name, reason, summary.requests, summary.standardCost, fast, slow, rawTarget, group.RateMultiplier,
+			"[%s] 动态成本稳定: %s 请求=%d 标准=%.6f F=%.4f M=%.4f P=%.4f raw=%.4f 分组=%.4f",
+			group.Name, reason, summary.requests, summary.standardCost, fast, slow, predicted, rawTarget, group.RateMultiplier,
 		)
 		return
 	}
@@ -50,8 +51,8 @@ func (s *Syncer) publishDynamicGroup(
 		clearDynamicPending(state)
 		report.markGroup(group.ID, reportStatusPreview)
 		s.logger.Printf(
-			"[%s] dry-run 动态成本: %s 请求=%d 标准=%.6f F=%.4f S=%.4f raw=%.4f，当前 %.4f -> %.4f",
-			group.Name, reason, summary.requests, summary.standardCost, fast, slow, rawTarget, group.RateMultiplier, target,
+			"[%s] dry-run 动态成本: %s 请求=%d 标准=%.6f F=%.4f M=%.4f P=%.4f raw=%.4f，当前 %.4f -> %.4f",
+			group.Name, reason, summary.requests, summary.standardCost, fast, slow, predicted, rawTarget, group.RateMultiplier, target,
 		)
 		return
 	}
@@ -63,13 +64,14 @@ func (s *Syncer) publishDynamicGroup(
 	s.publishDynamicChange(ctx, group, state, target, fast, slow, rawTarget, reason, summary, report)
 }
 
-func dynamicRates(state *DynamicGroupState) (float64, float64, bool) {
+func dynamicRates(state *DynamicGroupState) (float64, float64, float64, bool) {
 	if state == nil {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	fast, fastOK := dynamicMemoryRate(state.Fast, state.LastAccountRates)
-	slow, slowOK := dynamicMemoryRate(state.Slow, state.LastAccountRates)
-	return fast, slow, fastOK && slowOK
+	fast, fastOK := dynamicObservedMemoryRate(state.Fast)
+	slow, slowOK := dynamicObservedMemoryRate(state.Slow)
+	predicted, predictedOK := dynamicMemoryRate(state.Fast, state.LastAccountRates)
+	return fast, slow, predicted, fastOK && slowOK && predictedOK
 }
 
 func skipDynamicGroup(report *syncReport, group *sub2APIGroup, detail string) {
@@ -149,7 +151,7 @@ func (s *Syncer) publishDynamicChange(
 	report.updateGroupRate(group.ID, target)
 	report.markGroup(group.ID, reportStatusUpdated)
 	s.logger.Printf(
-		"[%s] 已按动态成本更新分组: %s 请求=%d 标准=%.6f F=%.4f S=%.4f raw=%.4f，当前 %.4f -> %.4f",
+		"[%s] 已按动态成本更新分组: %s 请求=%d 标准=%.6f F=%.4f M=%.4f raw=%.4f，当前 %.4f -> %.4f",
 		group.Name, reason, summary.requests, summary.standardCost, fast, slow, rawTarget, group.RateMultiplier, target,
 	)
 }

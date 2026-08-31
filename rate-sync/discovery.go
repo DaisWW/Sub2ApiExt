@@ -51,7 +51,7 @@ SELECT
     COALESCE(SUM(ul.total_cost), 0)::double precision,
     COALESCE(SUM(
         COALESCE(ul.account_stats_cost, ul.total_cost) *
-        COALESCE(a.rate_multiplier, ul.account_rate_multiplier, 1)
+        COALESCE(ul.account_rate_multiplier, 1)
     ), 0)::double precision
 FROM usage_logs ul
 LEFT JOIN accounts a ON a.id = ul.account_id
@@ -60,6 +60,7 @@ WHERE ul.group_id IS NOT NULL
   AND ul.created_at >= $1
   AND ul.created_at < $2
   AND ul.total_cost > 0
+  AND ul.actual_cost > 0
   AND g.deleted_at IS NULL
   AND g.status = 'active'
 GROUP BY ul.group_id
@@ -76,7 +77,7 @@ SELECT
     COALESCE(SUM(ul.total_cost), 0)::double precision,
     COALESCE(SUM(
         COALESCE(ul.account_stats_cost, ul.total_cost) *
-        COALESCE(a.rate_multiplier, ul.account_rate_multiplier, 1)
+        COALESCE(ul.account_rate_multiplier, 1)
     ), 0)::double precision
 FROM windows w
 JOIN usage_logs ul ON ul.created_at >= $1::timestamptz - w.window_seconds * interval '1 second'
@@ -85,6 +86,7 @@ LEFT JOIN accounts a ON a.id = ul.account_id
 JOIN groups g ON g.id = ul.group_id
 WHERE ul.group_id IS NOT NULL
   AND ul.total_cost > 0
+  AND ul.actual_cost > 0
   AND g.deleted_at IS NULL
   AND g.status = 'active'
 GROUP BY w.window_seconds, ul.group_id
@@ -102,6 +104,10 @@ SELECT
     COUNT(*)::bigint,
     COALESCE(SUM(ul.total_cost), 0)::double precision,
     COALESCE(SUM(COALESCE(ul.account_stats_cost, ul.total_cost)), 0)::double precision,
+    COALESCE(SUM(
+        COALESCE(ul.account_stats_cost, ul.total_cost) *
+        COALESCE(ul.account_rate_multiplier, 1)
+    ), 0)::double precision,
     COALESCE(MAX(a.rate_multiplier), MAX(ul.account_rate_multiplier), 1)::double precision
 FROM watermarks w
 JOIN usage_logs ul
@@ -110,6 +116,7 @@ JOIN usage_logs ul
  AND ul.id <= %s
 LEFT JOIN accounts a ON a.id = ul.account_id
 WHERE ul.total_cost > 0
+  AND ul.actual_cost > 0
 GROUP BY ul.group_id, COALESCE(ul.account_id, 0)
 ORDER BY ul.group_id, COALESCE(ul.account_id, 0)`
 
@@ -120,6 +127,10 @@ SELECT
     COUNT(*)::bigint,
     COALESCE(SUM(ul.total_cost), 0)::double precision,
     COALESCE(SUM(COALESCE(ul.account_stats_cost, ul.total_cost)), 0)::double precision,
+    COALESCE(SUM(
+        COALESCE(ul.account_stats_cost, ul.total_cost) *
+        COALESCE(ul.account_rate_multiplier, 1)
+    ), 0)::double precision,
     COALESCE(MAX(a.rate_multiplier), MAX(ul.account_rate_multiplier), 1)::double precision
 FROM usage_logs ul
 LEFT JOIN accounts a ON a.id = ul.account_id
@@ -127,6 +138,7 @@ WHERE ul.created_at >= $1
   AND ul.created_at < $2
   AND ul.id <= $3
   AND ul.total_cost > 0
+  AND ul.actual_cost > 0
   AND ul.group_id IN (%s)
 GROUP BY ul.group_id, COALESCE(ul.account_id, 0)
 ORDER BY ul.group_id, COALESCE(ul.account_id, 0)`

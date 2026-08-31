@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-const currentStateVersion = 4
+const currentStateVersion = 5
 
 type State struct {
 	Version       int                          `json:"version"`
@@ -29,6 +29,7 @@ type DynamicGroupState struct {
 type DynamicCostMemory struct {
 	Denominator float64           `json:"denominator"`
 	AccountBase map[int64]float64 `json:"account_base,omitempty"`
+	AccountCost float64           `json:"account_cost,omitempty"`
 }
 
 type RuleState struct {
@@ -96,8 +97,14 @@ func (s StateStore) Load() (*State, error) {
 			}
 			rule.resetPriceKey()
 		}
+		state.DynamicGroups = make(map[int64]*DynamicGroupState)
 		state.Version = currentStateVersion
 	case 3:
+		state.DynamicGroups = make(map[int64]*DynamicGroupState)
+		state.Version = currentStateVersion
+	case 4:
+		// 动态算法 5 改为以近期观测成本为主；旧状态的长记忆口径不同，重新从近期成功请求初始化。
+		state.DynamicGroups = make(map[int64]*DynamicGroupState)
 		state.Version = currentStateVersion
 	case currentStateVersion:
 	default:

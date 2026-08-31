@@ -24,13 +24,14 @@ type GroupUsageWindowStats struct {
 }
 
 // GroupUsageAccountStats 是按账号汇总的成功请求成本。
-// BaseCost 不含账号倍率，账号倍率变化后可以立即重新计算历史权重。
+// AccountCost 使用请求发生时的账号倍率；BaseCost 用于预测当前账号倍率下的近期成本。
 type GroupUsageAccountStats struct {
 	GroupID            int64
 	AccountID          int64
 	Requests           int64
 	StandardCost       float64
 	BaseCost           float64
+	AccountCost        float64
 	CurrentAccountRate float64
 }
 

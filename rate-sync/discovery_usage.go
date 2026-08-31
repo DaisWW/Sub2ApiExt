@@ -127,7 +127,7 @@ func (s *PostgresChannelSource) queryGroupUsageAccounts(ctx context.Context, que
 	var results []GroupUsageAccountStats
 	for rows.Next() {
 		var row GroupUsageAccountStats
-		if err := rows.Scan(&row.GroupID, &row.AccountID, &row.Requests, &row.StandardCost, &row.BaseCost, &row.CurrentAccountRate); err != nil {
+		if err := rows.Scan(&row.GroupID, &row.AccountID, &row.Requests, &row.StandardCost, &row.BaseCost, &row.AccountCost, &row.CurrentAccountRate); err != nil {
 			return nil, fmt.Errorf("%s结果: %w", action, err)
 		}
 		results = append(results, row)

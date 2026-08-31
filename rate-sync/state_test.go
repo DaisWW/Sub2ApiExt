@@ -69,6 +69,29 @@ func TestStateStoreMigratesVersion3WithoutDroppingRules(t *testing.T) {
 	}
 }
 
+func TestStateStoreMigratesVersion4AndRebuildsDynamicMemory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{
+  "version": 4,
+  "rules": {"account:2": {"identity": "keep-me"}},
+  "dynamic_groups": {"24": {"initialized": true, "last_usage_id": 321}}
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := (StateStore{Path: path}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != currentStateVersion || state.Rules["account:2"] == nil {
+		t.Fatalf("version 4 state did not preserve account rules: %+v", state)
+	}
+	if len(state.DynamicGroups) != 0 {
+		t.Fatalf("legacy dynamic memory should be rebuilt: %+v", state.DynamicGroups)
+	}
+}
+
 func TestStateStoreRejectsUnsupportedVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte(`{"version":999,"rules":{}}`), 0o600); err != nil {
@@ -92,7 +115,7 @@ func TestStateStoreRejectsNullEntries(t *testing.T) {
 		},
 		{
 			name: "dynamic group",
-			data: `{"version":4,"rules":{},"dynamic_groups":{"24":null}}`,
+			data: `{"version":5,"rules":{},"dynamic_groups":{"24":null}}`,
 			want: "dynamic_groups",
 		},
 	}
@@ -119,10 +142,12 @@ func TestStateStorePersistsDynamicGroupMemory(t *testing.T) {
 		Fast: DynamicCostMemory{
 			Denominator: 5,
 			AccountBase: map[int64]float64{10: 3, 11: 2},
+			AccountCost: 0.7,
 		},
 		Slow: DynamicCostMemory{
 			Denominator: 100,
 			AccountBase: map[int64]float64{10: 60, 11: 40},
+			AccountCost: 14,
 		},
 		LastAccountRates: map[int64]float64{10: 0.1, 11: 0.2},
 		PendingTarget:    0.1234,
@@ -137,7 +162,7 @@ func TestStateStorePersistsDynamicGroupMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	group := loaded.DynamicGroups[24]
-	if group == nil || group.LastUsageID != 321 || group.Fast.AccountBase[10] != 3 || group.Slow.Denominator != 100 || group.LastAccountRates[11] != 0.2 ||
+	if group == nil || group.LastUsageID != 321 || group.Fast.AccountBase[10] != 3 || group.Fast.AccountCost != 0.7 || group.Slow.Denominator != 100 || group.LastAccountRates[11] != 0.2 ||
 		group.PendingTarget != 0.1234 || !group.HasPendingTarget {
 		encoded, _ := json.Marshal(loaded)
 		t.Fatalf("dynamic state did not round-trip: %s", encoded)

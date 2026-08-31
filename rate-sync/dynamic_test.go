@@ -12,39 +12,36 @@ import (
 	"time"
 )
 
-func TestDynamicRawTargetRespondsQuicklyUpAndConservativelyDown(t *testing.T) {
-	if got := dynamicRawTarget(0.112, 0.100); !almostEqual(got, 0.112) {
-		t.Fatalf("upward target = %.4f, want 0.1120", got)
+func TestDynamicRawTargetFollowsRecentCostInBothDirections(t *testing.T) {
+	if got := dynamicRawTarget(0.112, 0.100); !almostEqual(got, 0.1108) {
+		t.Fatalf("upward target = %.4f, want 0.1108", got)
 	}
-	if got := dynamicRawTarget(0.080, 0.100); !almostEqual(got, 0.0902) {
-		t.Fatalf("downward target = %.4f, want 0.0902", got)
-	}
-	if got := dynamicRawTarget(0.096, 0.100); !almostEqual(got, 0.100) {
-		t.Fatalf("small downward noise should be ignored, got %.4f", got)
+	if got := dynamicRawTarget(0.080, 0.100); !almostEqual(got, 0.082) {
+		t.Fatalf("downward target = %.4f, want 0.0820", got)
 	}
 }
 
-func TestDynamicPublishedTargetUsesAsymmetricStepLimits(t *testing.T) {
+func TestDynamicPublishedTargetUsesSymmetricStepLimits(t *testing.T) {
 	if got := dynamicPublishedTarget(0.100, 0.200); !almostEqual(got, 0.120) {
 		t.Fatalf("upward limited target = %.4f", got)
 	}
-	if got := dynamicPublishedTarget(0.100, 0.020); !almostEqual(got, 0.090) {
+	if got := dynamicPublishedTarget(0.100, 0.020); !almostEqual(got, 0.080) {
 		t.Fatalf("downward limited target = %.4f", got)
 	}
 }
 
-func TestDynamicGroupDeadbandUsesOnePercentOrPoint001(t *testing.T) {
-	if dynamicGroupRateChangeSignificant(0.100, 0.1009) {
-		t.Fatal("change inside 0.001 deadband should be ignored")
+func TestDynamicGroupDeadbandUsesQuarterPercentOrPoint0002(t *testing.T) {
+	if dynamicGroupRateChangeSignificant(0.100, 0.10019) {
+		t.Fatal("change inside 0.0002 deadband should be ignored")
 	}
-	if !dynamicGroupRateChangeSignificant(0.100, 0.101) {
-		t.Fatal("0.001 change should be applied")
+	if !dynamicGroupRateChangeSignificant(0.100, 0.10025) {
+		t.Fatal("0.25% change should be applied")
 	}
-	if dynamicGroupRateChangeSignificant(0.500, 0.5049) {
-		t.Fatal("change inside 1% deadband should be ignored")
+	if dynamicGroupRateChangeSignificant(0.500, 0.50124) {
+		t.Fatal("change inside 0.25% deadband should be ignored")
 	}
-	if !dynamicGroupRateChangeSignificant(0.500, 0.505) {
-		t.Fatal("1% change should be applied")
+	if !dynamicGroupRateChangeSignificant(0.500, 0.50125) {
+		t.Fatal("0.25% change should be applied")
 	}
 }
 
@@ -52,8 +49,9 @@ func TestDynamicMemoryDecaysByConsumedCostAndRepricesSavedWeights(t *testing.T) 
 	memory := DynamicCostMemory{
 		Denominator: 5,
 		AccountBase: map[int64]float64{1: 5},
+		AccountCost: 0.5,
 	}
-	rows := []GroupUsageAccountStats{{AccountID: 2, StandardCost: 5, BaseCost: 5}}
+	rows := []GroupUsageAccountStats{{AccountID: 2, StandardCost: 5, BaseCost: 5, AccountCost: 1}}
 	updateDynamicMemory(&memory, 5, rows)
 	wantOldBase := 5 * mathExpMinusOne
 	if diff := memory.AccountBase[1] - wantOldBase; diff < -1e-9 || diff > 1e-9 {
@@ -67,14 +65,18 @@ func TestDynamicMemoryDecaysByConsumedCostAndRepricesSavedWeights(t *testing.T) 
 	if !ok || repriced <= rate {
 		t.Fatalf("saved weights were not repriced: old=%.6f new=%.6f", rate, repriced)
 	}
+	observed, ok := dynamicObservedMemoryRate(memory)
+	if !ok || observed <= 0.15 || observed >= 0.2 {
+		t.Fatalf("unexpected observed cost rate %.6f ok=%t", observed, ok)
+	}
 }
 
 const mathExpMinusOne = 0.36787944117144233
 
 func TestDynamicBootstrapNormalizesMemoryBudgets(t *testing.T) {
 	rows := []GroupUsageAccountStats{
-		{GroupID: 24, AccountID: 1, Requests: 20, StandardCost: 70, BaseCost: 70, CurrentAccountRate: 0.1},
-		{GroupID: 24, AccountID: 2, Requests: 20, StandardCost: 30, BaseCost: 30, CurrentAccountRate: 0.2},
+		{GroupID: 24, AccountID: 1, Requests: 20, StandardCost: 70, BaseCost: 70, AccountCost: 7, CurrentAccountRate: 0.1},
+		{GroupID: 24, AccountID: 2, Requests: 20, StandardCost: 30, BaseCost: 30, AccountCost: 6, CurrentAccountRate: 0.2},
 	}
 	state := seedDynamicGroupState(rows, 99)
 	if state == nil {
@@ -87,6 +89,11 @@ func TestDynamicBootstrapNormalizesMemoryBudgets(t *testing.T) {
 	slow, slowOK := dynamicMemoryRate(state.Slow, state.LastAccountRates)
 	if !fastOK || !slowOK || !almostEqual(fast, 0.13) || !almostEqual(slow, 0.13) {
 		t.Fatalf("bootstrap rates fast=%.4f/%t slow=%.4f/%t", fast, fastOK, slow, slowOK)
+	}
+	observedFast, observedFastOK := dynamicObservedMemoryRate(state.Fast)
+	observedSlow, observedSlowOK := dynamicObservedMemoryRate(state.Slow)
+	if !observedFastOK || !observedSlowOK || !almostEqual(observedFast, 0.13) || !almostEqual(observedSlow, 0.13) {
+		t.Fatalf("bootstrap observed rates fast=%.4f/%t slow=%.4f/%t", observedFast, observedFastOK, observedSlow, observedSlowOK)
 	}
 }
 

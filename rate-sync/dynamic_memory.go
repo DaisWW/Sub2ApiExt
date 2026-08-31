@@ -2,6 +2,8 @@ package main
 
 import "math"
 
+const dynamicPredictionWeight = 0.25
+
 func clearDynamicPending(state *DynamicGroupState) {
 	if state == nil {
 		return
@@ -27,12 +29,15 @@ func seedDynamicGroupState(rows []GroupUsageAccountStats, lastUsageID int64) *Dy
 	state.LastUsageID = lastUsageID
 	summary := summarizeDynamicUsage(rows)
 	for _, row := range rows {
-		if !finiteNonNegative(row.BaseCost) || !validPositiveRate(row.CurrentAccountRate) {
+		accountCost, ok := rowAccountCost(row)
+		if !finiteNonNegative(row.BaseCost) || !validPositiveRate(row.CurrentAccountRate) || !ok {
 			return nil
 		}
 		state.LastAccountRates[row.AccountID] = row.CurrentAccountRate
 		state.Fast.AccountBase[row.AccountID] += row.BaseCost * dynamicFastBudgetUSD / summary.standardCost
+		state.Fast.AccountCost += accountCost * dynamicFastBudgetUSD / summary.standardCost
 		state.Slow.AccountBase[row.AccountID] += row.BaseCost * dynamicSlowBudgetUSD / summary.standardCost
+		state.Slow.AccountCost += accountCost * dynamicSlowBudgetUSD / summary.standardCost
 	}
 	state.Fast.Denominator = dynamicFastBudgetUSD
 	state.Slow.Denominator = dynamicSlowBudgetUSD
@@ -40,6 +45,12 @@ func seedDynamicGroupState(rows []GroupUsageAccountStats, lastUsageID int64) *Dy
 		return nil
 	}
 	if _, ok := dynamicMemoryRate(state.Slow, state.LastAccountRates); !ok {
+		return nil
+	}
+	if _, ok := dynamicObservedMemoryRate(state.Fast); !ok {
+		return nil
+	}
+	if _, ok := dynamicObservedMemoryRate(state.Slow); !ok {
 		return nil
 	}
 	return state
@@ -55,6 +66,7 @@ func updateDynamicMemory(memory *DynamicCostMemory, budget float64, rows []Group
 	}
 	decay := math.Exp(-summary.standardCost / budget)
 	memory.Denominator = decay*memory.Denominator + summary.standardCost
+	memory.AccountCost *= decay
 	for accountID, value := range memory.AccountBase {
 		value *= decay
 		if value < 1e-12 {
@@ -67,7 +79,21 @@ func updateDynamicMemory(memory *DynamicCostMemory, budget float64, rows []Group
 		if finiteNonNegative(row.BaseCost) {
 			memory.AccountBase[row.AccountID] += row.BaseCost
 		}
+		if accountCost, ok := rowAccountCost(row); ok {
+			memory.AccountCost += accountCost
+		}
 	}
+}
+
+func rowAccountCost(row GroupUsageAccountStats) (float64, bool) {
+	if finiteNonNegative(row.AccountCost) && row.AccountCost > 0 {
+		return row.AccountCost, true
+	}
+	if finiteNonNegative(row.BaseCost) && validPositiveRate(row.CurrentAccountRate) {
+		value := row.BaseCost * row.CurrentAccountRate
+		return value, finiteNonNegative(value) && value > 0
+	}
+	return 0, false
 }
 
 func dynamicMemoryRate(memory DynamicCostMemory, rates map[int64]float64) (float64, bool) {
@@ -86,15 +112,18 @@ func dynamicMemoryRate(memory DynamicCostMemory, rates map[int64]float64) (float
 	return value, validPositiveRate(value)
 }
 
-func dynamicRawTarget(fast, slow float64) float64 {
-	difference := fast - slow
-	weight := 0.0
-	if difference >= 0 {
-		weight = clampFloat((difference-0.002)/0.010, 0, 1)
-	} else {
-		weight = 0.7 * clampFloat((-difference-0.006)/0.020, 0, 1)
+func dynamicObservedMemoryRate(memory DynamicCostMemory) (float64, bool) {
+	if memory.Denominator <= 0 || !finiteNonNegative(memory.Denominator) ||
+		!finiteNonNegative(memory.AccountCost) || memory.AccountCost <= 0 {
+		return 0, false
 	}
-	return slow + weight*difference
+	rate := memory.AccountCost / memory.Denominator
+	return rate, validPositiveRate(rate)
+}
+
+func dynamicRawTarget(fast, slow float64) float64 {
+	const fastWeight = 0.9
+	return fastWeight*fast + (1-fastWeight)*slow
 }
 
 func dynamicPublishedTarget(current, rawTarget float64) float64 {
@@ -114,9 +143,10 @@ func usableDynamicGroupState(state *DynamicGroupState) bool {
 	if state == nil || !state.Initialized || state.LastUsageID < 0 || state.LastAccountRates == nil {
 		return false
 	}
-	_, fastOK := dynamicMemoryRate(state.Fast, state.LastAccountRates)
-	_, slowOK := dynamicMemoryRate(state.Slow, state.LastAccountRates)
-	return fastOK && slowOK
+	_, fastObservedOK := dynamicObservedMemoryRate(state.Fast)
+	_, slowObservedOK := dynamicObservedMemoryRate(state.Slow)
+	_, predictedOK := dynamicMemoryRate(state.Fast, state.LastAccountRates)
+	return fastObservedOK && slowObservedOK && predictedOK
 }
 
 func relevantAccountRatesChanged(state *DynamicGroupState, rates map[int64]float64) bool {

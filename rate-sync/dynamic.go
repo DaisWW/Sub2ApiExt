@@ -9,14 +9,14 @@ import (
 
 const (
 	dynamicFastBudgetUSD        = 5.0
-	dynamicSlowBudgetUSD        = 100.0
+	dynamicSlowBudgetUSD        = 20.0
 	dynamicBootstrapWindow      = 6 * time.Hour
 	dynamicBootstrapMaxWindow   = 24 * time.Hour
 	dynamicBootstrapWindowLabel = "1h/6h/24h"
 	dynamicRiseStepLimit        = 0.020
-	dynamicFallStepLimit        = 0.010
-	dynamicAbsoluteDeadband     = 0.001
-	dynamicRelativeDeadband     = 0.01
+	dynamicFallStepLimit        = 0.020
+	dynamicAbsoluteDeadband     = 0.0002
+	dynamicRelativeDeadband     = 0.0025
 )
 
 var dynamicBootstrapWindowOrder = [...]time.Duration{
