@@ -204,12 +204,15 @@ export class DashboardPanel {
       ? (this.#currentConcurrency.get(item.key) || 0)
       : null;
     const currentConcurrencyValue = currentConcurrency === null ? '—' : `${formatCount(currentConcurrency)} 条`;
-    const currentConcurrencyLabel = item.kind === 'group' ? '成员账户并发' : '当前并发请求';
     const currentConcurrencyTitle = this.#activityLoaded && !this.#concurrencyAvailable
       ? '中转站 Redis 实时并发数据当前不可用'
-      : item.kind === 'group'
-        ? '组内可调度成员账户的当前并发总和；共享账户会同时计入它所属的多个分组'
-        : '直接读取中转站当前占用的账户请求并发槽位；请求结束即释放，不等于空闲聊天窗口数';
+      : '直接读取中转站当前占用的账户请求并发槽位；请求结束即释放，不等于空闲聊天窗口数';
+    const currentConcurrencyMetric = item.kind === 'account'
+      ? `<div class="target-live-metric" title="${escapeHTML(currentConcurrencyTitle)}">
+            <span class="target-live-label">当前并发请求</span>
+            <strong class="target-live-value${currentConcurrency !== null && currentConcurrency > 0 ? ' has-concurrency' : ''}">${currentConcurrencyValue}</strong>
+          </div>`
+      : '';
     const targetNote = evidenceNote(item, status);
     const note = targetNote
       ? `<div class="target-note">${escapeHTML(targetNote)}</div>`
@@ -233,7 +236,7 @@ export class DashboardPanel {
           <span class="availability-label">24 小时窗口观测通过率${availabilityDetail}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
         </div>
-        <div class="target-live">
+        <div class="target-live${item.kind === 'group' ? ' target-live-group' : ''}">
           <div class="target-live-metric" title="${escapeHTML(activeUsersTitle)}">
             <span class="target-live-label">${formatActivityWindow(this.#activityWindowSeconds)}活跃用户</span>
             <strong class="target-live-value${activeUsers !== null && activeUsers > 0 ? ' has-users' : ''}">${activeUsersValue}</strong>
@@ -242,10 +245,7 @@ export class DashboardPanel {
             <span class="target-live-label">${formatActivityWindow(this.#activityWindowSeconds)}请求数</span>
             <strong class="target-live-value${activeRequests !== null && activeRequests > 0 ? ' has-requests' : ''}">${activeRequestsValue}</strong>
           </div>
-          <div class="target-live-metric" title="${escapeHTML(currentConcurrencyTitle)}">
-            <span class="target-live-label">${currentConcurrencyLabel}</span>
-            <strong class="target-live-value${currentConcurrency !== null && currentConcurrency > 0 ? ' has-concurrency' : ''}">${currentConcurrencyValue}</strong>
-          </div>
+          ${currentConcurrencyMetric}
         </div>
         <div class="metrics">
           ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 24 小时成功样本的首字/首字节中位数')}

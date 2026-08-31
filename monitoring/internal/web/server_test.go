@@ -125,6 +125,28 @@ func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
 	}
 }
 
+func TestDashboardHidesGroupConcurrencyMetric(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	request := httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("got status %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, marker := range []string{
+		"const currentConcurrencyMetric = item.kind === 'account'",
+		"target-live-group",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("dashboard.js is missing %q", marker)
+		}
+	}
+	if strings.Contains(body, "成员账户并发") {
+		t.Error("dashboard.js still exposes group member concurrency")
+	}
+}
+
 func TestStaticResponsesUseConfiguredFrameAncestors(t *testing.T) {
 	server := New((*monitor.Service)(nil), "'self' https://dashboard.example.test:8443")
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
