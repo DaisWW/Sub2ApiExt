@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"errors"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/store"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/web"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -44,7 +46,23 @@ func main() {
 		logger.Error("database unavailable", "error", err)
 		os.Exit(1)
 	}
-	repository := store.New(db)
+	var redisClient *redis.Client
+	if cfg.RedisAddr != "" {
+		redisOptions := &redis.Options{Addr: cfg.RedisAddr, Password: cfg.RedisPassword, DB: cfg.RedisDB}
+		if cfg.RedisTLS {
+			redisOptions.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		redisClient = redis.NewClient(redisOptions)
+		defer redisClient.Close()
+		redisCtx, redisCancel := context.WithTimeout(ctx, 5*time.Second)
+		err = redisClient.Ping(redisCtx).Err()
+		redisCancel()
+		if err != nil {
+			logger.Warn("Redis unavailable; current concurrency will be shown as unavailable", "error", err)
+		}
+	}
+	repository := store.New(db, redisClient)
+	repository.SetConcurrencySlotTTL(cfg.ConcurrencySlotTTL)
 	if err := repository.EnsureSchema(ctx); err != nil {
 		logger.Error("ensure monitoring schema failed", "error", err)
 		os.Exit(1)

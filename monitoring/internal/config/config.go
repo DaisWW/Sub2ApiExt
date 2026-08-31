@@ -12,17 +12,22 @@ import (
 )
 
 type Config struct {
-	ListenAddr        string
-	DatabaseURL       string
-	Interval          time.Duration
-	RequestTimeout    time.Duration
-	Retention         time.Duration
-	ProbeConcurrency  int
-	FailureThreshold  int
-	RecoveryThreshold int
-	DefaultModel      string
-	AllowPrivateHost  bool
-	FrameAncestors    string
+	ListenAddr         string
+	DatabaseURL        string
+	RedisAddr          string
+	RedisPassword      string
+	RedisDB            int
+	RedisTLS           bool
+	ConcurrencySlotTTL time.Duration
+	Interval           time.Duration
+	RequestTimeout     time.Duration
+	Retention          time.Duration
+	ProbeConcurrency   int
+	FailureThreshold   int
+	RecoveryThreshold  int
+	DefaultModel       string
+	AllowPrivateHost   bool
+	FrameAncestors     string
 }
 
 func Load() (Config, error) {
@@ -31,17 +36,22 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("MONITORING_FRAME_ANCESTORS: %w", err)
 	}
 	c := Config{
-		ListenAddr:        envString("MONITORING_LISTEN_ADDR", ":8090"),
-		DatabaseURL:       envString("MONITORING_DATABASE_URL", ""),
-		Interval:          envDuration("MONITORING_INTERVAL", 60*time.Second),
-		RequestTimeout:    envDuration("MONITORING_REQUEST_TIMEOUT", 30*time.Second),
-		Retention:         envDuration("MONITORING_RETENTION", 30*24*time.Hour),
-		ProbeConcurrency:  envInt("MONITORING_PROBE_CONCURRENCY", 8),
-		FailureThreshold:  envInt("MONITORING_FAILURE_THRESHOLD", 2),
-		RecoveryThreshold: envInt("MONITORING_RECOVERY_THRESHOLD", 1),
-		DefaultModel:      envString("MONITORING_DEFAULT_MODEL", "gpt-4o-mini"),
-		AllowPrivateHost:  strings.EqualFold(envString("MONITORING_ALLOW_PRIVATE_HOSTS", "false"), "true"),
-		FrameAncestors:    frameAncestors,
+		ListenAddr:         envString("MONITORING_LISTEN_ADDR", ":8090"),
+		DatabaseURL:        envString("MONITORING_DATABASE_URL", ""),
+		RedisAddr:          buildRedisAddr(),
+		RedisPassword:      os.Getenv("REDIS_PASSWORD"),
+		RedisDB:            envIntAllowZero("REDIS_DB", 0),
+		RedisTLS:           strings.EqualFold(envString("REDIS_ENABLE_TLS", "false"), "true"),
+		ConcurrencySlotTTL: envDuration("MONITORING_CONCURRENCY_SLOT_TTL", 30*time.Minute),
+		Interval:           envDuration("MONITORING_INTERVAL", 60*time.Second),
+		RequestTimeout:     envDuration("MONITORING_REQUEST_TIMEOUT", 30*time.Second),
+		Retention:          envDuration("MONITORING_RETENTION", 30*24*time.Hour),
+		ProbeConcurrency:   envInt("MONITORING_PROBE_CONCURRENCY", 8),
+		FailureThreshold:   envInt("MONITORING_FAILURE_THRESHOLD", 2),
+		RecoveryThreshold:  envInt("MONITORING_RECOVERY_THRESHOLD", 1),
+		DefaultModel:       envString("MONITORING_DEFAULT_MODEL", "gpt-4o-mini"),
+		AllowPrivateHost:   strings.EqualFold(envString("MONITORING_ALLOW_PRIVATE_HOSTS", "false"), "true"),
+		FrameAncestors:     frameAncestors,
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDatabaseURL()
@@ -52,6 +62,9 @@ func Load() (Config, error) {
 	if c.Interval < 15*time.Second {
 		return Config{}, fmt.Errorf("MONITORING_INTERVAL must be at least 15s")
 	}
+	if c.RedisDB < 0 || c.ConcurrencySlotTTL <= 0 {
+		return Config{}, fmt.Errorf("Redis DB and concurrency slot TTL must be non-negative/positive")
+	}
 	if c.RequestTimeout <= 0 || c.Retention <= 0 || c.ProbeConcurrency <= 0 {
 		return Config{}, fmt.Errorf("monitoring timeout, retention, and concurrency must be positive")
 	}
@@ -59,6 +72,14 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("alert thresholds must be positive")
 	}
 	return c, nil
+}
+
+func buildRedisAddr() string {
+	host := strings.TrimSpace(os.Getenv("REDIS_HOST"))
+	if host == "" {
+		return ""
+	}
+	return net.JoinHostPort(strings.Trim(host, "[]"), envString("REDIS_PORT", "6379"))
 }
 
 func parseFrameAncestors(value string) (string, error) {
@@ -129,6 +150,18 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func envIntAllowZero(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func envDuration(key string, fallback time.Duration) time.Duration {

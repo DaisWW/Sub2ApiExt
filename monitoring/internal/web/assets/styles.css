@@ -219,10 +219,14 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .target-name { margin: 5px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; font-weight: 700; }
 .target-platform { margin-top: 5px; color: var(--muted); font-size: 12px; }
 .target-note { margin-top: 8px; color: var(--soft); font-size: 11px; line-height: 1.45; }
-.target-live { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 16px; }
+.target-live { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
+.target-live-metric { min-width: 0; display: grid; gap: 4px; }
+.target-live-metric + .target-live-metric { border-left: 1px solid var(--line); padding-left: 12px; }
 .target-live-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 11px; white-space: nowrap; }
-.target-live-value { color: var(--muted); font-size: 18px; font-weight: 750; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.target-live-value { display: block; color: var(--muted); font-size: 18px; font-weight: 750; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .target-live-value.has-users { color: var(--mint); }
+.target-live-value.has-requests { color: var(--blue); }
+.target-live-value.has-concurrency { color: var(--amber); }
 .status-badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 0 auto; padding: 5px 8px; border-radius: 999px; font-size: 10px; font-weight: 750; }
 .status-operational { color: var(--mint); background: var(--mint-quiet); }
 .status-degraded { color: var(--amber); background: var(--amber-quiet); }

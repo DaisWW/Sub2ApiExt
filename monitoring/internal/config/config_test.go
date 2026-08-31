@@ -36,6 +36,7 @@ func TestBuildDatabaseURLEscapesCredentials(t *testing.T) {
 
 func TestLoadRejectsNonPositiveRetention(t *testing.T) {
 	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
 	t.Setenv("MONITORING_RETENTION", "0")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected non-positive retention to be rejected")
@@ -62,6 +63,7 @@ func TestParseFrameAncestorsRejectsWildcardAndNonOriginValues(t *testing.T) {
 
 func TestLoadUsesFrameAncestorsConfiguration(t *testing.T) {
 	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
 	t.Setenv("MONITORING_FRAME_ANCESTORS", "https://dashboard.example.test")
 	c, err := Load()
 	if err != nil {
@@ -73,5 +75,25 @@ func TestLoadUsesFrameAncestorsConfiguration(t *testing.T) {
 	t.Setenv("MONITORING_FRAME_ANCESTORS", "*")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "wildcard") {
 		t.Fatalf("wildcard configuration error = %v", err)
+	}
+}
+
+func TestLoadBuildsRedisConfiguration(t *testing.T) {
+	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
+	t.Setenv("REDIS_PORT", "6380")
+	t.Setenv("REDIS_PASSWORD", "secret")
+	t.Setenv("REDIS_DB", "2")
+	t.Setenv("REDIS_ENABLE_TLS", "true")
+	t.Setenv("MONITORING_CONCURRENCY_SLOT_TTL", "45m")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RedisAddr != "redis.example.test:6380" || c.RedisPassword != "secret" || c.RedisDB != 2 || !c.RedisTLS {
+		t.Fatalf("Redis configuration = %+v", c)
+	}
+	if c.ConcurrencySlotTTL.String() != "45m0s" {
+		t.Fatalf("concurrency slot TTL = %s", c.ConcurrencySlotTTL)
 	}
 }

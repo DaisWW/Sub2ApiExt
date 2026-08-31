@@ -4,13 +4,27 @@ import (
 	"context"
 	"database/sql"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type Store struct {
-	db *sql.DB
+	db                 *sql.DB
+	redis              *redis.Client
+	concurrencySlotTTL time.Duration
 }
 
-func New(db *sql.DB) *Store { return &Store{db: db} }
+func New(db *sql.DB, redisClient ...*redis.Client) *Store {
+	store := &Store{db: db}
+	if len(redisClient) > 0 {
+		store.redis = redisClient[0]
+	}
+	return store
+}
+
+func (s *Store) SetConcurrencySlotTTL(value time.Duration) {
+	s.concurrencySlotTTL = value
+}
 
 const cycleAdvisoryLockID int64 = 734205318
 

@@ -178,18 +178,20 @@ type Dashboard struct {
 	ProbeRunning bool              `json:"probe_running"`
 }
 
-// LiveActivity 是最近活动请求按监控目标聚合的视图，不包含用户标识或请求明细。
-// 活跃用户表示窗口内至少有一条有效请求的不同用户，不等同于进行中的请求数。
+// LiveActivity 是最近活动与网关当前并发按监控目标聚合的视图，不包含用户标识或请求明细。
 type LiveActivity struct {
 	GeneratedAt   time.Time            `json:"generated_at"`
 	WindowStart   time.Time            `json:"window_start"`
 	WindowSeconds int                  `json:"window_seconds"`
+	ConcurrencyOK bool                 `json:"concurrency_available"`
 	Targets       []LiveActivityTarget `json:"targets"`
 }
 
 type LiveActivityTarget struct {
-	TargetKey   string `json:"target_key"`
-	ActiveUsers int64  `json:"active_users"`
+	TargetKey          string `json:"target_key"`
+	ActiveUsers        int64  `json:"active_users"`
+	Requests           int64  `json:"requests"`
+	CurrentConcurrency int64  `json:"current_concurrency"`
 }
 
 // UsageRanking 是由网关 usage_logs 生成的只读用量视图。

@@ -43,7 +43,7 @@ Bedrock、Service Account、Code Assist project OAuth 等需要专用签名或�
 - 最近 1 小时、24 小时、当天、昨天、7 天、15 天、30 天用量窗口；
 - 模型/分组视图可分别切换 Tokens、成本，均使用环图；小时/天趋势柱图按渠道展示，Tokens/成本使用堆叠柱，每百万 Tokens 成本使用并列柱；
 - 后台扫描与错误恢复巡检倒计时，扫描开始后自动切换为运行状态；
-- 实时监控卡片显示近 5 分钟活跃用户数；该口径是“窗口内活跃”，不等同于进行中的请求数；
+- 实时监控卡片同时显示近 5 分钟活跃用户数、有效请求数，以及直接来自中转站 Redis 的当前并发请求数，账户和分组均显示；分组并发为组内可调度账户之和；
 - 历史明细、连续失败/恢复告警、浏览器通知。
 
 浏览器仅允许 `GET` 和 `HEAD`。访问者可以刷新、筛选、查看历史和告警，但不能触发探测、确认告警或修改网关数据。后台扫描、错误恢复探测和告警生成只由 Worker 执行。
@@ -71,7 +71,15 @@ GET /api/v1/monitor/usage-ranking?period=24h&limit=10
 GET /api/v1/monitor/activity
 ```
 
-接口只返回最近 5 分钟有效请求按监控目标去重后的活跃用户数，以 `target_key` 区分账户和分组；不会返回用户标识、API Key、IP 或会话明细。面板默认每 10 秒轮询该接口。它反映窗口内最近有请求的用户，不提供严格的进行中请求用户映射。
+接口每次请求都直接读取中转站 PostgreSQL 和 Redis，以 `target_key` 区分账户和分组；不会返回用户标识、API Key、IP 或会话明细。面板默认每 10 秒轮询，不依赖 60 秒后台扫描周期。
+
+- `active_users`：最近 5 分钟 `usage_logs` 中有效请求的去重用户数；
+- `requests`：最近 5 分钟已完成且 `actual_cost > 0` 的请求行数；
+- `current_concurrency`：Redis 中当前占用的账户请求并发槽位，口径与 Sub2API 管理端的 `current_concurrency` 一致；分组按可调度成员账户汇总。Redis 没有分组级并发键，因此共享账户的并发会同时显示在它所属的多个分组中，分组卡片明确标为“成员账户并发”。
+
+`current_concurrency` 比请求日志更实时，但只表示此刻正在运行的请求。普通 HTTP 聊天窗口空闲时不会占用槽位，因此“打开但没有正在请求的 10 个聊天框”仍无法从现有通用数据可靠统计；这需要客户端或中转站增加统一的会话注册。Redis 暂时不可用时，接口保留近 5 分钟统计并把 `concurrency_available` 设为 `false`，面板显示不可用而不是误报为 0。
+
+`MONITORING_CONCURRENCY_SLOT_TTL` 默认 `30m`，应与 Sub2API 的 `gateway.concurrency_slot_ttl_minutes` 保持一致；默认上游配置无需修改。
 
 ## 内网安全
 
