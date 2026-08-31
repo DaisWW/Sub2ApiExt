@@ -54,7 +54,6 @@ SELECT
         COALESCE(ul.account_rate_multiplier, 1)
     ), 0)::double precision
 FROM usage_logs ul
-LEFT JOIN accounts a ON a.id = ul.account_id
 JOIN groups g ON g.id = ul.group_id
 WHERE ul.group_id IS NOT NULL
   AND ul.created_at >= $1
@@ -82,7 +81,6 @@ SELECT
 FROM windows w
 JOIN usage_logs ul ON ul.created_at >= $1::timestamptz - w.window_seconds * interval '1 second'
     AND ul.created_at < $1::timestamptz
-LEFT JOIN accounts a ON a.id = ul.account_id
 JOIN groups g ON g.id = ul.group_id
 WHERE ul.group_id IS NOT NULL
   AND ul.total_cost > 0
