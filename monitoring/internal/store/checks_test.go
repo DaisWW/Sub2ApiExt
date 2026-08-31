@@ -12,6 +12,18 @@ func TestHistoryQueryRequiresActiveTarget(t *testing.T) {
 		"WITH authorized_target AS",
 		"FROM monitoring_targets",
 		"target_key = $1 AND active = TRUE",
+		"group_request_rows AS MATERIALIZED",
+		"group_request_ranked AS",
+		"group_error_candidates AS",
+		"FROM ops_error_logs oe",
+		"PARTITION BY group_id, request_key",
+		"WHERE position = 1",
+		"COALESCE(is_business_limited, FALSE) = FALSE",
+		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0)) AS status_code",
+		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0), 0) <> 429",
+		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0), 0) >= 500",
+		"CASE WHEN duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
+		"status_code, '', message, created_at, 'request_error'",
 		"WHERE $1 = 'group:-1'",
 		"monitoring_checks.checked_at >= auth.source_updated_at",
 		"usage_logs.created_at >= auth.source_updated_at",
@@ -19,6 +31,12 @@ func TestHistoryQueryRequiresActiveTarget(t *testing.T) {
 		if !strings.Contains(historyQuery, fragment) {
 			t.Fatalf("history query missing %q", fragment)
 		}
+	}
+	rowsStart := strings.Index(historyQuery, "group_request_rows AS MATERIALIZED")
+	rankedStart := strings.Index(historyQuery, "group_request_ranked AS")
+	errorsStart := strings.Index(historyQuery, "group_error_candidates AS")
+	if rowsStart < 0 || rankedStart <= rowsStart || errorsStart <= rankedStart {
+		t.Fatalf("history query must rank all request rows before filtering failures: rows=%d ranked=%d errors=%d", rowsStart, rankedStart, errorsStart)
 	}
 }
 

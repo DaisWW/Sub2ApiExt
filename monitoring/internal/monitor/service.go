@@ -76,7 +76,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 }
 
 func (s *Service) Dashboard(ctx context.Context) (model.Dashboard, error) {
-	dashboard, err := s.store.Dashboard(ctx, s.cfg.Interval*2, int(s.cfg.Interval/time.Second), s.cfg.FailureThreshold)
+	dashboard, err := s.store.Dashboard(ctx, s.cfg.Interval*2, int(s.cfg.Interval/time.Second))
 	if err != nil {
 		return model.Dashboard{}, err
 	}

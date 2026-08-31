@@ -95,7 +95,7 @@ func TestApplyLatestTargetStateExplainsMissingGroupEvidence(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{Kind: model.KindGroup, ProbeEnabled: true}}
 	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
 		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
-	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无真实请求；仅在候选检查或真实请求后更新" {
+	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无真实请求，等待下一次请求确认" {
 		t.Fatalf("missing group evidence = %+v", target.Target)
 	}
 }
@@ -175,13 +175,29 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"percentile_cont(0.95)",
 		"status IN ('operational','degraded') AND first_byte_ms IS NOT NULL",
 		"status IN ('operational','degraded') AND latency_ms IS NOT NULL",
+		"CASE WHEN usage.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
 		"period_usage AS MATERIALIZED",
 		"eligible_usage AS MATERIALIZED",
+		"latest_account_usage AS MATERIALIZED",
+		"latest_group_usage AS MATERIALIZED",
+		"group_request_rows AS MATERIALIZED",
+		"group_request_ranked AS",
+		"group_error_candidates AS MATERIALIZED",
+		"ops_error_logs",
+		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0)) AS status_code",
+		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0), 0) <> 429",
+		"PARTITION BY group_id, request_key",
+		"latest_group_error AS MATERIALIZED",
+		"mc.source <> 'aggregate'",
+		"group_error_wins",
+		"group_success_wins",
+		"COALESCE(group_success_latency_ms, 0) >= 20000",
+		"COALESCE(account_success_latency_ms, 0) >= 20000",
 		"generate_series(0, 23)",
 		"PARTITION BY target_key, bucket_index",
 		"'latency_ms', recent_ranked.latency_ms",
 		"ORDER BY checked_at DESC",
-		"CASE WHEN source = 'history' THEN 0 WHEN source = 'probe' THEN 1 ELSE 2 END",
+		"CASE WHEN source = 'request_error' THEN 0",
 		"COALESCE(recent_ranked.status, 'unknown')",
 		"LEFT JOIN LATERAL",
 		"ORDER BY mc.checked_at DESC, mc.id DESC",
@@ -200,23 +216,15 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"真实请求报错，等待恢复探测",
 		"mc.checked_at >= targets.source_updated_at",
 		"targets.last_activity_at >= targets.source_updated_at",
-		"THEN 'degraded'",
-		"THEN '近期真实请求证明仍可用；候选检查异常，等待巡检确认'",
 		"NOW() - INTERVAL '24 hours' AS start_at",
 		"EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds",
 		"latest_evidence",
 		"latest_evidence_inputs",
-		"COALESCE(alert_states.failure_streak, 0) AS failure_streak",
-		"LEFT JOIN monitoring_alert_states alert_states",
-		"alert_states.updated_at >= targets.source_updated_at",
-		"e.failure_streak",
 		"WHEN t.kind = 'group' THEN g.rate_multiplier::double precision",
 		"WHEN t.kind = 'account' THEN a.rate_multiplier::double precision",
 		"LEFT JOIN accounts a ON t.kind = 'account' AND a.id = t.entity_id AND a.deleted_at IS NULL",
 		"LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL",
-		"kind = 'group'",
-		"source = 'aggregate'",
-		"status, '') IN ('degraded', 'failed', 'error')",
+		"WHEN kind = 'group' THEN NULL",
 	} {
 		if !strings.Contains(dashboardQuery, fragment) {
 			t.Fatalf("dashboard query missing %q", fragment)
@@ -247,6 +255,12 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		!strings.Contains(dashboardQuery, "WHERE t.active = TRUE\n  AND (") {
 		t.Fatal("dashboard target visibility filter is missing")
 	}
+	rowsStart := strings.Index(dashboardQuery, "group_request_rows AS MATERIALIZED")
+	rankedStart := strings.Index(dashboardQuery, "group_request_ranked AS")
+	errorsStart := strings.Index(dashboardQuery, "group_error_candidates AS MATERIALIZED")
+	if rowsStart < 0 || rankedStart <= rowsStart || errorsStart <= rankedStart {
+		t.Fatalf("dashboard query must rank all request rows before filtering failures: rows=%d ranked=%d errors=%d", rowsStart, rankedStart, errorsStart)
+	}
 	selectStart := strings.Index(dashboardQuery, "SELECT t.target_key")
 	if selectStart < 0 {
 		t.Fatal("dashboard query select list is missing")
@@ -257,34 +271,6 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 	if !strings.Contains(selectList, "e.recovery_trigger_at") {
 		t.Fatal("dashboard must expose only the currently winning recovery trigger")
-	}
-}
-
-func TestEffectiveDashboardStatusRequiresConfirmedAggregateFailures(t *testing.T) {
-	if got := effectiveDashboardStatus(model.KindGroup, model.StatusDegraded, "aggregate", 2, 2); got != model.StatusDegraded {
-		t.Fatalf("real traffic backed aggregate risk = %q, want degraded", got)
-	}
-	if got := effectiveDashboardStatus(model.KindGroup, model.StatusFailed, "aggregate", 1, 2); got != model.StatusDegraded {
-		t.Fatalf("single aggregate failure = %q, want degraded", got)
-	}
-	if got := effectiveDashboardStatus(model.KindGroup, model.StatusError, "aggregate", 1, 2); got != model.StatusDegraded {
-		t.Fatalf("single aggregate error = %q, want degraded", got)
-	}
-	if got := effectiveDashboardStatus(model.KindGroup, model.StatusFailed, "aggregate", 2, 2); got != model.StatusFailed {
-		t.Fatalf("confirmed aggregate failure = %q, want failed", got)
-	}
-	if got := effectiveDashboardStatus(model.KindAccount, model.StatusFailed, "aggregate", 1, 2); got != model.StatusFailed {
-		t.Fatalf("account failure must not be downgraded = %q", got)
-	}
-	if got := effectiveDashboardStatus(model.KindGroup, model.StatusFailed, "probe", 1, 2); got != model.StatusFailed {
-		t.Fatalf("non-aggregate group failure must not be downgraded = %q", got)
-	}
-}
-
-func TestPendingAggregateFailureMessageClarifiesUnconfirmedState(t *testing.T) {
-	message := pendingAggregateFailureMessage(sql.NullString{String: "0/2 accounts healthy", Valid: true})
-	if message != "最近一次分组检查失败：分组内健康账户 0/2；等待下一轮确认" {
-		t.Fatalf("pending aggregate message = %q", message)
 	}
 }
 
