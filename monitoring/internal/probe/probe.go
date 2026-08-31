@@ -68,7 +68,7 @@ func newProbeResult(account model.Account) model.ProbeResult {
 
 func accountBlocker(account model.Account) *preparationFailure {
 	status := strings.ToLower(strings.TrimSpace(account.Status))
-	if status != "error" && (status != "active" || !account.Schedulable) {
+	if !account.Schedulable || (status != "active" && status != "error") {
 		return &preparationFailure{class: "account_disabled", message: "account is not schedulable"}
 	}
 	if !SupportsAccount(account) {

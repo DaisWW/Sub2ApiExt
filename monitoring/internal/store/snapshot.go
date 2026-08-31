@@ -569,10 +569,11 @@ func accountIsEnabled(account model.Account) bool {
 	return accountIsActive(account.Status) && account.Schedulable
 }
 
-// accountIsMonitored 保留启用账户和错误账户；错误账户只在有渠道错误证据时
-// 进入恢复探测，不进入启用统计。
+// accountIsMonitored 保留可调度账户和可调度的错误账户；禁用账户不进入
+// 监控、诊断或恢复探测。
 func accountIsMonitored(account model.Account) bool {
-	return strings.EqualFold(strings.TrimSpace(account.Status), "error") || accountIsEnabled(account)
+	return account.Schedulable &&
+		(strings.EqualFold(strings.TrimSpace(account.Status), "error") || accountIsActive(account.Status))
 }
 
 func filterIDs(values []int64, allowed map[int64]struct{}) []int64 {

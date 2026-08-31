@@ -164,10 +164,14 @@ func TestErrorAccountDoesNotContributeAvailability(t *testing.T) {
 func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T) {
 	for _, fragment := range []string{
 		"visible_targets AS MATERIALIZED",
-		"OR (kind = 'account' AND LOWER(TRIM(source_status)) = 'error')",
+		"t.kind <> 'account'",
+		"current_account.schedulable = TRUE",
+		"LOWER(TRIM(current_account.status)) IN ('active', 'error')",
+		"OR (t.kind = 'account' AND LOWER(TRIM(t.source_status)) = 'error')",
 		"FROM visible_targets targets",
-		"(schedulable = TRUE AND LOWER(TRIM(status)) = 'active')",
-		"OR LOWER(TRIM(status)) = 'error'",
+		"JOIN visible_targets visible",
+		"schedulable = TRUE",
+		"LOWER(TRIM(status)) IN ('active', 'error')",
 		"percentile_cont(0.95)",
 		"status IN ('operational','degraded') AND first_byte_ms IS NOT NULL",
 		"status IN ('operational','degraded') AND latency_ms IS NOT NULL",

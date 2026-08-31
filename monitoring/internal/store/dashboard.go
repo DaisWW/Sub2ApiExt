@@ -20,21 +20,30 @@ WITH bounds AS (
            NOW() AS end_at,
            EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds
 ), visible_targets AS MATERIALIZED (
-    SELECT target_key, kind, source_updated_at
-    FROM monitoring_targets
+    SELECT t.target_key, t.kind, t.source_updated_at
+    FROM monitoring_targets t
     WHERE active = TRUE
       AND (
-          LOWER(TRIM(source_status)) = 'active'
-          OR (kind = 'account' AND LOWER(TRIM(source_status)) = 'error')
+          t.kind <> 'account'
+          OR EXISTS (
+              SELECT 1
+              FROM accounts current_account
+              WHERE current_account.id = t.entity_id
+                AND current_account.deleted_at IS NULL
+                AND current_account.schedulable = TRUE
+                AND LOWER(TRIM(current_account.status)) IN ('active', 'error')
+          )
+      )
+      AND (
+          LOWER(TRIM(t.source_status)) = 'active'
+          OR (t.kind = 'account' AND LOWER(TRIM(t.source_status)) = 'error')
       )
 ), active_accounts AS MATERIALIZED (
 	SELECT id
 	FROM accounts
 	WHERE deleted_at IS NULL
-	  AND (
-	      (schedulable = TRUE AND LOWER(TRIM(status)) = 'active')
-	      OR LOWER(TRIM(status)) = 'error'
-	  )
+	  AND schedulable = TRUE
+	  AND LOWER(TRIM(status)) IN ('active', 'error')
 ), active_groups AS MATERIALIZED (
 	SELECT id
 	FROM groups
@@ -219,6 +228,8 @@ SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t
        s.latency_fastest, s.latency_median, s.latency_p95,
        COALESCE(r.samples, '[]'::jsonb)
 FROM monitoring_targets t
+JOIN visible_targets visible
+  ON visible.target_key = t.target_key
 CROSS JOIN bounds
 LEFT JOIN accounts a ON t.kind = 'account' AND a.id = t.entity_id AND a.deleted_at IS NULL
 LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL

@@ -75,6 +75,10 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 	}
 	probeAccounts := make([]model.Account, 0, len(snapshot.Accounts))
 	for _, account := range snapshot.Accounts {
+		if !account.Schedulable ||
+			(!accountIsActive(account) && !strings.EqualFold(strings.TrimSpace(account.Status), "error")) {
+			continue
+		}
 		recoveryEligible := probeEligible(account)
 		evidence := latestAccountEvidence(account)
 		if evidence.valid && successfulEvidence(evidence.status) && !successfulEvidenceNeedsRecovery(account, evidence) {
@@ -213,11 +217,14 @@ func recoveryProbeImmediate(account model.Account, evidence accountEvidence, now
 	return probeDue(account.LastProbeAt, now, recoveryProbeInterval)
 }
 
-// probeEligible deliberately has a narrow meaning: an account is probed only
-// to recover from a recorded real gateway channel error. An account status of
-// error without that evidence remains visible, but never causes an upstream
-// request by itself.
+// probeEligible deliberately has a narrow meaning: a schedulable account is
+// probed only to recover from a recorded real gateway channel error. An account
+// status of error without that evidence remains visible, but never causes an
+// upstream request by itself.
 func probeEligible(account model.Account) bool {
+	if !account.Schedulable {
+		return false
+	}
 	if !accountIsEnabled(account) && !strings.EqualFold(strings.TrimSpace(account.Status), "error") {
 		return false
 	}

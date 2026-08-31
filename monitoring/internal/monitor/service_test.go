@@ -104,6 +104,18 @@ func TestNewCycleBatchStopsErrorRecoveryAfterSuccessfulProbe(t *testing.T) {
 	}
 }
 
+func TestNewCycleBatchSkipsDisabledAccounts(t *testing.T) {
+	now := time.Now().UTC()
+	errorAt := now.Add(-time.Minute)
+	batch, queued := newCycleBatch(model.Snapshot{Accounts: []model.Account{{
+		ID: 19, Platform: "openai", Type: "api_key", Status: "error", Schedulable: false,
+		LastChannelErrorAt: &errorAt,
+	}}}, now, time.Minute)
+	if len(queued) != 0 || len(batch.accountResults) != 0 || len(batch.observations) != 0 {
+		t.Fatalf("disabled account must not enter monitoring cycle: queued=%d results=%d observations=%d", len(queued), len(batch.accountResults), len(batch.observations))
+	}
+}
+
 func TestNewCycleBatchInvalidatesEvidenceAfterAccountUpdate(t *testing.T) {
 	now := time.Now().UTC()
 	updated := now.Add(-10 * time.Minute)
@@ -271,8 +283,11 @@ func TestProbeEligibilityNormalizesAccountStatus(t *testing.T) {
 		t.Fatal("error status without a channel error must not be probed")
 	}
 	errorAt := time.Now().UTC().Add(-time.Minute)
-	if !probeEligible(model.Account{Status: " ERROR ", LastChannelErrorAt: &errorAt}) {
+	if !probeEligible(model.Account{Status: " ERROR ", Schedulable: true, LastChannelErrorAt: &errorAt}) {
 		t.Fatal("normalized channel error should be probe eligible")
+	}
+	if probeEligible(model.Account{Status: "error", Schedulable: false, LastChannelErrorAt: &errorAt}) {
+		t.Fatal("disabled error account must not be probe eligible")
 	}
 	if probeEligible(model.Account{Status: "disabled", LastChannelErrorAt: &errorAt}) {
 		t.Fatal("disabled account must not be probed even with stale channel evidence")

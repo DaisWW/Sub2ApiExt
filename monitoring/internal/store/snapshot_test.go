@@ -81,6 +81,9 @@ func TestAccountStatusesAreNormalizedForMonitoringTargets(t *testing.T) {
 			t.Fatalf("status %q was not recognized as a monitored account", status)
 		}
 	}
+	if accountIsMonitored(model.Account{Status: "error", Schedulable: false}) {
+		t.Fatal("disabled error account must not be monitored")
+	}
 }
 
 func TestFilterGroupMembersPreservesConfiguredPriority(t *testing.T) {

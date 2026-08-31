@@ -289,4 +289,7 @@ func TestAccountBlockerNormalizesStatus(t *testing.T) {
 			t.Errorf("accountBlocker(%q) returned %v", status, failure)
 		}
 	}
+	if failure := accountBlocker(model.Account{Platform: "openai", Type: "apikey", Status: "error", Schedulable: false}); failure == nil {
+		t.Fatal("disabled error account must be blocked")
+	}
 }
