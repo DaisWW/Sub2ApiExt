@@ -117,7 +117,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .usage-card-primary-metric strong { overflow: hidden; font-size: 21px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .cache-metric strong { color: var(--mint); }
 .unit-cost-metric strong { color: var(--amber); }
-.usage-card-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 18px; padding-top: 14px; }
+.usage-card-details { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px 18px; padding-top: 14px; }
 .usage-card-details > div { min-width: 0; display: grid; gap: 4px; }
 .usage-card-details strong { overflow: hidden; color: var(--soft); font-size: 12px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .usage-card-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 15px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
@@ -361,6 +361,7 @@ td { color: var(--soft); }
   .target-grid { grid-template-columns: minmax(0, 1fr); }
   .usage-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .usage-card-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-entity-grid { grid-template-columns: 1fr; }
   .usage-card-primary-metric strong { font-size: 19px; }
   .usage-chart-grid { grid-template-columns: 1fr; }
