@@ -47,17 +47,13 @@ export function statusLabel(status) {
     degraded: '可用但延迟高',
     failed: '错误/不可用',
     error: '错误/不可用',
-    // Active targets without a fresh request keep their last usable route.
-    // Unknown is therefore rendered as the normal usable baseline; the
-    // monitoring data still retains the raw unknown state for decisions.
-    unknown: '可用',
+    unknown: '待确认',
     disabled: '错误/不可用'
   }[normalizeStatus(status)];
 }
 
 export function statusClass(status) {
   const normalized = normalizeStatus(status);
-  if (normalized === 'unknown') return 'status-operational';
   if (normalized === 'disabled') return 'status-failed';
   return `status-${normalized}`;
 }
@@ -66,7 +62,7 @@ export function historyStatusClass(status) {
   const normalized = normalizeStatus(status);
   if (normalized === 'operational') return 'ok';
   if (normalized === 'degraded') return 'warn';
-  if (normalized === 'unknown') return 'ok';
+  if (normalized === 'unknown') return 'neutral';
   return 'bad';
 }
 

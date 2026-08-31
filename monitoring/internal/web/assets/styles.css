@@ -207,7 +207,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .target-operational::before { background: var(--mint); }
 .target-degraded::before { background: var(--amber); }
 .target-failed::before, .target-error::before { background: var(--red); }
-.target-unknown::before { background: var(--mint); }
+.target-unknown::before { background: var(--muted); }
 .target-disabled::before { background: var(--red); }
 .target-card:hover { border-color: #50647b; background: var(--surface-raised); transform: translateY(-2px); }
 .target-card:focus-visible { border-color: var(--blue); background: var(--surface-raised); }
@@ -232,7 +232,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .status-operational { color: var(--mint); background: var(--mint-quiet); }
 .status-degraded { color: var(--amber); background: var(--amber-quiet); }
 .status-failed, .status-error { color: var(--red); background: var(--red-quiet); }
-.status-unknown { color: var(--mint); background: var(--mint-quiet); }
+.status-unknown { color: var(--muted); background: #26313d; }
 .status-disabled { color: var(--red); background: var(--red-quiet); }
 .stale-label { margin-left: 6px; color: var(--amber); }
 .availability { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 23px 0 18px; }
@@ -252,6 +252,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .status-history i.ok { background: var(--mint); }
 .status-history i.warn { background: var(--amber); }
 .status-history i.bad { background: var(--red); }
+.status-history i.neutral { background: #536174; }
 .status-history i[title] { cursor: help; }
 .status-history-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 9px; line-height: 1; }
 .status-history-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
@@ -259,6 +260,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .status-history-legend i.ok { background: var(--mint); }
 .status-history-legend i.warn { background: var(--amber); }
 .status-history-legend i.bad { background: var(--red); }
+.status-history-legend i.neutral { background: #536174; }
 .status-history-caption { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .card-foot > span { flex: 0 1 42%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .loading-state, .empty-state {

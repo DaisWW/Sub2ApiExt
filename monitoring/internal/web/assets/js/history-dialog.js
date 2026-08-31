@@ -47,14 +47,15 @@ export class HistoryDialog {
   }
 
   #render(items) {
-    const successful = items.filter(isSuccessful).length;
-    const availability = items.length ? successful * 100 / items.length : 0;
+    const visibleItems = items.filter((item) => !(item?.kind === 'group' && item?.source === 'aggregate'));
+    const successful = visibleItems.filter(isSuccessful).length;
+    const availability = visibleItems.length ? successful * 100 / visibleItems.length : 0;
     $('#historySummary').innerHTML = `
-      <span>最近 24 小时 · 列表样本 ${items.length}</span>
+      <span>最近 24 小时 · 列表样本 ${visibleItems.length}</span>
       <span>列表样本可用率 ${formatPct(availability)}</span>
       <span>真实请求为首字，主动探测为首字节近似值；健康颜色只表示可用、延迟高或错误/不可用</span>`;
-    $('#historyBody').innerHTML = items.length
-      ? items.map(renderHistoryRow).join('')
+    $('#historyBody').innerHTML = visibleItems.length
+      ? visibleItems.map(renderHistoryRow).join('')
       : '<tr><td colspan="4">最近 24 小时没有历史记录</td></tr>';
   }
 }
@@ -67,7 +68,7 @@ function isSuccessful(item) {
 function renderHistoryRow(item) {
   const status = displayHistoryStatus(item);
   const message = String(item.message || '请求失败');
-  const error = isSuccessful(item) ? '' : `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>`;
+  const error = status === 'failed' ? `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>` : '';
   return `<tr>
     <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small></td>
     <td class="table-status ${historyStatusClass(status)}">${historyStatusLabel(status)}${error}</td>
@@ -82,6 +83,7 @@ function historyStatusLabel(status) {
 function displayHistoryStatus(item) {
   const normalized = normalizeStatus(item?.status);
   if (normalized === 'failed' || normalized === 'error' || normalized === 'disabled') return 'failed';
+  if (normalized === 'unknown') return 'unknown';
   const latency = Number(item?.latency_ms);
   if (Number.isFinite(latency) && latency > 0) {
     return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
@@ -94,7 +96,7 @@ function displayHistoryStatus(item) {
 
 function sourceLabel(source) {
   if (source === 'history') return '真实请求';
-  if (source === 'aggregate') return '分组候选检查';
+  if (source === 'aggregate') return '后台巡检';
   if (source === 'probe') return '主动探测';
   if (source === 'request_error') return '真实请求错误';
   if (source === 'cache') return '缓存证据';

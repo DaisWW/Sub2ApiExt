@@ -179,14 +179,24 @@ export class DashboardPanel {
     const latency = stats.latency || {};
     const status = normalizeStatus(item.status);
     const displayStatus = displayHealthStatus(item, status);
+    const isGroup = item.kind === 'group';
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
-    const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
-    const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
+    const availabilityDetail = !isGroup && hasSamples ? ` · ${samples} 次样本` : '';
+    const availabilityLabel = isGroup
+      ? '最近成功请求耗时'
+      : `24 小时窗口观测通过率${availabilityDetail}`;
+    const availabilityValue = isGroup
+      ? formatMs(item.latest_latency_ms)
+      : (hasSamples ? formatPct(stats.availability) : '—');
     const availabilityStatus = displayStatus === 'degraded'
       ? 'degraded'
-      : item.kind === 'group' && status === 'degraded' ? '' : status;
-    const availabilityTone = hasSamples ? availabilityClass(stats.availability, availabilityStatus) : 'neutral';
+      : isGroup && status === 'degraded' ? '' : status;
+    // Group availability is a historical request metric, not a member-health
+    // signal; keep it neutral so the badge remains the only public health cue.
+    const availabilityTone = isGroup
+      ? groupLatencyTone(displayStatus)
+      : (hasSamples ? availabilityClass(stats.availability, availabilityStatus) : 'neutral');
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
@@ -233,7 +243,7 @@ export class DashboardPanel {
           </div>
         </div>
         <div class="availability">
-          <span class="availability-label">24 小时窗口观测通过率${availabilityDetail}</span>
+          <span class="availability-label">${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
         </div>
         <div class="target-live${item.kind === 'group' ? ' target-live-group' : ''}">
@@ -307,18 +317,15 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
       const sampleAt = Date.parse(String(sampleCheckedAt));
       const triggerAt = Date.parse(String(item?.recovery_trigger_at || ''));
       if (Number.isFinite(sampleAt) && Number.isFinite(triggerAt)) {
-        return sampleAt >= triggerAt ? 'failed' : 'operational';
+        return sampleAt >= triggerAt ? 'failed' : 'unknown';
       }
       return String(item?.source_status || '').trim().toLowerCase() === 'error'
         ? 'failed'
-        : 'operational';
+        : 'unknown';
     }
-    // An active target is presumed usable until a real channel error says
-    // otherwise. Keep the raw state in the API, but do not expose a fourth
-    // visual state in the dashboard.
     return String(item?.source_status || '').trim().toLowerCase() === 'error' || hasRecoveryTrigger(item)
       ? 'failed'
-      : 'operational';
+      : 'unknown';
   }
   const latency = Number(sampleLatencyMs);
   if (Number.isFinite(latency) && latency > 0) {
@@ -327,15 +334,28 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
   // A card can use its latest/median latency as a fallback. A historical
   // segment without its own latency must keep its recorded status instead of
   // repainting the whole timeline with the card's current median.
-  if (!sampleCheckedAt && isSlowTarget(item, status)) return 'degraded';
+  if (!sampleCheckedAt && item?.kind !== 'group' && isSlowTarget(item, status)) return 'degraded';
   // For an individual account, a raw degraded result already means the
-  // account is usable but slow. A group may use `degraded` only for member
-  // routing risk; that case stays green until a measured usable path is slow.
+  // account is usable but slow. A group keeps degraded only when its latest
+  // successful request carries a measured slow latency.
   if (status === 'degraded' && item?.kind !== 'group') return 'degraded';
+  if (status === 'degraded' && item?.kind === 'group') {
+    const latestLatency = Number(item?.latest_latency_ms);
+    return Number.isFinite(latestLatency) && latestLatency >= slowLatencyThresholdMs
+      ? 'degraded'
+      : 'operational';
+  }
   // Group aggregation can report a routing risk as `degraded` even when the
-  // observed response is fast. Keep the three health colors tied to latency:
-  // a usable, fast route remains green and the explanation stays in the note.
+  // observed response is fast. Keep the public group color tied to measured
+  // latency; a usable, fast route remains green.
   return 'operational';
+}
+
+function groupLatencyTone(status) {
+  if (status === 'failed') return 'bad';
+  if (status === 'degraded') return 'warn';
+  if (status === 'operational') return 'good';
+  return 'neutral';
 }
 
 function isSlowTarget(item, status = normalizeStatus(item?.status)) {
@@ -363,17 +383,20 @@ function isSuccessfulStatus(status) {
 function healthLabel(status) {
   if (status === 'failed' || status === 'error') return '错误/不可用';
   if (status === 'degraded') return '可用但延迟高';
+  if (status === 'unknown') return '待确认';
   return '可用';
 }
 
 function statusTone(status) {
   if (status === 'failed' || status === 'error') return 'bad';
   if (status === 'degraded') return 'warn';
+  if (status === 'unknown') return 'neutral';
   return 'ok';
 }
 
 function renderStatusHistory(samples, item) {
   const recent = Array.isArray(samples) ? samples.slice(-24) : [];
+  const hasUnknownSamples = recent.some((sample) => normalizeStatus(sample?.status) === 'unknown');
   const currentStatus = normalizeStatus(item?.status);
   const currentDisplayStatus = displayHealthStatus(item, currentStatus);
   const gatewayError = String(item?.source_status || '').trim().toLowerCase() === 'error';
@@ -399,16 +422,18 @@ function renderStatusHistory(samples, item) {
   const caption = statusHistoryCaption(recent, item, gatewayError, recoveryPending);
   return `<div class="status-history-block">
     <div class="status-history" aria-label="24 小时内 24 段状态轨迹">${empty.concat(items).join('')}</div>
-    ${statusHistoryLegend()}
+    ${statusHistoryLegend(hasUnknownSamples)}
     <span class="status-history-caption">${escapeHTML(caption)}</span>
   </div>`;
 }
 
-function statusHistoryLegend() {
+function statusHistoryLegend(includeNeutral = false) {
+  const neutral = includeNeutral ? '<span><i class="neutral"></i>待确认</span>' : '';
   return `<div class="status-history-legend" aria-label="状态图例">
     <span><i class="ok"></i>可用</span>
     <span><i class="warn"></i>可用但延迟高</span>
     <span><i class="bad"></i>错误/不可用</span>
+    ${neutral}
   </div>`;
 }
 
@@ -426,8 +451,12 @@ function statusHistoryCaption(samples, item, gatewayError, recoveryPending) {
     return '探测失败 · 等待新的渠道证据';
   }
   if (item?.latest_source === 'history') return '真实请求证据';
+  if (item?.latest_source === 'request_error') return '真实请求错误证据';
   if (item?.latest_source === 'probe') return '主动探测证据';
-  if (item?.latest_source === 'aggregate') return '账户候选分析';
+  if (item?.latest_source === 'aggregate') return '后台巡检证据';
+  if (displayHealthStatus(item, normalizeStatus(item?.status)) === 'unknown') {
+    return '待确认 · 等待真实请求证据';
+  }
   return '当前状态';
 }
 
@@ -438,7 +467,7 @@ function renderMetric(label, value, help = '') {
 
 function sourceLabel(source) {
   if (source === 'history') return '真实请求';
-  if (source === 'aggregate') return '分组候选检查';
+  if (source === 'aggregate') return '后台巡检';
   if (source === 'probe') return '主动探测';
   if (source === 'request_error') return '真实请求错误';
   if (source === 'cache') return '缓存证据';
@@ -447,21 +476,24 @@ function sourceLabel(source) {
 
 function displayEvidenceMessage(item, value) {
   const message = String(value || '').trim();
-  if (item?.kind !== 'group' || !message) return message;
-  // Unknown-member counts remain available in the API for routing decisions,
-  // but they are not a fourth health state in the dashboard copy.
-  const cleaned = message
-    .replace(/[，；]\s*待验证\s*\d+/g, '')
-    .replace(/[，；]\s*\d+\s*个账户待验证/g, '')
-    .replace(/\s*；\s*；/g, '；')
-    .replace(/^[，；]|[，；]$/g, '')
-    .trim();
-  return cleaned || '当前状态';
+  if (item?.kind !== 'group') return message;
+  // Candidate counts are internal routing diagnostics. Group cards only
+  // expose the latest real request evidence and its measured latency.
+  if (item?.latest_source === 'history') {
+    const latency = Number(item?.latest_latency_ms);
+    return Number.isFinite(latency) && latency > 0
+      ? `最近成功请求耗时 ${formatMs(latency)}`
+      : '最近成功请求';
+  }
+  if (item?.latest_source !== 'request_error') return '';
+  if (!message) return '最近请求失败';
+  return message.startsWith('最近请求失败') ? message : `最近请求失败：${message}`;
 }
 
 function targetStatusLabel(displayStatus) {
   if (displayStatus === 'failed') return '错误/不可用';
   if (displayStatus === 'degraded') return '可用但延迟高';
+  if (displayStatus === 'unknown') return '待确认';
   return '可用';
 }
 
@@ -489,6 +521,7 @@ function evidenceNote(item, status) {
 
 function evidenceFooter(item, status) {
   if (!item.latest_source) {
+    if (item.kind === 'group') return '等待真实请求证据';
     return String(item.source_status || '').trim().toLowerCase() === 'error'
       ? (hasRecoveryTrigger(item) ? '等待恢复探测' : '等待新的渠道错误')
       : '错误后才主动探测';
