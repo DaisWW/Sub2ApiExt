@@ -622,6 +622,24 @@ func TestAggregateGroupsOnlyIncludesEnabledGroups(t *testing.T) {
 	}
 }
 
+func TestEvaluateAlertsSkipsGroupAggregation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result model.ProbeResult
+		want   bool
+	}{
+		{name: "group aggregate", result: model.ProbeResult{Kind: model.KindGroup, Source: "aggregate"}, want: false},
+		{name: "group request error", result: model.ProbeResult{Kind: model.KindGroup, Source: "request_error"}, want: true},
+		{name: "account aggregate", result: model.ProbeResult{Kind: model.KindAccount, Source: "aggregate"}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldEvaluateAlert(test.result); got != test.want {
+				t.Fatalf("shouldEvaluateAlert(%+v) = %v, want %v", test.result, got, test.want)
+			}
+		})
+	}
+}
+
 func TestNextProbeTimeRoundTrip(t *testing.T) {
 	service := &Service{}
 	want := time.Date(2026, time.August, 26, 12, 30, 45, 123000000, time.UTC)

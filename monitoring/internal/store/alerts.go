@@ -16,12 +16,14 @@ type alertState struct {
 	updatedAt      sql.NullTime
 }
 
+const alertsQuery = `SELECT id, target_key, target_name, kind, status, title, message, created_at
+FROM monitoring_alerts WHERE kind <> 'group' ORDER BY created_at DESC LIMIT $1`
+
 func (s *Store) Alerts(ctx context.Context, limit int) ([]model.Alert, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, target_key, target_name, kind, status, title, message, created_at
-FROM monitoring_alerts ORDER BY created_at DESC LIMIT $1`, limit)
+	rows, err := s.db.QueryContext(ctx, alertsQuery, limit)
 	if err != nil {
 		return nil, err
 	}

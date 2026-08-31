@@ -459,10 +459,20 @@ func (s *Service) evaluateAlerts(ctx context.Context, results []model.ProbeResul
 		RecoveryThreshold: s.cfg.RecoveryThreshold,
 	}
 	for _, result := range results {
+		if !shouldEvaluateAlert(result) {
+			// Group member aggregation is retained for routing diagnostics, but it
+			// is not a user-facing outage signal. Group status comes from the
+			// latest final request and its measured latency in the dashboard.
+			continue
+		}
 		if err := s.store.EvaluateAlert(ctx, result, names[result.TargetKey], policy); err != nil {
 			s.log.Warn("evaluate monitor alert failed", "target", result.TargetKey, "error", err)
 		}
 	}
+}
+
+func shouldEvaluateAlert(result model.ProbeResult) bool {
+	return !(result.Kind == model.KindGroup && result.Source == "aggregate")
 }
 
 func (s *Service) maybePrune(ctx context.Context) {

@@ -68,6 +68,12 @@ func TestAlertTextUsesObservationSource(t *testing.T) {
 	}
 }
 
+func TestAlertsQueryExcludesGroupAlerts(t *testing.T) {
+	if !strings.Contains(alertsQuery, "FROM monitoring_alerts WHERE kind <> 'group'") {
+		t.Fatal("user-facing alerts must exclude group member aggregation alerts")
+	}
+}
+
 func TestSanitizeUpstreamMessageRemovesLegacyBody(t *testing.T) {
 	got := sanitizeUpstreamMessage("账户 A 不可用：HTTP 502: internal secret")
 	if got != "账户 A 不可用：HTTP 502" {
