@@ -182,21 +182,15 @@ export class DashboardPanel {
     const isGroup = item.kind === 'group';
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
-    const availabilityDetail = !isGroup && hasSamples ? ` · ${samples} 次样本` : '';
-    const availabilityLabel = isGroup
-      ? '最近成功请求耗时'
-      : `24 小时窗口观测通过率${availabilityDetail}`;
-    const availabilityValue = isGroup
-      ? formatMs(item.latest_latency_ms)
-      : (hasSamples ? formatPct(stats.availability) : '—');
+    const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
+    const availabilityLabel = `24 小时窗口观测通过率${availabilityDetail}`;
+    const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
     const availabilityStatus = displayStatus === 'degraded'
       ? 'degraded'
       : isGroup && status === 'degraded' ? '' : status;
-    // Group availability is a historical request metric, not a member-health
-    // signal; keep it neutral so the badge remains the only public health cue.
-    const availabilityTone = isGroup
-      ? groupLatencyTone(displayStatus)
-      : (hasSamples ? availabilityClass(stats.availability, availabilityStatus) : 'neutral');
+    const availabilityTone = hasSamples
+      ? availabilityClass(stats.availability, availabilityStatus)
+      : 'neutral';
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
@@ -258,9 +252,9 @@ export class DashboardPanel {
           ${currentConcurrencyMetric}
         </div>
         <div class="metrics">
-          ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 24 小时成功样本的首字/首字节中位数')}
-          ${renderMetric('最快', formatMs(latency.fastest_ms))}
-          ${renderMetric('中位数', formatMedianMs(latency))}
+          ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 24 小时成功样本的首字/首字节中位数', latencyMetricClass(firstByte.median_ms))}
+          ${renderMetric('最快', formatMs(latency.fastest_ms), '', latencyMetricClass(latency.fastest_ms))}
+          ${renderMetric('中位数', formatMedianMs(latency), '', latencyMetricClass(latency.median_ms))}
           ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值')}
         </div>
         <div class="card-foot">
@@ -349,13 +343,6 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
   // observed response is fast. Keep the public group color tied to measured
   // latency; a usable, fast route remains green.
   return 'operational';
-}
-
-function groupLatencyTone(status) {
-  if (status === 'failed') return 'bad';
-  if (status === 'degraded') return 'warn';
-  if (status === 'operational') return 'good';
-  return 'neutral';
 }
 
 function isSlowTarget(item, status = normalizeStatus(item?.status)) {
@@ -460,9 +447,17 @@ function statusHistoryCaption(samples, item, gatewayError, recoveryPending) {
   return '当前状态';
 }
 
-function renderMetric(label, value, help = '') {
+function latencyMetricClass(value) {
+  if (value == null || value === '') return '';
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds)) return '';
+  return milliseconds >= slowLatencyThresholdMs ? 'warn' : 'good';
+}
+
+function renderMetric(label, value, help = '', tone = '') {
   const title = help ? ` title="${escapeHTML(help)}"` : '';
-  return `<div><div class="metric-label"${title}>${label}</div><div class="metric-value">${value}</div></div>`;
+  const toneClass = tone ? ` ${tone}` : '';
+  return `<div><div class="metric-label"${title}>${label}</div><div class="metric-value${toneClass}">${value}</div></div>`;
 }
 
 function sourceLabel(source) {
