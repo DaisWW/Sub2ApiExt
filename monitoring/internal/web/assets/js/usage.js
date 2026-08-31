@@ -18,7 +18,7 @@ const shareMetricSet = new Set(['tokens', 'cost']);
 
 export class UsagePanel {
   usage = null;
-  period = '24h';
+  period = 'today';
   entityKind = 'group';
   trendMetric = 'tokens';
   shareMetrics = { model: 'tokens', group: 'tokens' };
