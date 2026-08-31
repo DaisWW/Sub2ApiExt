@@ -1,0 +1,5 @@
+services:
+  sub2api:
+    image: ${SUB2API_IMAGE:?SUB2API_IMAGE is required}
+  monitoring:
+    profiles: [source-tree-only]

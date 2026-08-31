@@ -1,5 +1,6 @@
 @echo off
-setlocal
+setlocal EnableExtensions
+chcp 65001 >nul
 cd /d "%~dp0"
 
 where pwsh.exe >nul 2>&1
@@ -14,9 +15,9 @@ set "RESULT=%ERRORLEVEL%"
 
 echo.
 if "%RESULT%"=="0" (
-    echo All extension services were deployed.
+    echo All Sub2API services and extensions were deployed.
 ) else (
-    echo Extension deployment failed with exit code %RESULT%.
+    echo Integrated deployment failed with exit code %RESULT%.
 )
-if not defined SUB2API_EXT_NO_PAUSE pause
+if not defined SUB2API_NO_PAUSE if not defined SUB2API_EXT_NO_PAUSE pause
 exit /b %RESULT%

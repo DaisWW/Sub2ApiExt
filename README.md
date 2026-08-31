@@ -1,13 +1,13 @@
 # Sub2ApiExt
 
-Sub2API 的独立扩展服务。本仓库不包含也不修改 Sub2API 上游源码。
+Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`monitoring` 以及 Windows 综合一键部署入口；主 Sub2API 仍使用官方 Docker 镜像部署，本仓库不包含也不修改其上游源码。
 
 ## 服务
 
 - `rate-sync`：同步账号倍率，并根据成功请求维护快慢成本记忆、动态调整分组倍率。
-- `monitoring`：以真实请求为主分析账户并按网关路由优先级推断分组状态，仅在渠道报错后低频恢复探测，提供健康、延迟、历史与 Tokens 用量面板。
+- `monitoring`：以真实请求为主分析账户并按网关路由优先级推断分组状态，仅在渠道报错后低频恢复探测，提供健康、延迟、历史、实时并发与 Tokens 用量面板。
 
-两个服务在编译时不依赖 Sub2API Go 源码。运行时会连接已经部署的 Sub2API Docker 网络、PostgreSQL 和 Admin API，因此升级 Sub2API 后仍需验证数据库结构及 API 兼容性。
+两个扩展在编译时不依赖 Sub2API Go 源码。综合入口会先部署或升级主 Sub2API（含 PostgreSQL、Redis），再部署扩展；扩展运行时连接主服务的 Docker 网络、PostgreSQL 和 Admin API。升级主服务后仍需验证数据库结构及 API 兼容性。
 
 ## 一键部署
 
@@ -15,17 +15,18 @@ Sub2API 的独立扩展服务。本仓库不包含也不修改 Sub2API 上游源
 
 - Windows 10/11；
 - Docker Desktop 和 Docker Compose；
-- 官方 Sub2API 容器已经运行，容器名为 `sub2api` 和 `sub2api-postgres`。
+- Docker Desktop 已安装并运行，且 `docker info`、`docker compose version` 可正常执行；首次部署不要求预先创建 Sub2API 容器。
+- 主服务首次部署或检查升级需要访问 GitHub Releases/镜像源。
 
-安装器会先检查运行目录是否可写且由当前用户拥有；否则会弹出 UAC 管理员确认，以便保护运行文件。
+综合入口会先检查运行目录权限，必要时弹出 UAC 管理员确认。
 
-部署全部扩展：
+部署主服务和全部扩展：
 
 ```bat
 一键部署.bat
 ```
 
-`deploy-all.bat` 是功能相同的英文文件名入口。每次执行都会从当前 Git 工程重新构建镜像并更新扩展容器。
+`deploy-all.bat` 是功能相同的英文文件名入口。首次运行会部署 Sub2API、PostgreSQL、Redis；已有部署再次运行时，会显示当前/目标版本，检测到新版本后询问 `y/N`，确认后先备份再升级主服务。随后每次都会从当前 Git 工程重新构建并更新两个扩展容器。
 
 也可以分别运行：
 
@@ -34,23 +35,49 @@ rate-sync\deploy.bat
 monitoring\deploy.bat
 ```
 
-安装器只检查 Sub2API 容器并读取数据库连接信息，不会重建或更新 Sub2API、PostgreSQL、Redis。扩展镜像构建完成后，最小运行文件会安装到：
+主服务运行文件、备份、日志及扩展运行文件会安装到：
 
 ```text
-C:\ProgramData\Sub2API\extensions\
-├── rate-sync\
-└── monitoring\
+C:\ProgramData\Sub2API\
+├── runtime\                         # Sub2API、PostgreSQL、Redis
+├── backups\                         # 升级/回退备份
+├── logs\                            # 部署日志
+└── extensions\
+    ├── rate-sync\
+    └── monitoring\
 ```
 
-扩展容器的 Compose 工作目录、配置和密钥都位于该目录。部署完成后，Docker 启动和容器重启不再依赖本 Git 工作区。重新构建扩展新版本时仍需要本仓库源码，或使用以后发布到镜像仓库的预构建镜像。
+部署完成后，主服务和扩展的 Docker Compose 工作目录、配置、状态卷和密钥都位于 `C:\ProgramData\Sub2API`，运行时不依赖旧工程目录；重新构建扩展新版本时仍需要本仓库源码。
 
-首次迁移会优先复制现有 rate-sync 容器使用的配置。以后从本仓库重复部署会保留 ProgramData 中的真实配置和 Docker 状态卷。
+如果检测到旧工程目录部署的 Sub2API，综合入口会在确认数据目录和挂载安全后迁移到 `runtime`；必须在旧工程目录仍存在时完成一次迁移并验证容器健康，之后才可以删除旧工程目录。旧目录删除后，脚本无法从已停止或不完整的旧栈恢复原配置。首次迁移也会优先复制现有 rate-sync 容器使用的配置。以后重复部署会保留 ProgramData 中的真实配置和状态卷。
+
+主服务升级只替换 `sub2api` 应用镜像，不自动升级 PostgreSQL 或 Redis；升级失败会恢复升级前备份。单独运行 `rate-sync\deploy.bat` 或 `monitoring\deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
 
 如果检测到原工作目录部署的 `sub2api-monitoring-standalone`，安装器会先等待新监控容器健康，再移除旧容器，避免两个 Worker 并行探测。
 
 监控面板默认监听 `0.0.0.0:18090`，部署完成后可从同一局域网通过主机名或 IP 访问。部署脚本会校验或创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则，无法安全配置时会停止部署；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再重新运行部署脚本。
 
-监控首次部署时会从 Sub2API 的 `frontend_url`（为空时回退 `api_base_url`）自动生成 iframe 来源白名单；已有 `MONITORING_FRAME_ANCESTORS` 自定义配置会保留。部署脚本不会自动创建“渠道监控”菜单，菜单入口仍需在 Sub2API 中手动配置。
+监控部署和根目录的一键部署都会自动运行本地访问修复脚本。脚本读取 Sub2API PostgreSQL 中的 `frontend_url` / `api_base_url`、Docker 实际端口、监控 `.env` 和 `settings.env`，合并 `MONITORING_FRAME_ANCESTORS`，校验局域网绑定/防火墙并在需要时重启监控。它不会调用 Sub2API Admin API，不会创建或修改 Sub2API 菜单，也不会回写网关数据库设置。
+
+“渠道监控”菜单请你在 Sub2API 中手动配置。配置完成后，可随时单独运行：
+
+```bat
+monitoring\fix-monitoring-access.bat
+```
+
+两台机器的菜单 URL 分别填写实际可访问的监控地址：
+
+```powershell
+# 有域名的机器（建议 HTTPS）
+# 在 Sub2API 自定义菜单中填写：https://monitor.example.com
+
+# 没有域名的机器（使用局域网 IP）
+# 在 Sub2API 自定义菜单中填写：http://192.168.1.20:18090
+```
+
+无域名机器建议做 DHCP 保留或设置静态 IP；如果 IP 变更，重新运行 `monitoring\fix-monitoring-access.bat`，并同步修改 Sub2API 菜单 URL。也可以使用公司内网 DNS/稳定主机名替代 IP。
+
+如果通过别名打开 Sub2API，而该别名没有写在数据库的 `frontend_url` / `api_base_url` 中，请把该来源追加到 `C:\ProgramData\Sub2API\extensions\monitoring\settings.env` 的 `MONITORING_FRAME_ANCESTORS`，然后运行修复脚本。不要使用 `*`；父页面使用 HTTPS 时，菜单中的监控地址也必须使用 HTTPS。
 
 每个运行目录都会安装 `manage.bat`：
 
