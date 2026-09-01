@@ -274,6 +274,15 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 }
 
+func TestDashboardQueryLetsLaterAccountSuccessClearChannelError(t *testing.T) {
+	if count := strings.Count(dashboardQuery, "targets.last_channel_error_at >= latest_account_usage.created_at"); count != 2 {
+		t.Fatalf("latest account success must clear both current error and recovery state, found %d comparisons", count)
+	}
+	if !strings.Contains(dashboardQuery, "latest_account_usage.created_at >= latest_checks.checked_at") {
+		t.Fatal("latest account success must become current evidence when it is newer than the latest check")
+	}
+}
+
 func TestCarryForwardStatusSamples(t *testing.T) {
 	start := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	samples := []model.StatusSample{

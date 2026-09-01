@@ -251,7 +251,9 @@ WITH bounds AS (
                             OR targets.last_channel_error_at > latest_checks.checked_at)
                        AND (targets.last_activity_at IS NULL
                             OR targets.last_channel_error_at > targets.last_activity_at)
-                 THEN TRUE ELSE FALSE END AS channel_error_wins,
+                       AND (latest_account_usage.created_at IS NULL
+                            OR targets.last_channel_error_at >= latest_account_usage.created_at)
+                  THEN TRUE ELSE FALSE END AS channel_error_wins,
             CASE WHEN targets.last_channel_error_at IS NOT NULL
                        AND (targets.source_updated_at IS NULL
                             OR targets.last_channel_error_at >= targets.source_updated_at)
@@ -259,17 +261,23 @@ WITH bounds AS (
                             OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
                        AND (targets.last_activity_at IS NULL
                             OR targets.last_activity_at < targets.last_channel_error_at)
+                       AND (latest_account_usage.created_at IS NULL
+                            OR targets.last_channel_error_at >= latest_account_usage.created_at)
                        AND (
                            latest_checks.checked_at IS NULL
                            OR latest_checks.checked_at < targets.last_channel_error_at
                            OR COALESCE(latest_checks.status, '') NOT IN ('operational', 'degraded')
                        )
-                 THEN TRUE ELSE FALSE END AS recovery_active,
-           CASE WHEN targets.last_activity_at IS NOT NULL
-                        AND (targets.source_updated_at IS NULL
-                             OR targets.last_activity_at >= targets.source_updated_at)
-                       AND (latest_checks.checked_at IS NULL
-                           OR targets.last_activity_at >= latest_checks.checked_at)
+                  THEN TRUE ELSE FALSE END AS recovery_active,
+           CASE WHEN (targets.last_activity_at IS NOT NULL
+                      AND (targets.source_updated_at IS NULL
+                           OR targets.last_activity_at >= targets.source_updated_at)
+                      AND (latest_checks.checked_at IS NULL
+                           OR targets.last_activity_at >= latest_checks.checked_at))
+                      OR (targets.kind = 'account'
+                          AND latest_account_usage.created_at IS NOT NULL
+                          AND (latest_checks.checked_at IS NULL
+                               OR latest_account_usage.created_at >= latest_checks.checked_at))
                 THEN TRUE ELSE FALSE END AS history_wins
     FROM monitoring_targets targets
     CROSS JOIN bounds
