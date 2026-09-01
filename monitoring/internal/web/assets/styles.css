@@ -57,6 +57,10 @@ button:focus-visible, select:focus-visible, [role="button"]:focus-visible { outl
 .top-actions { gap: 8px; }
 .icon-button { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--soft); font-size: 18px; line-height: 1; }
 .icon-button:hover { border-color: #50637a; color: var(--text); background: #172230; }
+@media (min-width: 721px) {
+  /* The parent frame overlays its open-in-new-window control in this corner. */
+  html.iframe-embedded .top-actions { margin-right: 96px; }
+}
 main { max-width: 1540px; margin: 0 auto; padding: 42px 4vw 72px; }
 .page-tabs { position: sticky; z-index: 9; top: 72px; display: flex; gap: 24px; margin: 0 0 34px; padding-top: 14px; border-bottom: 1px solid var(--line); background: var(--bg); }
 .page-tab { position: relative; border: 0; padding: 0 2px 12px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 650; white-space: nowrap; }

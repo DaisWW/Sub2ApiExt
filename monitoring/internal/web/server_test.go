@@ -125,6 +125,24 @@ func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
 	}
 }
 
+func TestEmbeddedToolbarReservesParentControlSpace(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	for path, marker := range map[string]string{
+		"/app.js":     "document.documentElement.classList.toggle('iframe-embedded', window.self !== window.top);",
+		"/styles.css": "html.iframe-embedded .top-actions { margin-right: 96px; }",
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s returned %d", path, response.Code)
+		}
+		if !strings.Contains(response.Body.String(), marker) {
+			t.Errorf("%s is missing %q", path, marker)
+		}
+	}
+}
+
 func TestDashboardHidesGroupConcurrencyMetric(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)

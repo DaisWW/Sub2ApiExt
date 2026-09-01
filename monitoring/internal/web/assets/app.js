@@ -4,6 +4,8 @@ import { HistoryDialog } from './js/history-dialog.js';
 import { UsagePanel } from './js/usage.js';
 import { $, activateToggle } from './js/shared.js';
 
+document.documentElement.classList.toggle('iframe-embedded', window.self !== window.top);
+
 let dashboard;
 const history = new HistoryDialog();
 dashboard = new DashboardPanel((target, name) => history.open(target, name));
