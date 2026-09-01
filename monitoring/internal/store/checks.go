@@ -68,6 +68,19 @@ WITH authorized_target AS (
            CASE WHEN status_code IS NULL THEN '最近请求失败'
                 ELSE '最近请求失败：HTTP ' || status_code::text END AS message
     FROM group_error_candidates
+), account_error_events AS (
+    SELECT targets.target_key, targets.entity_id AS account_id,
+           targets.last_channel_error_at AS created_at,
+           targets.last_channel_error_status_code AS status_code,
+           NULLIF(BTRIM(targets.last_channel_error_class), '') AS error_class
+    FROM monitoring_targets targets
+    JOIN authorized_target auth ON auth.target_key = targets.target_key
+    WHERE targets.kind = 'account'
+      AND targets.last_channel_error_at IS NOT NULL
+      AND targets.last_channel_error_at >= NOW() - INTERVAL '24 hours'
+      AND (auth.source_updated_at IS NULL OR targets.last_channel_error_at >= auth.source_updated_at)
+      AND (targets.last_channel_error_resolved_at IS NULL
+           OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
 ), combined AS (
 SELECT monitoring_checks.target_key, monitoring_checks.kind, monitoring_checks.entity_id, monitoring_checks.group_id,
        monitoring_checks.status, monitoring_checks.latency_ms, monitoring_checks.first_byte_ms,
@@ -102,6 +115,11 @@ UNION ALL
 SELECT target_key, 'group', group_id, group_id, 'failed',
        NULL::integer, NULL::integer, status_code, '', message, created_at, 'request_error'
 FROM group_error_events
+UNION ALL
+SELECT target_key, 'account', account_id, NULL::bigint, 'failed',
+       NULL::integer, NULL::integer, status_code, COALESCE(error_class, ''),
+       '真实请求报错', created_at, 'request_error'
+FROM account_error_events
 )
 SELECT target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms,
        status_code, error_class, message, checked_at, source
