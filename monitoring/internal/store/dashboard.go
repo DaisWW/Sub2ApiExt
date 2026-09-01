@@ -168,14 +168,26 @@ WITH bounds AS (
 	       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE status IN ('operational','degraded') AND latency_ms IS NOT NULL) AS latency_p95
     FROM samples
     GROUP BY target_key
+), recent_samples AS (
+	SELECT target_key, status, latency_ms, checked_at, source
+	FROM samples
+	UNION ALL
+	SELECT mc.target_key, mc.status, mc.latency_ms, mc.checked_at, mc.source
+	FROM monitoring_checks mc
+	JOIN active_targets targets ON targets.target_key = mc.target_key
+	CROSS JOIN bounds
+	WHERE mc.kind = 'group'
+	  AND mc.source = 'aggregate'
+	  AND mc.checked_at >= bounds.start_at AND mc.checked_at < bounds.end_at
+	  AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at)
 ), bucket_positions AS (
 	SELECT generate_series(0, 23)::int AS bucket_index
 ), recent_bucketed AS (
-	SELECT samples.target_key, samples.status, samples.latency_ms, samples.checked_at, samples.source,
-	       LEAST(23, FLOOR(EXTRACT(EPOCH FROM (samples.checked_at - bounds.start_at)) / bounds.bucket_seconds)::int) AS bucket_index
-	FROM samples
+	SELECT recent_samples.target_key, recent_samples.status, recent_samples.latency_ms, recent_samples.checked_at, recent_samples.source,
+	       LEAST(23, FLOOR(EXTRACT(EPOCH FROM (recent_samples.checked_at - bounds.start_at)) / bounds.bucket_seconds)::int) AS bucket_index
+	FROM recent_samples
 	CROSS JOIN bounds
-	WHERE samples.status NOT IN ('unknown','disabled')
+	WHERE recent_samples.status NOT IN ('unknown','disabled')
 ), recent_ranked AS (
 	SELECT target_key, status, latency_ms, checked_at, source, bucket_index,
 	       ROW_NUMBER() OVER (
@@ -215,6 +227,7 @@ WITH bounds AS (
         FROM monitoring_checks mc
         WHERE mc.target_key = targets.target_key
           AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at)
+		  AND (targets.kind <> 'group' OR mc.source = 'aggregate')
         ORDER BY mc.checked_at DESC, mc.id DESC
         LIMIT 1
     ) checks ON TRUE
@@ -236,12 +249,23 @@ WITH bounds AS (
                        AND latest_group_error.created_at IS NOT NULL
                        AND (latest_group_usage.created_at IS NULL
                             OR latest_group_error.created_at >= latest_group_usage.created_at)
+					   AND (latest_checks.checked_at IS NULL
+							OR latest_group_error.created_at >= latest_checks.checked_at)
                  THEN TRUE ELSE FALSE END AS group_error_wins,
             CASE WHEN targets.kind = 'group'
                        AND latest_group_usage.created_at IS NOT NULL
                        AND (latest_group_error.created_at IS NULL
                             OR latest_group_usage.created_at > latest_group_error.created_at)
+					   AND (latest_checks.checked_at IS NULL
+							OR latest_group_usage.created_at >= latest_checks.checked_at)
                  THEN TRUE ELSE FALSE END AS group_success_wins,
+			CASE WHEN targets.kind = 'group'
+					   AND latest_checks.checked_at IS NOT NULL
+					   AND (latest_group_error.created_at IS NULL
+							OR latest_checks.checked_at > latest_group_error.created_at)
+					   AND (latest_group_usage.created_at IS NULL
+							OR latest_checks.checked_at > latest_group_usage.created_at)
+				 THEN TRUE ELSE FALSE END AS group_aggregate_wins,
             CASE WHEN targets.last_channel_error_at IS NOT NULL
                        AND (targets.source_updated_at IS NULL
                             OR targets.last_channel_error_at >= targets.source_updated_at)
@@ -291,6 +315,7 @@ WITH bounds AS (
                 WHEN kind = 'group' AND group_success_wins
                 THEN CASE WHEN COALESCE(group_success_latency_ms, 0) >= 20000
                           THEN 'degraded' ELSE 'operational' END
+				WHEN kind = 'group' AND group_aggregate_wins THEN status
                 WHEN kind = 'group' THEN NULL
                 WHEN channel_error_wins THEN 'failed'
                 WHEN history_wins AND kind = 'account'
@@ -299,15 +324,18 @@ WITH bounds AS (
                 WHEN history_wins THEN 'operational'
                 ELSE status END AS status,
            CASE WHEN kind = 'group' AND group_success_wins THEN group_success_latency_ms
+				WHEN kind = 'group' AND group_aggregate_wins THEN latency_ms
                 WHEN kind = 'group' THEN NULL
                 WHEN kind = 'account' AND history_wins THEN account_success_latency_ms
                 WHEN channel_error_wins OR history_wins THEN NULL ELSE latency_ms END AS latency_ms,
            CASE WHEN kind = 'group' AND group_success_wins THEN group_success_first_byte_ms
+				WHEN kind = 'group' AND group_aggregate_wins THEN first_byte_ms
                 WHEN kind = 'group' THEN NULL
                 WHEN kind = 'account' AND history_wins THEN account_success_first_byte_ms
                 WHEN channel_error_wins OR history_wins THEN NULL ELSE first_byte_ms END AS first_byte_ms,
            CASE WHEN kind = 'group' AND group_error_wins THEN group_error_at
                 WHEN kind = 'group' AND group_success_wins THEN group_success_at
+				WHEN kind = 'group' AND group_aggregate_wins THEN checked_at
                 WHEN kind = 'group' THEN NULL
                 WHEN channel_error_wins THEN last_channel_error_at
                 WHEN history_wins AND kind = 'account' AND account_success_at IS NOT NULL THEN account_success_at
@@ -315,12 +343,14 @@ WITH bounds AS (
            CASE WHEN recovery_active THEN last_channel_error_at ELSE NULL END AS recovery_trigger_at,
            CASE WHEN kind = 'group' AND group_error_wins THEN 'request_error'
                 WHEN kind = 'group' AND group_success_wins THEN 'history'
+				WHEN kind = 'group' AND group_aggregate_wins THEN source
                 WHEN kind = 'group' THEN NULL
                 WHEN channel_error_wins THEN 'request_error'
                 WHEN history_wins THEN 'history'
                 ELSE source END AS source,
            CASE WHEN kind = 'group' AND group_error_wins THEN group_error_message
                 WHEN kind = 'group' AND group_success_wins THEN '最近成功请求'
+				WHEN kind = 'group' AND group_aggregate_wins THEN message
                 WHEN kind = 'group' THEN NULL
                 WHEN channel_error_wins THEN '真实请求报错，等待恢复探测'
                 WHEN history_wins THEN '近期真实请求'

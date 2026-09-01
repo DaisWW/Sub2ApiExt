@@ -189,8 +189,17 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"PARTITION BY group_id, request_key",
 		"latest_group_error AS MATERIALIZED",
 		"mc.source <> 'aggregate'",
+		"recent_samples AS",
+		"FROM recent_samples",
+		"mc.source = 'aggregate'",
 		"group_error_wins",
 		"group_success_wins",
+		"group_aggregate_wins",
+		"targets.kind <> 'group' OR mc.source = 'aggregate'",
+		"latest_group_error.created_at >= latest_checks.checked_at",
+		"latest_group_usage.created_at >= latest_checks.checked_at",
+		"latest_checks.checked_at > latest_group_error.created_at",
+		"latest_checks.checked_at > latest_group_usage.created_at",
 		"COALESCE(group_success_latency_ms, 0) >= 20000",
 		"COALESCE(account_success_latency_ms, 0) >= 20000",
 		"generate_series(0, 23)",
@@ -241,6 +250,25 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 	if count := strings.Count(dashboardQuery, "FROM usage_logs ul"); count != 1 {
 		t.Fatalf("dashboard query scans usage_logs %d times, want one filtered source", count)
+	}
+	samplesStart := strings.Index(dashboardQuery, "), samples AS (")
+	statsStart := strings.Index(dashboardQuery, "), stats AS (")
+	recentSamplesStart := strings.Index(dashboardQuery, "), recent_samples AS (")
+	bucketsStart := strings.Index(dashboardQuery, "), bucket_positions AS (")
+	if samplesStart < 0 || statsStart <= samplesStart || recentSamplesStart <= statsStart || bucketsStart <= recentSamplesStart {
+		t.Fatalf("dashboard query must separate traffic samples from aggregate health samples: samples=%d stats=%d recent=%d buckets=%d", samplesStart, statsStart, recentSamplesStart, bucketsStart)
+	}
+	trafficSamples := dashboardQuery[samplesStart:statsStart]
+	if !strings.Contains(trafficSamples, "mc.source <> 'aggregate'") || strings.Contains(trafficSamples, "mc.source = 'aggregate'") {
+		t.Fatal("dashboard traffic statistics must exclude group aggregate observations")
+	}
+	statsQuery := dashboardQuery[statsStart:recentSamplesStart]
+	if !strings.Contains(statsQuery, "FROM samples") {
+		t.Fatal("dashboard traffic statistics must use only traffic samples")
+	}
+	recentSamples := dashboardQuery[recentSamplesStart:bucketsStart]
+	if !strings.Contains(recentSamples, "mc.kind = 'group'") || !strings.Contains(recentSamples, "mc.source = 'aggregate'") {
+		t.Fatal("dashboard health trajectory must include group aggregate observations")
 	}
 	if strings.Contains(dashboardQuery, "first_seen_at") {
 		t.Fatal("dashboard query must not depend on the removed idle timestamp")
