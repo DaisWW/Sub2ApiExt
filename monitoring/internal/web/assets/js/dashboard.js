@@ -45,6 +45,7 @@ export class DashboardPanel {
   }
 
   async load() {
+    if (this.#nextProbeAt && this.#nextProbeAt <= Date.now()) this.#countdownRefreshRequested = true;
     const requestId = this.#requests.begin();
     try {
       const dashboard = await api('/api/v1/monitor/dashboard');
@@ -151,9 +152,11 @@ export class DashboardPanel {
       this.#countdownState = 'cooldown';
       this.#countdownSeconds = remaining;
     }
-    if (!remaining && !this.#countdownRefreshRequested) {
+    if (!remaining && !$('#dashboardPanel').hidden && !this.#countdownRefreshRequested) {
       this.#countdownRefreshRequested = true;
-      window.setTimeout(() => void this.load(), 800);
+      window.setTimeout(() => {
+        if (!$('#dashboardPanel').hidden) void this.load();
+      }, 800);
     }
   }
 

@@ -58,6 +58,12 @@ button:focus-visible, select:focus-visible, [role="button"]:focus-visible { outl
 .icon-button { width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--soft); font-size: 18px; line-height: 1; }
 .icon-button:hover { border-color: #50637a; color: var(--text); background: #172230; }
 main { max-width: 1540px; margin: 0 auto; padding: 42px 4vw 72px; }
+.page-tabs { position: sticky; z-index: 9; top: 72px; display: flex; gap: 24px; margin: 0 0 34px; padding-top: 14px; border-bottom: 1px solid var(--line); background: var(--bg); }
+.page-tab { position: relative; border: 0; padding: 0 2px 12px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 650; white-space: nowrap; }
+.page-tab:hover { color: var(--soft); }
+.page-tab[aria-selected="true"] { color: var(--text); }
+.page-tab::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; content: ''; background: var(--mint); transform: scaleX(0); transition: transform .15s ease; }
+.page-tab[aria-selected="true"]::after { transform: scaleX(1); }
 .overview-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 28px; }
 .eyebrow { margin: 0 0 9px; color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .16em; }
 h1, h2, p { margin-top: 0; }
@@ -80,7 +86,6 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .probe-status-copy strong { color: var(--soft); font-size: 11px; font-weight: 650; }
 .probe-status-copy span { white-space: nowrap; }
 @keyframes probe-spin { to { transform: rotate(360deg); } }
-.usage-section { margin-top: 52px; }
 .usage-section .usage-chart-grid, .usage-section .usage-entity-section { transition: opacity .18s ease; }
 .usage-section.is-loading .usage-chart-grid, .usage-section.is-loading .usage-entity-section { opacity: .4; pointer-events: none; }
 .usage-section .usage-heading { margin: 0 0 16px; }
@@ -356,6 +361,7 @@ td { color: var(--soft); }
   .topbar { padding: 0 18px; }
   .brand-subtitle, .live-pill { display: none; }
   main { padding: 28px 18px 56px; }
+  .page-tabs { margin-bottom: 28px; }
   .overview-row { display: block; }
   .overview-controls { justify-content: flex-start; margin-top: 22px; }
   .target-grid { grid-template-columns: minmax(0, 1fr); }

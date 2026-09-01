@@ -26,6 +26,12 @@
       </header>
 
       <main>
+        <nav class="page-tabs" role="tablist" aria-label="监控内容">
+          <button class="page-tab" type="button" id="dashboardTab" role="tab" aria-selected="true" aria-controls="dashboardPanel" tabindex="0" data-monitor-tab="dashboard">实时监控</button>
+          <button class="page-tab" type="button" id="usageTab" role="tab" aria-selected="false" aria-controls="usageSection" tabindex="-1" data-monitor-tab="usage">用量统计</button>
+        </nav>
+
+        <div id="dashboardPanel" role="tabpanel" aria-labelledby="dashboardTab">
         <section class="overview-row">
           <div class="overview-copy">
             <p class="eyebrow">SERVICE HEALTH</p>
@@ -59,8 +65,9 @@
         <section class="target-grid" id="targetGrid" aria-live="polite">
           <div class="loading-state">连接监控服务中<span class="loading-dots">...</span></div>
         </section>
+        </div>
 
-        <section class="usage-section" id="usageSection" aria-labelledby="usageTitle" aria-busy="false">
+        <section class="usage-section" id="usageSection" role="tabpanel" aria-labelledby="usageTab" aria-busy="false" hidden>
           <div class="section-heading usage-heading">
             <div>
               <p class="eyebrow">USAGE OVERVIEW</p>
