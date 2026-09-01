@@ -225,3 +225,68 @@ func TestModelUsageRankAggregatesByModel(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageQueriesKeepHistoricalConsumptionAfterTargetsAreDisabled(t *testing.T) {
+	queries := map[string]string{
+		"summary":  usageSummaryQuery,
+		"timeline": usageTimelineQuery,
+		"account":  accountUsageRankQuery,
+		"group":    groupUsageRankQuery,
+		"model":    modelUsageRankQuery,
+	}
+	for name, query := range queries {
+		normalized := strings.ToLower(query)
+		for _, fragment := range []string{
+			"ul.created_at >= $1",
+			"ul.created_at < $2",
+			"ul.actual_cost > 0",
+		} {
+			if !strings.Contains(query, fragment) {
+				t.Errorf("%s usage query missing historical usage condition %q", name, fragment)
+			}
+		}
+		for _, fragment := range []string{"deleted_at", "schedulable", "status"} {
+			if strings.Contains(normalized, fragment) {
+				t.Errorf("%s usage query must not filter by current target state %q", name, fragment)
+			}
+		}
+	}
+}
+
+func TestUsageRankQueriesUseCurrentTargetsOnlyForLabels(t *testing.T) {
+	for _, fragment := range []string{
+		"LEFT JOIN accounts a ON a.id = ul.account_id",
+		"CASE WHEN ul.account_id IS NULL THEN '未知账户' ELSE '账户 #' || ul.account_id::text END",
+		"CASE WHEN entity_id IS NULL THEN 'account:unknown' END AS entity_key",
+	} {
+		if !strings.Contains(accountUsageRankQuery, fragment) {
+			t.Errorf("account usage query missing metadata fallback %q", fragment)
+		}
+	}
+	if strings.Contains(accountUsageRankQuery, "JOIN groups g") {
+		t.Error("account usage query must not depend on the current group row")
+	}
+
+	for _, fragment := range []string{
+		"LEFT JOIN groups g ON g.id = ul.group_id",
+		"CASE WHEN ul.group_id IS NULL THEN '未分组' ELSE '分组 #' || ul.group_id::text END",
+		"CASE WHEN entity_id IS NULL THEN 'group:unassigned' END AS entity_key",
+	} {
+		if !strings.Contains(groupUsageRankQuery, fragment) {
+			t.Errorf("group usage query missing metadata fallback %q", fragment)
+		}
+	}
+	if strings.Contains(groupUsageRankQuery, "JOIN accounts a") {
+		t.Error("group usage query must not depend on the current account row")
+	}
+
+	for name, query := range map[string]string{
+		"summary":  usageSummaryQuery,
+		"timeline": usageTimelineQuery,
+		"model":    modelUsageRankQuery,
+	} {
+		if strings.Contains(query, "JOIN accounts ") || strings.Contains(query, "JOIN groups ") {
+			t.Errorf("%s usage query must use usage_logs as its only account/group fact source", name)
+		}
+	}
+}

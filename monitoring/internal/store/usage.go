@@ -147,8 +147,7 @@ func resolveUsageBounds(period usagePeriod, now, todayStart, yesterdayStart time
 	}
 }
 
-func (s *Store) loadUsageSummary(ctx context.Context, summary *model.UsageSummary, bounds usageBounds) error {
-	const query = `
+const usageSummaryQuery = `
 SELECT COUNT(*)::bigint,
        COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
                     COALESCE(ul.output_tokens, 0)::bigint +
@@ -167,17 +166,12 @@ SELECT COUNT(*)::bigint,
        COUNT(DISTINCT ul.account_id)::bigint,
        COUNT(DISTINCT ul.group_id)::bigint
  FROM usage_logs ul
- JOIN accounts a ON a.id = ul.account_id
-                 AND a.deleted_at IS NULL
-                 AND LOWER(TRIM(a.status)) = 'active'
-                 AND a.schedulable = TRUE
- JOIN groups g ON g.id = ul.group_id
-              AND g.deleted_at IS NULL
-              AND LOWER(TRIM(g.status)) = 'active'
  WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0`
+
+func (s *Store) loadUsageSummary(ctx context.Context, summary *model.UsageSummary, bounds usageBounds) error {
 	var cacheCreate, cacheRead int64
 	var baseCost, actualCost float64
-	if err := s.db.QueryRowContext(ctx, query, bounds.start, bounds.end).Scan(
+	if err := s.db.QueryRowContext(ctx, usageSummaryQuery, bounds.start, bounds.end).Scan(
 		&summary.Requests, &summary.TotalTokens, &summary.InputTokens, &summary.OutputTokens,
 		&cacheCreate, &cacheRead, &baseCost, &summary.InputCost, &summary.OutputCost,
 		&summary.CacheCreationCost, &summary.CacheReadCost, &actualCost,
@@ -197,15 +191,7 @@ SELECT COUNT(*)::bigint,
 	return nil
 }
 
-func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]model.UsageBucket, error) {
-	step := "1 hour"
-	if bounds.bucket == "minute" {
-		step = "1 minute"
-	}
-	if bounds.bucket == "day" {
-		step = "1 day"
-	}
-	query := fmt.Sprintf(`
+const usageTimelineQuery = `
 	WITH buckets AS (
 	    SELECT generate_series(
 	        date_trunc('%s', $1::timestamptz),
@@ -231,13 +217,6 @@ func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]mo
 	           COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
 	           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS total_cost
 	    FROM usage_logs ul
-	    JOIN accounts a ON a.id = ul.account_id
-	                     AND a.deleted_at IS NULL
-	                     AND LOWER(TRIM(a.status)) = 'active'
-	                     AND a.schedulable = TRUE
-	    JOIN groups g ON g.id = ul.group_id
-	                 AND g.deleted_at IS NULL
-	                 AND LOWER(TRIM(g.status)) = 'active'
 	    LEFT JOIN channels c ON c.id = ul.channel_id
 	    WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
 	    GROUP BY 1, 2
@@ -258,7 +237,17 @@ SELECT buckets.start_at,
        COALESCE(usage.total_cost, 0)
 FROM buckets
 LEFT JOIN usage USING (start_at)
-ORDER BY buckets.start_at, usage.channel_name`, bounds.bucket, bounds.bucket, step, bounds.bucket)
+ORDER BY buckets.start_at, usage.channel_name`
+
+func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]model.UsageBucket, error) {
+	step := "1 hour"
+	if bounds.bucket == "minute" {
+		step = "1 minute"
+	}
+	if bounds.bucket == "day" {
+		step = "1 day"
+	}
+	query := fmt.Sprintf(usageTimelineQuery, bounds.bucket, bounds.bucket, step, bounds.bucket)
 	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end)
 	if err != nil {
 		return nil, err

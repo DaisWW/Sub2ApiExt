@@ -7,11 +7,11 @@ import (
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
-func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
-	const query = `
+const accountUsageRankQuery = `
 WITH aggregated AS (
     SELECT ul.account_id AS entity_id,
-           COALESCE(NULLIF(a.name, ''), '账户 #' || ul.account_id::text) AS name,
+           COALESCE(NULLIF(a.name, ''),
+                    CASE WHEN ul.account_id IS NULL THEN '未知账户' ELSE '账户 #' || ul.account_id::text END) AS name,
            ''::text AS context,
            COALESCE(a.platform, 'unknown') AS platform,
            COUNT(*)::bigint AS requests,
@@ -30,13 +30,7 @@ WITH aggregated AS (
            COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
            COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS actual_cost
       FROM usage_logs ul
-      JOIN accounts a ON a.id = ul.account_id
-                     AND a.deleted_at IS NULL
-                     AND LOWER(TRIM(a.status)) = 'active'
-                     AND a.schedulable = TRUE
-      JOIN groups g ON g.id = ul.group_id
-                   AND g.deleted_at IS NULL
-                   AND LOWER(TRIM(g.status)) = 'active'
+      LEFT JOIN accounts a ON a.id = ul.account_id
      WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
      GROUP BY ul.account_id, a.name, a.platform
 ), ranked AS (
@@ -56,7 +50,7 @@ WITH aggregated AS (
            ) AS cache_context_rank
       FROM aggregated
 )
-SELECT entity_id, NULL::text AS entity_key, name, context, platform,
+SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'account:unknown' END AS entity_key, name, context, platform,
        requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
        base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
        total_items, total_requests, all_tokens, all_actual_cost
@@ -64,14 +58,16 @@ SELECT entity_id, NULL::text AS entity_key, name, context, platform,
  WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3 OR cache_context_rank <= $3
  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
           token_rank, cost_rank, unit_cost_rank, cache_context_rank`
-	return s.loadDimensionRanks(ctx, query, model.KindAccount, bounds, limit, totalTokens, totalCost)
+
+func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+	return s.loadDimensionRanks(ctx, accountUsageRankQuery, model.KindAccount, bounds, limit, totalTokens, totalCost)
 }
 
-func (s *Store) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
-	const query = `
+const groupUsageRankQuery = `
 WITH aggregated AS (
     SELECT ul.group_id AS entity_id,
-           COALESCE(NULLIF(g.name, ''), '分组 #' || ul.group_id::text) AS name,
+           COALESCE(NULLIF(g.name, ''),
+                    CASE WHEN ul.group_id IS NULL THEN '未分组' ELSE '分组 #' || ul.group_id::text END) AS name,
            ''::text AS context,
            COALESCE(g.platform, 'unknown') AS platform,
            COUNT(*)::bigint AS requests,
@@ -90,13 +86,7 @@ WITH aggregated AS (
            COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
            COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS actual_cost
       FROM usage_logs ul
-      JOIN accounts a ON a.id = ul.account_id
-                     AND a.deleted_at IS NULL
-                     AND LOWER(TRIM(a.status)) = 'active'
-                     AND a.schedulable = TRUE
-      JOIN groups g ON g.id = ul.group_id
-                   AND g.deleted_at IS NULL
-                   AND LOWER(TRIM(g.status)) = 'active'
+      LEFT JOIN groups g ON g.id = ul.group_id
      WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
      GROUP BY ul.group_id, g.name, g.platform
 ), ranked AS (
@@ -116,7 +106,7 @@ WITH aggregated AS (
            ) AS cache_context_rank
       FROM aggregated
 )
-SELECT entity_id, NULL::text AS entity_key, name, context, platform,
+SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'group:unassigned' END AS entity_key, name, context, platform,
        requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
        base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
        total_items, total_requests, all_tokens, all_actual_cost
@@ -124,7 +114,9 @@ SELECT entity_id, NULL::text AS entity_key, name, context, platform,
  WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3 OR cache_context_rank <= $3
  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
           token_rank, cost_rank, unit_cost_rank, cache_context_rank`
-	return s.loadDimensionRanks(ctx, query, model.KindGroup, bounds, limit, totalTokens, totalCost)
+
+func (s *Store) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+	return s.loadDimensionRanks(ctx, groupUsageRankQuery, model.KindGroup, bounds, limit, totalTokens, totalCost)
 }
 
 const modelUsageRankQuery = `
@@ -150,13 +142,6 @@ WITH aggregated AS (
            COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
            COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS actual_cost
       FROM usage_logs ul
-      JOIN accounts a ON a.id = ul.account_id
-                     AND a.deleted_at IS NULL
-                     AND LOWER(TRIM(a.status)) = 'active'
-                     AND a.schedulable = TRUE
-      JOIN groups g ON g.id = ul.group_id
-                   AND g.deleted_at IS NULL
-                   AND LOWER(TRIM(g.status)) = 'active'
       WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
       GROUP BY COALESCE(NULLIF(ul.model, ''), 'unknown')
 ), ranked AS (
