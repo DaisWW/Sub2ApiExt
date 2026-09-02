@@ -186,7 +186,7 @@ export class DashboardPanel {
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
     const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
-    const availabilityLabel = `24 小时窗口观测通过率${availabilityDetail}`;
+    const availabilityLabel = `24 小时历史通过率${availabilityDetail}`;
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
     const availabilityStatus = displayStatus === 'degraded'
       ? 'degraded'
@@ -236,7 +236,7 @@ export class DashboardPanel {
           </div>
           <div class="target-head-meta">
             ${currentRate ? `<span class="current-rate" title="${currentRateTitle}">${currentRateLabel} ${currentRate}</span>` : ''}
-            <span class="status-badge ${statusClass(displayStatus)}">${targetStatusLabel(displayStatus)}</span>
+            <span class="status-badge ${statusClass(displayStatus)}" title="当前状态：最新证据">${targetStatusLabel(displayStatus)}</span>
           </div>
         </div>
         <div class="availability">
@@ -489,10 +489,10 @@ function displayEvidenceMessage(item, value) {
 }
 
 function targetStatusLabel(displayStatus) {
-  if (displayStatus === 'failed') return '错误/不可用';
-  if (displayStatus === 'degraded') return '可用但延迟高';
-  if (displayStatus === 'unknown') return '待确认';
-  return '可用';
+  if (displayStatus === 'failed') return '当前错误/不可用';
+  if (displayStatus === 'degraded') return '当前可用但延迟高';
+  if (displayStatus === 'unknown') return '当前待确认';
+  return '当前可用';
 }
 
 function evidenceNote(item, status) {
