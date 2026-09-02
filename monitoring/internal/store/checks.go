@@ -17,10 +17,32 @@ WITH authorized_target AS (
     SELECT target_key, source_updated_at
     FROM monitoring_targets
     WHERE target_key = $1 AND active = TRUE
+), successful_group_request_keys AS MATERIALIZED (
+    SELECT usage.group_id, usage.created_at,
+           NULLIF(BTRIM(usage.request_id), '') AS request_key
+    FROM usage_logs usage
+    JOIN authorized_target auth ON auth.target_key = 'group:' || usage.group_id::text
+    WHERE $1 = 'group:' || usage.group_id::text
+      AND usage.actual_cost > 0
+      AND usage.created_at >= NOW() - INTERVAL '24 hours'
+      AND (auth.source_updated_at IS NULL OR usage.created_at >= auth.source_updated_at - INTERVAL '2 minutes')
+      AND NULLIF(BTRIM(usage.request_id), '') IS NOT NULL
+    UNION
+    SELECT usage.group_id, usage.created_at,
+           NULLIF(BTRIM(regexp_replace(usage.request_id, '^client:', '')), '') AS request_key
+    FROM usage_logs usage
+    JOIN authorized_target auth ON auth.target_key = 'group:' || usage.group_id::text
+    WHERE $1 = 'group:' || usage.group_id::text
+      AND usage.actual_cost > 0
+      AND usage.created_at >= NOW() - INTERVAL '24 hours'
+      AND (auth.source_updated_at IS NULL OR usage.created_at >= auth.source_updated_at - INTERVAL '2 minutes')
+      AND NULLIF(BTRIM(regexp_replace(usage.request_id, '^client:', '')), '') IS NOT NULL
 ), group_request_rows AS MATERIALIZED (
     SELECT 'group:' || oe.group_id::text AS target_key,
            oe.group_id, oe.id, oe.created_at,
            oe.status_code, oe.upstream_status_code,
+           NULLIF(BTRIM(oe.request_id), '') AS request_id,
+           NULLIF(BTRIM(oe.client_request_id), '') AS client_request_id,
            COALESCE(NULLIF(BTRIM(oe.request_id), ''),
                     NULLIF(BTRIM(oe.client_request_id), ''),
                     'error:' || oe.id::text) AS request_key,
@@ -44,7 +66,7 @@ WITH authorized_target AS (
 ), group_error_candidates AS (
     SELECT target_key, group_id, id, created_at,
            COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0)) AS status_code,
-           request_key
+           request_key, request_id, client_request_id
     FROM group_request_ranked
     WHERE position = 1
       AND COALESCE(is_business_limited, FALSE) = FALSE
@@ -62,6 +84,13 @@ WITH authorized_target AS (
                   OR error_source IN ('upstream_http', 'upstream_network')
               )
           )
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM successful_group_request_keys success
+          WHERE success.group_id = group_request_ranked.group_id
+            AND success.created_at >= group_request_ranked.created_at
+            AND success.request_key IN (group_request_ranked.request_id, group_request_ranked.client_request_id)
       )
 ), group_error_events AS (
     SELECT target_key, group_id, created_at, status_code,

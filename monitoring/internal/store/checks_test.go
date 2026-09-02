@@ -45,6 +45,19 @@ func TestHistoryQueryRequiresActiveTarget(t *testing.T) {
 	}
 }
 
+func TestHistoryQuerySuppressesIntermediateGroupErrors(t *testing.T) {
+	for _, fragment := range []string{
+		"successful_group_request_keys AS MATERIALIZED",
+		"regexp_replace(usage.request_id, '^client:', '')",
+		"AND NOT EXISTS (",
+		"success.request_key IN (group_request_ranked.request_id, group_request_ranked.client_request_id)",
+	} {
+		if !strings.Contains(historyQuery, fragment) {
+			t.Fatalf("history query must suppress errors followed by a final success: missing %q", fragment)
+		}
+	}
+}
+
 func TestSyncTargetsPersistsSourceUpdatedAt(t *testing.T) {
 	for _, fragment := range []string{
 		"source_updated_at",

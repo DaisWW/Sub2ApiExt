@@ -52,7 +52,8 @@ WITH bounds AS (
     SELECT target_key, source_updated_at
     FROM visible_targets
 ), period_usage AS MATERIALIZED (
-	SELECT ul.id, ul.account_id, ul.group_id, ul.duration_ms, ul.first_token_ms, ul.created_at
+	SELECT ul.id, ul.account_id, ul.group_id, ul.duration_ms, ul.first_token_ms, ul.created_at,
+	       ul.request_id
 	FROM usage_logs ul
 	CROSS JOIN bounds
 	WHERE ul.created_at >= bounds.start_at AND ul.created_at < bounds.end_at AND ul.actual_cost > 0
@@ -75,10 +76,28 @@ WITH bounds AS (
 	JOIN active_targets targets ON targets.target_key = 'group:' || usage.group_id::text
 	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes'
 	ORDER BY usage.group_id, usage.created_at DESC, usage.id DESC
+), successful_group_request_keys AS MATERIALIZED (
+	SELECT usage.group_id, usage.created_at,
+	       NULLIF(BTRIM(usage.request_id), '') AS request_key
+	FROM period_usage usage
+	JOIN active_targets targets ON targets.target_key = 'group:' || usage.group_id::text
+	WHERE usage.group_id IS NOT NULL
+	  AND (targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes')
+	  AND NULLIF(BTRIM(usage.request_id), '') IS NOT NULL
+	UNION
+	SELECT usage.group_id, usage.created_at,
+	       NULLIF(BTRIM(regexp_replace(usage.request_id, '^client:', '')), '') AS request_key
+	FROM period_usage usage
+	JOIN active_targets targets ON targets.target_key = 'group:' || usage.group_id::text
+	WHERE usage.group_id IS NOT NULL
+	  AND (targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes')
+	  AND NULLIF(BTRIM(regexp_replace(usage.request_id, '^client:', '')), '') IS NOT NULL
 ), group_request_rows AS MATERIALIZED (
 	SELECT 'group:' || oe.group_id::text AS target_key,
 	       oe.group_id, oe.id, oe.created_at,
 	       oe.status_code, oe.upstream_status_code,
+	       NULLIF(BTRIM(oe.request_id), '') AS request_id,
+	       NULLIF(BTRIM(oe.client_request_id), '') AS client_request_id,
 	       COALESCE(NULLIF(BTRIM(oe.request_id), ''),
 	                NULLIF(BTRIM(oe.client_request_id), ''),
 	                'error:' || oe.id::text) AS request_key,
@@ -103,7 +122,7 @@ WITH bounds AS (
 ), group_error_candidates AS MATERIALIZED (
 	SELECT target_key, group_id, id, created_at,
 	       COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0)) AS status_code,
-	       request_key
+	       request_key, request_id, client_request_id
 	FROM group_request_ranked
 	WHERE position = 1
 	  AND COALESCE(is_business_limited, FALSE) = FALSE
@@ -119,8 +138,15 @@ WITH bounds AS (
 	          AND (
 	              error_phase IN ('account_auth', 'network', 'upstream')
 	              OR error_source IN ('upstream_http', 'upstream_network')
+	              )
 	          )
 	      )
+	  AND NOT EXISTS (
+	      SELECT 1
+	      FROM successful_group_request_keys success
+	      WHERE success.group_id = group_request_ranked.group_id
+	        AND success.created_at >= group_request_ranked.created_at
+	        AND success.request_key IN (group_request_ranked.request_id, group_request_ranked.client_request_id)
 	  )
 ), group_error_events AS (
 	SELECT target_key, group_id, id, created_at, status_code,
