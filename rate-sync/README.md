@@ -17,7 +17,7 @@
 
 `sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。特殊上游系数只在账户配置中使用；账户配置还设置了 `sync_hosts` 白名单，只处理 `www.codexapis.com`、`xixiapi.io` 和 `lucen.cc`；白名单之外的账号保持手动倍率。
 
-账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen/XixiAPI 的上游倍率在写回前统一乘一次 `0.85`，分组 worker 不会再次乘该系数。
+账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen 的上游倍率在写回前乘一次 `0.9`（覆盖 `lucen.cc` 和 `xixiapi.io`）；分组 worker 不会再次乘该系数。
 
 账户模式优先读取上游直接价格（NewAPI 的价格表和最新计费日志）；只有直接价格接口不可用时才读取 `/v1/usage`。`usage_bootstrap: true` 可让当前本地倍率仍为 `1.0` 的占位账号在没有新增请求时，用累计 `actual_cost / cost` 先建立候选倍率；已设置过非 `1.0` 倍率的账号不会被累计值覆盖。
 
@@ -30,7 +30,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
     ÷ SUM(total_cost)
 ```
 
-动态状态同时保存请求发生时的实际账号成本和按账号拆分的基础成本权重。请求成本是主要依据；当前 `accounts.rate_multiplier` 只占目标的 `25%`，用于账号倍率刚变化、尚无足够新请求时提前修正预测。Lucen 的 `0.85` 等折扣仍只体现在账号倍率中，分组校准不会再次乘该系数。
+动态状态同时保存请求发生时的实际账号成本和按账号拆分的基础成本权重。请求成本是主要依据；当前 `accounts.rate_multiplier` 只占目标的 `25%`，用于账号倍率刚变化、尚无足够新请求时提前修正预测。Lucen 的 `0.9` 等折扣仍只体现在账号倍率中，分组校准不会再次乘该系数。
 
 多账号分组每分钟只消费上次水位之后的新请求，并维护两个按标准费用衰减的估计器：近期记忆 `$5`、中期记忆 `$20`。观测目标使用 `90%` 近期成本和 `10%` 中期成本，再混合 `25%` 的当前账号倍率预测；这样能快速跟随综合组的实际路由比例，同时避免单批偶然切流导致倍率完全跳到某个账号。单次发布限制为双向 `0.020`，写入死区为 `max(0.0002, 当前倍率×0.25%)`。
 
@@ -43,8 +43,8 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 ```json
 {
   "factors": {
-    "lucen.cc": 0.85,
-    "xixiapi.io": 0.85
+    "lucen.cc": 0.9,
+    "xixiapi.io": 0.9
   }
 }
 ```
@@ -65,7 +65,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 规则如下：
 
 - 未配置域名的本地系数默认为 `1.0`。
-- 账户 worker 同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 只需配置一次 `0.85`。
+- 账户 worker 同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 只需配置一次 `0.9`。
 - 渠道、账号或分组改名不影响同步；内部使用账号 ID 和分组 ID 作为稳定身份。
 - 账户 worker 的上游域名变化且仍需非 `1.0` 系数时，才需要修改账户配置中的 `factors`。
 
