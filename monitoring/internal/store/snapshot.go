@@ -84,7 +84,7 @@ LEFT JOIN LATERAL (
         WHERE oe.account_id = a.id
           AND oe.created_at >= NOW() - INTERVAL '24 hours'
           AND (persisted_target.source_updated_at IS NULL
-               OR oe.created_at >= persisted_target.source_updated_at)
+               OR oe.created_at >= persisted_target.source_updated_at - INTERVAL '2 minutes')
           AND (persisted_target.last_channel_error_resolved_at IS NULL
                OR oe.created_at > persisted_target.last_channel_error_resolved_at)
           AND COALESCE(oe.is_business_limited, FALSE) = FALSE
@@ -104,7 +104,7 @@ LEFT JOIN LATERAL (
                0
         WHERE persisted_target.last_channel_error_at IS NOT NULL
           AND (persisted_target.source_updated_at IS NULL
-               OR persisted_target.last_channel_error_at >= persisted_target.source_updated_at)
+               OR persisted_target.last_channel_error_at >= persisted_target.source_updated_at - INTERVAL '2 minutes')
           AND (persisted_target.last_channel_error_resolved_at IS NULL
                OR persisted_target.last_channel_error_at > persisted_target.last_channel_error_resolved_at)
     ) channel_errors

@@ -179,7 +179,7 @@ func TestSnapshotQueryBatchesRoutingSignals(t *testing.T) {
 		"persisted_target.source_updated_at",
 		"ops_error_logs",
 		"oe.created_at >= NOW() - INTERVAL '24 hours'",
-		"oe.created_at >= persisted_target.source_updated_at",
+		"oe.created_at >= persisted_target.source_updated_at - INTERVAL '2 minutes'",
 		"oe.created_at > persisted_target.last_channel_error_resolved_at",
 		"oe.is_business_limited",
 		"LOWER(BTRIM(COALESCE(oe.error_owner, ''))) = 'provider'",

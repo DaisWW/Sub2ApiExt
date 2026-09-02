@@ -148,6 +148,20 @@ func TestAccountChannelErrorResolvedAtIgnoresStatusUpdateLag(t *testing.T) {
 	}
 }
 
+func TestAccountChannelErrorResolvedAtKeepsGraceBoundary(t *testing.T) {
+	errorAt := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	updated := errorAt.Add(model.SourceUpdateActivityGrace)
+	account := model.Account{
+		Status:             model.StatusError,
+		LastChannelErrorAt: &errorAt,
+		UpdatedAt:          &updated,
+	}
+
+	if got := accountChannelErrorResolvedAt(account); got != nil {
+		t.Fatalf("exact grace-boundary update should not resolve channel error: %s", got)
+	}
+}
+
 func TestAccountChannelErrorResolvedAtAcceptsLaterSourceChange(t *testing.T) {
 	errorAt := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
 	updated := errorAt.Add(model.SourceUpdateActivityGrace + time.Second)

@@ -66,14 +66,14 @@ WITH bounds AS (
 	       targets.target_key, usage.duration_ms, usage.first_token_ms, usage.created_at
 	FROM eligible_usage usage
 	JOIN active_targets targets ON targets.target_key = 'account:' || usage.account_id::text
-	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at
+	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes'
 	ORDER BY usage.account_id, usage.created_at DESC, usage.id DESC
 ), latest_group_usage AS MATERIALIZED (
 	SELECT DISTINCT ON (usage.group_id)
 	       targets.target_key, usage.duration_ms, usage.first_token_ms, usage.created_at
 	FROM eligible_usage usage
 	JOIN active_targets targets ON targets.target_key = 'group:' || usage.group_id::text
-	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at
+	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes'
 	ORDER BY usage.group_id, usage.created_at DESC, usage.id DESC
 ), group_request_rows AS MATERIALIZED (
 	SELECT 'group:' || oe.group_id::text AS target_key,
@@ -92,7 +92,7 @@ WITH bounds AS (
 	CROSS JOIN bounds
 	WHERE oe.group_id IS NOT NULL
 	  AND oe.created_at >= bounds.start_at AND oe.created_at < bounds.end_at
-	  AND (targets.source_updated_at IS NULL OR oe.created_at >= targets.source_updated_at)
+	  AND (targets.source_updated_at IS NULL OR oe.created_at >= targets.source_updated_at - INTERVAL '2 minutes')
 ), group_request_ranked AS (
 	SELECT group_request_rows.*,
 	       ROW_NUMBER() OVER (
@@ -141,7 +141,7 @@ WITH bounds AS (
 	  AND targets.last_channel_error_at >= bounds.start_at
 	  AND targets.last_channel_error_at < bounds.end_at
 	  AND (targets.source_updated_at IS NULL
-	       OR targets.last_channel_error_at >= targets.source_updated_at)
+	       OR targets.last_channel_error_at >= targets.source_updated_at - INTERVAL '2 minutes')
 	  AND (targets.last_channel_error_resolved_at IS NULL
 	       OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
 ), samples AS (
@@ -150,7 +150,7 @@ WITH bounds AS (
     JOIN active_targets targets ON targets.target_key = mc.target_key
     CROSS JOIN bounds
     WHERE mc.checked_at >= bounds.start_at AND mc.checked_at < bounds.end_at
-      AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at)
+      AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at - INTERVAL '2 minutes')
       AND (targets.target_key NOT LIKE 'group:%' OR mc.source <> 'aggregate')
 	UNION ALL
 	SELECT target_key, 'failed', NULL::integer, NULL::integer, created_at, 'request_error'
@@ -164,14 +164,14 @@ WITH bounds AS (
 	       usage.duration_ms, usage.first_token_ms, usage.created_at, 'history'
 	FROM eligible_usage usage
 	JOIN active_targets targets ON targets.target_key = 'account:' || usage.account_id::text
-	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at
+	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes'
 	UNION ALL
 	SELECT targets.target_key,
 	       CASE WHEN usage.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
 	       usage.duration_ms, usage.first_token_ms, usage.created_at, 'history'
 	FROM eligible_usage usage
 	JOIN active_targets targets ON targets.target_key = 'group:' || usage.group_id::text
-	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at
+	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes'
 ), stats AS (
     SELECT target_key,
            COUNT(*) FILTER (WHERE status NOT IN ('unknown','disabled')) AS samples,
@@ -195,7 +195,7 @@ WITH bounds AS (
 	WHERE mc.kind = 'group'
 	  AND mc.source = 'aggregate'
 	  AND mc.checked_at >= bounds.start_at AND mc.checked_at < bounds.end_at
-	  AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at)
+	  AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at - INTERVAL '2 minutes')
 ), bucket_positions AS (
 	SELECT generate_series(0, 23)::int AS bucket_index
 ), recent_bucketed AS (
@@ -242,7 +242,7 @@ WITH bounds AS (
         SELECT mc.status, mc.latency_ms, mc.first_byte_ms, mc.checked_at, mc.source, mc.message
         FROM monitoring_checks mc
         WHERE mc.target_key = targets.target_key
-          AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at)
+          AND (targets.source_updated_at IS NULL OR mc.checked_at >= targets.source_updated_at - INTERVAL '2 minutes')
 		  AND (targets.kind <> 'group' OR mc.source = 'aggregate')
         ORDER BY mc.checked_at DESC, mc.id DESC
         LIMIT 1
@@ -284,7 +284,7 @@ WITH bounds AS (
 				 THEN TRUE ELSE FALSE END AS group_aggregate_wins,
             CASE WHEN targets.last_channel_error_at IS NOT NULL
                        AND (targets.source_updated_at IS NULL
-                            OR targets.last_channel_error_at >= targets.source_updated_at)
+                            OR targets.last_channel_error_at >= targets.source_updated_at - INTERVAL '2 minutes')
                        AND (targets.last_channel_error_resolved_at IS NULL
                             OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
                        AND (latest_checks.checked_at IS NULL
@@ -296,7 +296,7 @@ WITH bounds AS (
                   THEN TRUE ELSE FALSE END AS channel_error_wins,
             CASE WHEN targets.last_channel_error_at IS NOT NULL
                        AND (targets.source_updated_at IS NULL
-                            OR targets.last_channel_error_at >= targets.source_updated_at)
+                            OR targets.last_channel_error_at >= targets.source_updated_at - INTERVAL '2 minutes')
                        AND (targets.last_channel_error_resolved_at IS NULL
                             OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
                        AND (targets.last_activity_at IS NULL
@@ -310,8 +310,8 @@ WITH bounds AS (
                        )
                   THEN TRUE ELSE FALSE END AS recovery_active,
            CASE WHEN (targets.last_activity_at IS NOT NULL
-                      AND (targets.source_updated_at IS NULL
-                           OR targets.last_activity_at >= targets.source_updated_at)
+                       AND (targets.source_updated_at IS NULL
+                            OR targets.last_activity_at >= targets.source_updated_at - INTERVAL '2 minutes')
                       AND (latest_checks.checked_at IS NULL
                            OR targets.last_activity_at >= latest_checks.checked_at))
                       OR (targets.kind = 'account'

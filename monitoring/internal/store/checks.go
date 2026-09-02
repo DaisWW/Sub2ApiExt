@@ -33,7 +33,7 @@ WITH authorized_target AS (
     JOIN authorized_target auth ON auth.target_key = 'group:' || oe.group_id::text
     WHERE oe.group_id IS NOT NULL
       AND oe.created_at >= NOW() - INTERVAL '24 hours'
-      AND (auth.source_updated_at IS NULL OR oe.created_at >= auth.source_updated_at)
+      AND (auth.source_updated_at IS NULL OR oe.created_at >= auth.source_updated_at - INTERVAL '2 minutes')
 ), group_request_ranked AS (
     SELECT group_request_rows.*,
            ROW_NUMBER() OVER (
@@ -78,7 +78,7 @@ WITH authorized_target AS (
     WHERE targets.kind = 'account'
       AND targets.last_channel_error_at IS NOT NULL
       AND targets.last_channel_error_at >= NOW() - INTERVAL '24 hours'
-      AND (auth.source_updated_at IS NULL OR targets.last_channel_error_at >= auth.source_updated_at)
+      AND (auth.source_updated_at IS NULL OR targets.last_channel_error_at >= auth.source_updated_at - INTERVAL '2 minutes')
       AND (targets.last_channel_error_resolved_at IS NULL
            OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
 ), combined AS (
@@ -89,7 +89,7 @@ SELECT monitoring_checks.target_key, monitoring_checks.kind, monitoring_checks.e
 FROM monitoring_checks
 JOIN authorized_target auth ON auth.target_key = monitoring_checks.target_key
 WHERE monitoring_checks.checked_at >= NOW() - INTERVAL '24 hours'
-  AND (auth.source_updated_at IS NULL OR monitoring_checks.checked_at >= auth.source_updated_at)
+  AND (auth.source_updated_at IS NULL OR monitoring_checks.checked_at >= auth.source_updated_at - INTERVAL '2 minutes')
   AND (monitoring_checks.kind <> 'group' OR monitoring_checks.source <> 'aggregate')
 UNION ALL
 SELECT 'account:' || account_id::text, 'account', account_id, group_id,
@@ -100,7 +100,7 @@ JOIN authorized_target auth ON TRUE
 WHERE $1 = 'account:' || account_id::text
   AND actual_cost > 0
   AND created_at >= NOW() - INTERVAL '24 hours'
-  AND (auth.source_updated_at IS NULL OR usage_logs.created_at >= auth.source_updated_at)
+  AND (auth.source_updated_at IS NULL OR usage_logs.created_at >= auth.source_updated_at - INTERVAL '2 minutes')
 UNION ALL
 SELECT 'group:' || COALESCE(group_id, -1)::text, 'group', COALESCE(group_id, -1), group_id,
        CASE WHEN duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
@@ -110,7 +110,7 @@ JOIN authorized_target auth ON TRUE
 WHERE $1 = 'group:' || COALESCE(group_id, -1)::text
   AND actual_cost > 0
   AND created_at >= NOW() - INTERVAL '24 hours'
-  AND (auth.source_updated_at IS NULL OR usage_logs.created_at >= auth.source_updated_at)
+  AND (auth.source_updated_at IS NULL OR usage_logs.created_at >= auth.source_updated_at - INTERVAL '2 minutes')
 UNION ALL
 SELECT target_key, 'group', group_id, group_id, 'failed',
        NULL::integer, NULL::integer, status_code, '', message, created_at, 'request_error'

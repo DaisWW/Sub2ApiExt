@@ -30,8 +30,8 @@ func TestHistoryQueryRequiresActiveTarget(t *testing.T) {
 		"target_key, 'account', account_id, NULL::bigint, 'failed'",
 		"FROM account_error_events",
 		"WHERE $1 = 'group:-1'",
-		"monitoring_checks.checked_at >= auth.source_updated_at",
-		"usage_logs.created_at >= auth.source_updated_at",
+		"monitoring_checks.checked_at >= auth.source_updated_at - INTERVAL '2 minutes'",
+		"usage_logs.created_at >= auth.source_updated_at - INTERVAL '2 minutes'",
 	} {
 		if !strings.Contains(historyQuery, fragment) {
 			t.Fatalf("history query missing %q", fragment)

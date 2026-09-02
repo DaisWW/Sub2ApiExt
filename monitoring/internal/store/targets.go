@@ -32,7 +32,7 @@ ON CONFLICT (target_key) DO UPDATE SET
              AND (EXCLUDED.last_channel_error_resolved_at IS NULL
                   OR EXCLUDED.last_channel_error_at > EXCLUDED.last_channel_error_resolved_at)
              AND (EXCLUDED.source_updated_at IS NULL
-                  OR EXCLUDED.last_channel_error_at >= EXCLUDED.source_updated_at)
+                  OR EXCLUDED.last_channel_error_at >= EXCLUDED.source_updated_at - INTERVAL '2 minutes')
              AND (monitoring_targets.last_channel_error_at IS NULL
                   OR EXCLUDED.last_channel_error_at >= monitoring_targets.last_channel_error_at)
         THEN EXCLUDED.last_channel_error_at
@@ -42,7 +42,7 @@ ON CONFLICT (target_key) DO UPDATE SET
              AND (EXCLUDED.last_channel_error_resolved_at IS NULL
                   OR monitoring_targets.last_channel_error_at > EXCLUDED.last_channel_error_resolved_at)
              AND (EXCLUDED.source_updated_at IS NULL
-                  OR monitoring_targets.last_channel_error_at >= EXCLUDED.source_updated_at)
+                  OR monitoring_targets.last_channel_error_at >= EXCLUDED.source_updated_at - INTERVAL '2 minutes')
         THEN monitoring_targets.last_channel_error_at
         ELSE NULL
     END,
@@ -51,7 +51,7 @@ ON CONFLICT (target_key) DO UPDATE SET
              AND (EXCLUDED.last_channel_error_resolved_at IS NULL
                   OR EXCLUDED.last_channel_error_at > EXCLUDED.last_channel_error_resolved_at)
              AND (EXCLUDED.source_updated_at IS NULL
-                  OR EXCLUDED.last_channel_error_at >= EXCLUDED.source_updated_at)
+                  OR EXCLUDED.last_channel_error_at >= EXCLUDED.source_updated_at - INTERVAL '2 minutes')
              AND (monitoring_targets.last_channel_error_at IS NULL
                   OR EXCLUDED.last_channel_error_at >= monitoring_targets.last_channel_error_at)
         THEN EXCLUDED.last_channel_error_class
@@ -61,7 +61,7 @@ ON CONFLICT (target_key) DO UPDATE SET
              AND (EXCLUDED.last_channel_error_resolved_at IS NULL
                   OR monitoring_targets.last_channel_error_at > EXCLUDED.last_channel_error_resolved_at)
              AND (EXCLUDED.source_updated_at IS NULL
-                  OR monitoring_targets.last_channel_error_at >= EXCLUDED.source_updated_at)
+                  OR monitoring_targets.last_channel_error_at >= EXCLUDED.source_updated_at - INTERVAL '2 minutes')
         THEN monitoring_targets.last_channel_error_class
         ELSE ''
     END,
@@ -70,7 +70,7 @@ ON CONFLICT (target_key) DO UPDATE SET
              AND (EXCLUDED.last_channel_error_resolved_at IS NULL
                   OR EXCLUDED.last_channel_error_at > EXCLUDED.last_channel_error_resolved_at)
              AND (EXCLUDED.source_updated_at IS NULL
-                  OR EXCLUDED.last_channel_error_at >= EXCLUDED.source_updated_at)
+                  OR EXCLUDED.last_channel_error_at >= EXCLUDED.source_updated_at - INTERVAL '2 minutes')
              AND (monitoring_targets.last_channel_error_at IS NULL
                   OR EXCLUDED.last_channel_error_at >= monitoring_targets.last_channel_error_at)
         THEN EXCLUDED.last_channel_error_status_code
@@ -80,7 +80,7 @@ ON CONFLICT (target_key) DO UPDATE SET
              AND (EXCLUDED.last_channel_error_resolved_at IS NULL
                   OR monitoring_targets.last_channel_error_at > EXCLUDED.last_channel_error_resolved_at)
              AND (EXCLUDED.source_updated_at IS NULL
-                  OR monitoring_targets.last_channel_error_at >= EXCLUDED.source_updated_at)
+                  OR monitoring_targets.last_channel_error_at >= EXCLUDED.source_updated_at - INTERVAL '2 minutes')
         THEN monitoring_targets.last_channel_error_status_code
         ELSE NULL
     END,

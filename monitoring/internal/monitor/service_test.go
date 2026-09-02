@@ -144,6 +144,11 @@ func TestEvidenceTimeValidAllowsUsageAccountingLag(t *testing.T) {
 	}
 
 	oldActivity := now.Add(-time.Hour)
+	boundaryUpdate := oldActivity.Add(model.SourceUpdateActivityGrace)
+	if !evidenceTimeValid(&oldActivity, &boundaryUpdate) {
+		t.Fatal("evidence at the accounting-lag boundary should remain valid")
+	}
+
 	largeUpdate := oldActivity.Add(model.SourceUpdateActivityGrace + time.Second)
 	if evidenceTimeValid(&oldActivity, &largeUpdate) {
 		t.Fatal("evidence before a larger source update must be invalid")
