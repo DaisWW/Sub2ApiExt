@@ -2,7 +2,6 @@ import {
   $,
   LatestRequest,
   api,
-  availabilityClass,
   escapeHTML,
   formatCount,
   formatMedianMs,
@@ -182,18 +181,17 @@ export class DashboardPanel {
     const latency = stats.latency || {};
     const status = normalizeStatus(item.status);
     const displayStatus = displayHealthStatus(item, status);
-    const isGroup = item.kind === 'group';
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
     const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
-    const availabilityLabel = `24 小时历史通过率${availabilityDetail}`;
+    const availabilityLabel = `近 1 小时通过率${availabilityDetail}`;
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
-    const availabilityStatus = displayStatus === 'degraded'
-      ? 'degraded'
-      : isGroup && status === 'degraded' ? '' : status;
-    const availabilityTone = hasSamples
-      ? availabilityClass(stats.availability, availabilityStatus)
-      : 'neutral';
+    const recentSamples = Array.isArray(item.recent_samples) ? item.recent_samples : [];
+    const currentSample = recentSamples[recentSamples.length - 1];
+    const currentGridStatus = currentSample
+      ? displayHealthStatus(item, normalizeStatus(currentSample.status), currentSample.latency_ms, currentSample.checked_at)
+      : displayStatus;
+    const availabilityTone = availabilityToneForStatus(currentGridStatus);
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
@@ -255,7 +253,7 @@ export class DashboardPanel {
           ${currentConcurrencyMetric}
         </div>
         <div class="metrics">
-          ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 24 小时成功样本的首字/首字节中位数', latencyMetricClass(firstByte.median_ms))}
+          ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 1 小时成功样本的首字/首字节中位数', latencyMetricClass(firstByte.median_ms))}
           ${renderMetric('最快', formatMs(latency.fastest_ms), '', latencyMetricClass(latency.fastest_ms))}
           ${renderMetric('中位数', formatMedianMs(latency), '', latencyMetricClass(latency.median_ms))}
           ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值')}
@@ -382,6 +380,13 @@ function statusTone(status) {
   if (status === 'degraded') return 'warn';
   if (status === 'unknown') return 'neutral';
   return 'ok';
+}
+
+function availabilityToneForStatus(status) {
+  if (status === 'failed' || status === 'error') return 'bad';
+  if (status === 'degraded') return 'warn';
+  if (status === 'unknown') return 'neutral';
+  return 'good';
 }
 
 function renderStatusHistory(samples, item) {

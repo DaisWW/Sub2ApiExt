@@ -173,8 +173,8 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"schedulable = TRUE",
 		"LOWER(TRIM(status)) IN ('active', 'error')",
 		"percentile_cont(0.95)",
-		"status IN ('operational','degraded') AND first_byte_ms IS NOT NULL",
-		"status IN ('operational','degraded') AND latency_ms IS NOT NULL",
+		"samples.status IN ('operational','degraded') AND samples.first_byte_ms IS NOT NULL",
+		"samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL",
 		"CASE WHEN usage.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
 		"period_usage AS MATERIALIZED",
 		"eligible_usage AS MATERIALIZED",
@@ -300,6 +300,25 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 	if !strings.Contains(selectList, "e.recovery_trigger_at") {
 		t.Fatal("dashboard must expose only the currently winning recovery trigger")
+	}
+}
+
+func TestDashboardQueryUsesCurrentHourStatsAndHourlyTrajectory(t *testing.T) {
+	statsStart := strings.Index(dashboardQuery, "), stats AS (")
+	recentSamplesStart := strings.Index(dashboardQuery, "), recent_samples AS (")
+	if statsStart < 0 || recentSamplesStart <= statsStart {
+		t.Fatalf("dashboard query stats section is missing: stats=%d recent=%d", statsStart, recentSamplesStart)
+	}
+	statsQuery := dashboardQuery[statsStart:recentSamplesStart]
+	if !strings.Contains(statsQuery, "WHERE samples.checked_at >= bounds.end_at - bounds.bucket_seconds * INTERVAL '1 second'") {
+		t.Fatal("dashboard card statistics must use only the current one-hour window")
+	}
+	if strings.Contains(statsQuery, "bounds.start_at") {
+		t.Fatal("dashboard card statistics must not use the full 24-hour trajectory window")
+	}
+	if !strings.Contains(dashboardQuery, "generate_series(0, 23)") ||
+		!strings.Contains(dashboardQuery, "EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds") {
+		t.Fatal("dashboard trajectory must remain 24 one-hour buckets")
 	}
 }
 

@@ -199,16 +199,18 @@ WITH bounds AS (
 	JOIN active_targets targets ON targets.target_key = 'group:' || usage.group_id::text
 	WHERE targets.source_updated_at IS NULL OR usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes'
 ), stats AS (
-    SELECT target_key,
-           COUNT(*) FILTER (WHERE status NOT IN ('unknown','disabled')) AS samples,
-           COUNT(*) FILTER (WHERE status IN ('operational','degraded')) AS successful,
-	       MIN(first_byte_ms) FILTER (WHERE status IN ('operational','degraded') AND first_byte_ms IS NOT NULL) AS first_fastest,
-	       percentile_cont(0.5) WITHIN GROUP (ORDER BY first_byte_ms) FILTER (WHERE status IN ('operational','degraded') AND first_byte_ms IS NOT NULL) AS first_median,
-	       percentile_cont(0.95) WITHIN GROUP (ORDER BY first_byte_ms) FILTER (WHERE status IN ('operational','degraded') AND first_byte_ms IS NOT NULL) AS first_p95,
-	       MIN(latency_ms) FILTER (WHERE status IN ('operational','degraded') AND latency_ms IS NOT NULL) AS latency_fastest,
-	       percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE status IN ('operational','degraded') AND latency_ms IS NOT NULL) AS latency_median,
-	       percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE status IN ('operational','degraded') AND latency_ms IS NOT NULL) AS latency_p95
+    SELECT samples.target_key,
+           COUNT(*) FILTER (WHERE samples.status NOT IN ('unknown','disabled')) AS samples,
+           COUNT(*) FILTER (WHERE samples.status IN ('operational','degraded')) AS successful,
+	       MIN(samples.first_byte_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.first_byte_ms IS NOT NULL) AS first_fastest,
+	       percentile_cont(0.5) WITHIN GROUP (ORDER BY samples.first_byte_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.first_byte_ms IS NOT NULL) AS first_median,
+	       percentile_cont(0.95) WITHIN GROUP (ORDER BY samples.first_byte_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.first_byte_ms IS NOT NULL) AS first_p95,
+	       MIN(samples.latency_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL) AS latency_fastest,
+	       percentile_cont(0.5) WITHIN GROUP (ORDER BY samples.latency_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL) AS latency_median,
+	       percentile_cont(0.95) WITHIN GROUP (ORDER BY samples.latency_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL) AS latency_p95
     FROM samples
+    CROSS JOIN bounds
+    WHERE samples.checked_at >= bounds.end_at - bounds.bucket_seconds * INTERVAL '1 second'
     GROUP BY target_key
 ), recent_samples AS (
 	SELECT target_key, status, latency_ms, checked_at, source
