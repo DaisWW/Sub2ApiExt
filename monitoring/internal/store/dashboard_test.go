@@ -183,6 +183,7 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"group_request_rows AS MATERIALIZED",
 		"group_request_ranked AS",
 		"group_error_candidates AS MATERIALIZED",
+		"account_error_events AS MATERIALIZED",
 		"ops_error_logs",
 		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0)) AS status_code",
 		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0), 0) <> 429",
@@ -308,6 +309,18 @@ func TestDashboardQueryLetsLaterAccountSuccessClearChannelError(t *testing.T) {
 	}
 	if !strings.Contains(dashboardQuery, "latest_account_usage.created_at >= latest_checks.checked_at") {
 		t.Fatal("latest account success must become current evidence when it is newer than the latest check")
+	}
+}
+
+func TestDashboardQueryCountsUnresolvedAccountChannelErrors(t *testing.T) {
+	if !strings.Contains(dashboardQuery, "account_error_events AS MATERIALIZED") {
+		t.Fatal("dashboard must materialize account channel errors as window observations")
+	}
+	if !strings.Contains(dashboardQuery, "FROM account_error_events") {
+		t.Fatal("dashboard must include unresolved account channel errors in samples")
+	}
+	if !strings.Contains(dashboardQuery, "SELECT target_key, 'failed'") {
+		t.Fatal("account channel errors must count as failed observations")
 	}
 }
 

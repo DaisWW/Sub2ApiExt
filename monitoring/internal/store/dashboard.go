@@ -131,6 +131,19 @@ WITH bounds AS (
 	SELECT DISTINCT ON (target_key) target_key, created_at, status_code, message
 	FROM group_error_events
 	ORDER BY target_key, created_at DESC, id DESC
+), account_error_events AS MATERIALIZED (
+	SELECT targets.target_key, targets.last_channel_error_at AS created_at
+	FROM monitoring_targets targets
+	JOIN visible_targets visible ON visible.target_key = targets.target_key
+	CROSS JOIN bounds
+	WHERE targets.kind = 'account'
+	  AND targets.last_channel_error_at IS NOT NULL
+	  AND targets.last_channel_error_at >= bounds.start_at
+	  AND targets.last_channel_error_at < bounds.end_at
+	  AND (targets.source_updated_at IS NULL
+	       OR targets.last_channel_error_at >= targets.source_updated_at)
+	  AND (targets.last_channel_error_resolved_at IS NULL
+	       OR targets.last_channel_error_at > targets.last_channel_error_resolved_at)
 ), samples AS (
     SELECT mc.target_key, mc.status, mc.latency_ms, mc.first_byte_ms, mc.checked_at, mc.source
     FROM monitoring_checks mc
@@ -142,6 +155,9 @@ WITH bounds AS (
 	UNION ALL
 	SELECT target_key, 'failed', NULL::integer, NULL::integer, created_at, 'request_error'
 	FROM group_error_events
+	UNION ALL
+	SELECT target_key, 'failed', NULL::integer, NULL::integer, created_at, 'request_error'
+	FROM account_error_events
 	UNION ALL
 	SELECT targets.target_key,
 	       CASE WHEN usage.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
@@ -469,9 +485,8 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 		carryForwardTargetStatus(target.RecentSamples, target.Status, carrySource, *target.LastCheckedAt)
 		if target.LatestSource == "request_error" &&
 			!target.LastCheckedAt.Before(now.Add(-dashboardWindow)) {
-			// Channel errors are stored as trigger metadata rather than samples.
-			// Overlay the winning error on the current and later buckets so the
-			// timeline cannot remain green merely because an older sample exists.
+			// Keep the winning error visible in the current and later buckets even
+			// when an older successful sample occupies the same display window.
 			overlayLatestTargetStatus(target.RecentSamples, target.Status, target.LatestSource, *target.LastCheckedAt, now.Add(-dashboardWindow))
 		}
 	}
