@@ -171,18 +171,11 @@
         </div>
         <button class="icon-button" id="closeDialog" title="关闭历史记录" aria-label="关闭历史记录">×</button>
       </div>
-      <section class="history-members" id="historyMembers" aria-labelledby="historyMembersTitle" hidden>
-        <div class="history-members-head">
-          <h3 id="historyMembersTitle">当前成员账户</h3>
-          <span id="historyMembersMeta"></span>
-        </div>
-        <div class="history-member-list" id="historyMemberList"></div>
-      </section>
       <div class="history-summary" id="historySummary"></div>
       <div class="history-table-wrap">
         <table>
           <caption class="sr-only">健康历史记录</caption>
-          <thead><tr><th scope="col">时间</th><th scope="col">状态</th><th scope="col">首字/首字节</th><th scope="col">总耗时</th></tr></thead>
+          <thead><tr><th scope="col">时间</th><th id="historyAccountHeader" scope="col" hidden>经由账户</th><th scope="col">状态</th><th scope="col">首字/首字节</th><th scope="col">总耗时</th></tr></thead>
           <tbody id="historyBody"></tbody>
         </table>
       </div>

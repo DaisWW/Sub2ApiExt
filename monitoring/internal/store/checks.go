@@ -31,6 +31,7 @@ WITH authorized_target AS (
            OR auth.last_channel_error_at > auth.last_channel_error_resolved_at)
 ), combined AS (
 SELECT monitoring_checks.target_key, monitoring_checks.kind, monitoring_checks.entity_id, monitoring_checks.group_id,
+       NULL::bigint AS account_id, '' AS account_name,
        monitoring_checks.status, monitoring_checks.latency_ms, monitoring_checks.first_byte_ms,
        monitoring_checks.status_code, monitoring_checks.error_class, monitoring_checks.message,
        monitoring_checks.checked_at, monitoring_checks.source
@@ -40,18 +41,48 @@ WHERE monitoring_checks.checked_at >= NOW() - INTERVAL '24 hours'
   AND ((auth.kind = 'account' AND monitoring_checks.source IN ('probe', 'request_error'))
        OR (auth.kind = 'group' AND monitoring_checks.source = 'aggregate'))
 UNION ALL
-SELECT 'account:' || account_id::text, 'account', account_id, group_id,
-       CASE WHEN duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
-	       duration_ms, first_token_ms, NULL::integer, '', '真实请求历史', created_at, 'history'
+SELECT 'account:' || usage_logs.account_id::text, 'account', usage_logs.account_id, usage_logs.group_id,
+       usage_logs.account_id,
+       COALESCE(NULLIF(BTRIM(a.name), ''), CASE
+           WHEN usage_logs.account_id IS NULL THEN '未知账户'
+           ELSE '账户 #' || usage_logs.account_id::text
+       END),
+       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
+       usage_logs.duration_ms, usage_logs.first_token_ms, NULL::integer, '', '真实请求历史', usage_logs.created_at, 'history'
 FROM usage_logs
+LEFT JOIN accounts a ON a.id = usage_logs.account_id
 JOIN authorized_target auth ON TRUE
-WHERE $1 = 'account:' || account_id::text
-  AND actual_cost > 0
-  AND created_at >= NOW() - INTERVAL '24 hours'
+WHERE auth.kind = 'account'
+  AND auth.entity_id = usage_logs.account_id
+  AND usage_logs.actual_cost > 0
+  AND usage_logs.created_at >= NOW() - INTERVAL '24 hours'
 UNION ALL
-SELECT target_key, 'account', account_id, NULL::bigint, 'failed',
-       NULL::integer, NULL::integer, status_code, COALESCE(error_class, ''),
-       '真实请求报错', created_at, 'request_error'
+SELECT 'group:' || usage_logs.group_id::text, 'group', usage_logs.group_id, usage_logs.group_id,
+       usage_logs.account_id,
+       COALESCE(NULLIF(BTRIM(a.name), ''), CASE
+           WHEN usage_logs.account_id IS NULL THEN '未知账户'
+           ELSE '账户 #' || usage_logs.account_id::text
+       END),
+       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
+       usage_logs.duration_ms, usage_logs.first_token_ms, NULL::integer, '', '真实请求历史', usage_logs.created_at, 'history'
+FROM usage_logs
+LEFT JOIN accounts a ON a.id = usage_logs.account_id
+JOIN authorized_target auth ON TRUE
+WHERE auth.kind = 'group'
+  AND auth.entity_id = usage_logs.group_id
+  AND usage_logs.group_id IS NOT NULL
+  AND usage_logs.actual_cost > 0
+  AND usage_logs.created_at >= NOW() - INTERVAL '24 hours'
+UNION ALL
+SELECT errors.target_key, 'account', errors.account_id, NULL::bigint,
+       errors.account_id,
+       COALESCE(NULLIF(BTRIM((SELECT name FROM accounts WHERE id = errors.account_id)), ''), CASE
+           WHEN errors.account_id IS NULL THEN '未知账户'
+           ELSE '账户 #' || errors.account_id::text
+       END),
+       'failed',
+       NULL::integer, NULL::integer, errors.status_code, COALESCE(errors.error_class, ''),
+       '真实请求报错', errors.created_at, 'request_error'
 FROM account_error_events errors
 WHERE NOT EXISTS (
     SELECT 1
@@ -62,10 +93,11 @@ WHERE NOT EXISTS (
       AND consumed.checked_at = errors.created_at
 )
 )
-SELECT target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms,
+SELECT target_key, kind, entity_id, group_id, account_id, account_name, status, latency_ms, first_byte_ms,
        status_code, error_class, message, checked_at, source
 FROM combined
-ORDER BY checked_at DESC
+ORDER BY checked_at DESC,
+         CASE WHEN source = 'history' THEN 0 ELSE 1 END
 LIMIT $2`
 
 func (s *Store) InsertResults(ctx context.Context, results []model.ProbeResult) error {
@@ -217,9 +249,9 @@ func scanProbeResults(rows *sql.Rows) ([]model.ProbeResult, error) {
 
 func scanProbeResult(rows *sql.Rows) (model.ProbeResult, error) {
 	var result model.ProbeResult
-	var groupID, latency, firstByte, statusCode sql.NullInt64
+	var groupID, accountID, latency, firstByte, statusCode sql.NullInt64
 	err := rows.Scan(
-		&result.TargetKey, &result.Kind, &result.EntityID, &groupID, &result.Status,
+		&result.TargetKey, &result.Kind, &result.EntityID, &groupID, &accountID, &result.AccountName, &result.Status,
 		&latency, &firstByte, &statusCode, &result.ErrorClass, &result.Message,
 		&result.CheckedAt, &result.Source,
 	)
@@ -230,6 +262,10 @@ func scanProbeResult(rows *sql.Rows) (model.ProbeResult, error) {
 	if groupID.Valid {
 		value := groupID.Int64
 		result.GroupID = &value
+	}
+	if accountID.Valid {
+		value := accountID.Int64
+		result.AccountID = &value
 	}
 	if latency.Valid {
 		value := int(latency.Int64)

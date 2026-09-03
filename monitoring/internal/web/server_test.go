@@ -224,21 +224,22 @@ func TestDashboardHidesGroupConcurrencyMetric(t *testing.T) {
 	}
 }
 
-func TestGroupHistoryShowsCurrentMemberAccounts(t *testing.T) {
+func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	for path, markers := range map[string][]string{
 		"/": {
-			`id="historyMembers"`,
-			`id="historyMemberList"`,
-			"当前成员账户",
+			"id=\"historyAccountHeader\"",
+			"经由账户",
 		},
 		"/js/history-dialog.js": {
-			"currentTarget?.members || []",
-			"if (!groupHistory)",
-			"暂无健康证据",
+			"historyAccountLabel(item, groupHistory)",
+			"setAccountColumnVisible(groupHistory)",
+			"const healthItems = groupHistory ? items.filter((item) => item?.source === 'aggregate') : items",
+			"分组聚合",
+			"账户 #${accountID}",
 		},
 		"/js/dashboard.js": {
-			"targets.get(card.dataset.target)",
+			"this.#openHistory(card.dataset.target, card.dataset.name)",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
@@ -253,6 +254,12 @@ func TestGroupHistoryShowsCurrentMemberAccounts(t *testing.T) {
 				t.Errorf("%s is missing %q", path, marker)
 			}
 		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/js/history-dialog.js", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if strings.Contains(response.Body.String(), "currentTarget") || strings.Contains(response.Body.String(), "renderMembers") {
+		t.Fatal("history dialog must not render the full current member list")
 	}
 }
 
