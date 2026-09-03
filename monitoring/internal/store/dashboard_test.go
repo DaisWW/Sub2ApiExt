@@ -23,6 +23,80 @@ func TestMetricStatsUsesP95(t *testing.T) {
 	}
 }
 
+func TestAttachDashboardMemberUsesAccountTargetEvidence(t *testing.T) {
+	checkedAt := time.Now().UTC().Add(-time.Minute)
+	latency := 321
+	dashboard := model.Dashboard{Targets: []model.DashboardTarget{
+		{Target: model.Target{Kind: model.KindGroup, EntityID: 10}},
+		{Target: model.Target{
+			Kind: model.KindAccount, EntityID: 20, Name: "account-a", Platform: "openai",
+			SourceStatus: "active", ProbeEnabled: true, Status: model.StatusOperational,
+			LatestSource: "history", LastCheckedAt: &checkedAt, LatestLatencyMs: &latency,
+			LatestMessage: "近期真实请求",
+		}},
+	}}
+	groups := map[int64]int{10: 0}
+	accounts := map[int64]int{20: 1}
+	seen := make(map[[2]int64]struct{})
+	row := dashboardMemberRow{
+		groupID: 10, accountID: 20, schedulable: true,
+		name:         sql.NullString{String: "stale-name", Valid: true},
+		sourceStatus: sql.NullString{String: "active", Valid: true},
+	}
+
+	attachDashboardMember(&dashboard, groups, accounts, row, seen)
+	attachDashboardMember(&dashboard, groups, accounts, row, seen)
+
+	if len(dashboard.Targets[0].Members) != 1 {
+		t.Fatalf("group members = %+v, want one deduplicated member", dashboard.Targets[0].Members)
+	}
+	member := dashboard.Targets[0].Members[0]
+	if member.AccountID != 20 || member.Name != "account-a" || member.Platform != "openai" ||
+		member.Status != model.StatusOperational || member.Source != "history" ||
+		member.CheckedAt == nil || !member.CheckedAt.Equal(checkedAt) ||
+		member.LatencyMs == nil || *member.LatencyMs != latency ||
+		member.Message != "近期真实请求" || !member.Routable {
+		t.Fatalf("member did not reuse account target evidence: %+v", member)
+	}
+}
+
+func TestDashboardMemberWithoutAccountEvidenceStaysUnknown(t *testing.T) {
+	dashboard := model.Dashboard{Targets: []model.DashboardTarget{
+		{Target: model.Target{Kind: model.KindGroup, EntityID: 10}},
+	}}
+	row := dashboardMemberRow{
+		groupID: 10, accountID: 20, schedulable: true,
+		name:         sql.NullString{String: "account-a", Valid: true},
+		sourceStatus: sql.NullString{String: "error", Valid: true},
+	}
+	attachDashboardMember(
+		&dashboard, map[int64]int{10: 0}, map[int64]int{}, row, make(map[[2]int64]struct{}),
+	)
+
+	member := dashboard.Targets[0].Members[0]
+	if member.Status != model.StatusUnknown || member.Source != "" || member.CheckedAt != nil || member.Routable {
+		t.Fatalf("missing account evidence must not be invented: %+v", member)
+	}
+}
+
+func TestDashboardMembersQueryKeepsOnlyCurrentMonitoredAccounts(t *testing.T) {
+	for _, fragment := range []string{
+		"FROM account_groups ag",
+		"LOWER(TRIM(g.status)) = 'active'",
+		"a.deleted_at IS NULL",
+		"a.schedulable = TRUE",
+		"LOWER(TRIM(a.status)) IN ('active', 'error')",
+		"ORDER BY ag.group_id, a.priority, COALESCE(ag.priority, 0), a.id",
+	} {
+		if !strings.Contains(dashboardMembersQuery, fragment) {
+			t.Fatalf("dashboard members query missing %q", fragment)
+		}
+	}
+	if strings.Contains(strings.ToLower(dashboardMembersQuery), "credentials") {
+		t.Fatal("dashboard members query must not read account credentials")
+	}
+}
+
 func TestApplyLatestTargetStateSanitizesGroupMessage(t *testing.T) {
 	now := time.Now().UTC()
 	target := model.DashboardTarget{Target: model.Target{Kind: model.KindGroup, ProbeEnabled: true}}

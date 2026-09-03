@@ -273,8 +273,13 @@ export class DashboardPanel {
   }
 
   #bindTargetCards() {
+    const targets = new Map((this.dashboard?.targets || []).map((target) => [target.key, target]));
     document.querySelectorAll('.target-card').forEach((card) => {
-      const open = () => this.#openHistory(card.dataset.target, card.dataset.name);
+      const open = () => this.#openHistory(
+        card.dataset.target,
+        card.dataset.name,
+        targets.get(card.dataset.target)
+      );
       card.addEventListener('click', open);
       card.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' && event.key !== ' ') return;

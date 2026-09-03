@@ -224,6 +224,38 @@ func TestDashboardHidesGroupConcurrencyMetric(t *testing.T) {
 	}
 }
 
+func TestGroupHistoryShowsCurrentMemberAccounts(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	for path, markers := range map[string][]string{
+		"/": {
+			`id="historyMembers"`,
+			`id="historyMemberList"`,
+			"当前成员账户",
+		},
+		"/js/history-dialog.js": {
+			"currentTarget?.members || []",
+			"if (!groupHistory)",
+			"暂无健康证据",
+		},
+		"/js/dashboard.js": {
+			"targets.get(card.dataset.target)",
+		},
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s returned %d", path, response.Code)
+		}
+		body := response.Body.String()
+		for _, marker := range markers {
+			if !strings.Contains(body, marker) {
+				t.Errorf("%s is missing %q", path, marker)
+			}
+		}
+	}
+}
+
 func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)

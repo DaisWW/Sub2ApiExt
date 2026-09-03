@@ -384,7 +384,129 @@ func (s *Store) Dashboard(ctx context.Context, staleAfter time.Duration, interva
 		return model.Dashboard{}, fmt.Errorf("load dashboard: %w", err)
 	}
 	defer rows.Close()
-	return buildDashboard(rows, staleAfter, intervalSec)
+	dashboard, err := buildDashboard(rows, staleAfter, intervalSec)
+	if err != nil {
+		return model.Dashboard{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return model.Dashboard{}, fmt.Errorf("close dashboard rows: %w", err)
+	}
+	if err := s.attachDashboardMembers(ctx, &dashboard); err != nil {
+		return model.Dashboard{}, fmt.Errorf("load dashboard members: %w", err)
+	}
+	return dashboard, nil
+}
+
+const dashboardMembersQuery = `
+SELECT ag.group_id, a.id, a.name, a.platform, a.status,
+       COALESCE(a.schedulable, FALSE)
+FROM account_groups ag
+JOIN groups g ON g.id = ag.group_id
+JOIN accounts a ON a.id = ag.account_id
+WHERE g.deleted_at IS NULL
+  AND LOWER(TRIM(g.status)) = 'active'
+  AND a.deleted_at IS NULL
+  AND a.schedulable = TRUE
+  AND LOWER(TRIM(a.status)) IN ('active', 'error')
+ORDER BY ag.group_id, a.priority, COALESCE(ag.priority, 0), a.id`
+
+type dashboardMemberRow struct {
+	groupID, accountID           int64
+	name, platform, sourceStatus sql.NullString
+	schedulable                  bool
+}
+
+func (s *Store) attachDashboardMembers(ctx context.Context, dashboard *model.Dashboard) error {
+	if dashboard == nil || len(dashboard.Targets) == 0 {
+		return nil
+	}
+	groupIndexes := make(map[int64]int)
+	accountIndexes := make(map[int64]int)
+	for index := range dashboard.Targets {
+		target := &dashboard.Targets[index]
+		switch target.Kind {
+		case model.KindGroup:
+			groupIndexes[target.EntityID] = index
+		case model.KindAccount:
+			accountIndexes[target.EntityID] = index
+		}
+	}
+	if len(groupIndexes) == 0 {
+		return nil
+	}
+
+	rows, err := s.db.QueryContext(ctx, dashboardMembersQuery)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	seen := make(map[[2]int64]struct{})
+	for rows.Next() {
+		var row dashboardMemberRow
+		if err := rows.Scan(
+			&row.groupID, &row.accountID, &row.name, &row.platform, &row.sourceStatus,
+			&row.schedulable,
+		); err != nil {
+			return fmt.Errorf("scan dashboard member: %w", err)
+		}
+		attachDashboardMember(dashboard, groupIndexes, accountIndexes, row, seen)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func attachDashboardMember(
+	dashboard *model.Dashboard,
+	groupIndexes, accountIndexes map[int64]int,
+	row dashboardMemberRow,
+	seen map[[2]int64]struct{},
+) {
+	groupIndex, ok := groupIndexes[row.groupID]
+	if !ok {
+		return
+	}
+	memberKey := [2]int64{row.groupID, row.accountID}
+	if _, exists := seen[memberKey]; exists {
+		return
+	}
+	seen[memberKey] = struct{}{}
+	member := dashboardMemberFromRow(row)
+	if accountIndex, exists := accountIndexes[row.accountID]; exists {
+		member = dashboardMemberFromTarget(member, dashboard.Targets[accountIndex])
+	}
+	dashboard.Targets[groupIndex].Members = append(dashboard.Targets[groupIndex].Members, member)
+}
+
+func dashboardMemberFromRow(row dashboardMemberRow) model.DashboardMember {
+	sourceStatus := strings.TrimSpace(row.sourceStatus.String)
+	return model.DashboardMember{
+		AccountID: row.accountID, Name: row.name.String, Platform: row.platform.String,
+		SourceStatus: sourceStatus, Routable: row.schedulable && accountIsActive(sourceStatus),
+		Status: model.StatusUnknown, Message: "暂无账户健康证据",
+	}
+}
+
+func dashboardMemberFromTarget(member model.DashboardMember, target model.DashboardTarget) model.DashboardMember {
+	member.Name = target.Name
+	member.Platform = target.Platform
+	member.SourceStatus = target.SourceStatus
+	member.Routable = accountIsActive(target.SourceStatus)
+	member.Status = target.Status
+	member.Source = target.LatestSource
+	member.CheckedAt = cloneTime(target.LastCheckedAt)
+	member.LatencyMs = cloneDashboardInt(target.LatestLatencyMs)
+	member.Message = target.LatestMessage
+	return member
+}
+
+func cloneDashboardInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func buildDashboard(rows *sql.Rows, staleAfter time.Duration, intervalSec int) (model.Dashboard, error) {

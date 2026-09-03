@@ -153,9 +153,25 @@ type DashboardTarget struct {
 	Target
 	// RateMultiplier is the currently effective billing cost multiplier stored
 	// on the account or group, not an upstream sync candidate.
-	RateMultiplier *float64       `json:"rate_multiplier,omitempty"`
-	Stats          TargetStats    `json:"stats"`
-	RecentSamples  []StatusSample `json:"recent_samples"`
+	RateMultiplier *float64          `json:"rate_multiplier,omitempty"`
+	Stats          TargetStats       `json:"stats"`
+	RecentSamples  []StatusSample    `json:"recent_samples"`
+	Members        []DashboardMember `json:"members,omitempty"`
+}
+
+// DashboardMember is the current account evidence shown inside a group detail.
+// It is derived from the same account target state as the account card.
+type DashboardMember struct {
+	AccountID    int64      `json:"account_id"`
+	Name         string     `json:"name"`
+	Platform     string     `json:"platform,omitempty"`
+	SourceStatus string     `json:"source_status,omitempty"`
+	Routable     bool       `json:"routable"`
+	Status       string     `json:"status"`
+	Source       string     `json:"source,omitempty"`
+	CheckedAt    *time.Time `json:"checked_at,omitempty"`
+	LatencyMs    *int       `json:"latency_ms,omitempty"`
+	Message      string     `json:"message,omitempty"`
 }
 
 // StatusSample 是目标最近一次观测的紧凑状态，用于绘制状态轨迹。

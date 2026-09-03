@@ -8,7 +8,7 @@ document.documentElement.classList.toggle('iframe-embedded', window.self !== win
 
 let dashboard;
 const history = new HistoryDialog();
-dashboard = new DashboardPanel((target, name) => history.open(target, name));
+dashboard = new DashboardPanel((target, name, currentTarget) => history.open(target, name, currentTarget));
 const usage = new UsagePanel();
 const alerts = new AlertCenter();
 let activePanel = 'dashboard';
