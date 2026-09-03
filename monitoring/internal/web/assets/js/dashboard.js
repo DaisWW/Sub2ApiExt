@@ -10,6 +10,7 @@ import {
   formatTime,
   normalizeStatus,
   slowLatencyThresholdMs,
+  sourceLabel,
   statusClass,
   toast
 } from './shared.js';
@@ -466,15 +467,6 @@ function renderMetric(label, value, help = '', tone = '') {
   return `<div><div class="metric-label"${title}>${label}</div><div class="metric-value${toneClass}">${value}</div></div>`;
 }
 
-function sourceLabel(source) {
-  if (source === 'history') return '真实请求';
-  if (source === 'aggregate') return '账户聚合';
-  if (source === 'probe') return '主动探测';
-  if (source === 'request_error') return '真实请求错误';
-  if (source === 'cache') return '缓存证据';
-  return '当前状态';
-}
-
 function staleLabel(item, status) {
   if ((status === 'failed' || status === 'error') && item?.latest_source === 'request_error') return '请求错误状态';
   if (status === 'degraded') return '延迟状态';
@@ -486,17 +478,8 @@ function staleLabel(item, status) {
 
 function displayEvidenceMessage(item, value) {
   const message = String(value || '').trim();
-  if (item?.kind !== 'group') return message;
-  if (item?.latest_source === 'aggregate') return message;
-  if (item?.latest_source === 'history') {
-    const latency = Number(item?.latest_latency_ms);
-    return Number.isFinite(latency) && latency > 0
-      ? `最近成功请求耗时 ${formatMs(latency)}`
-      : '最近成功请求';
-  }
-  if (item?.latest_source !== 'request_error') return '';
-  if (!message) return '最近请求失败';
-  return message.startsWith('最近请求失败') ? message : `最近请求失败：${message}`;
+  if (item?.kind === 'group' && item?.latest_source !== 'aggregate') return '';
+  return message;
 }
 
 function targetStatusLabel(displayStatus) {

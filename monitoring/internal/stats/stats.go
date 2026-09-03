@@ -34,26 +34,6 @@ func percentile(values []int, fraction float64) float64 {
 	return float64(values[lower])*(1-weight) + float64(values[upper])*weight
 }
 
-func StatusFromResults(results []model.ProbeResult) string {
-	if len(results) == 0 {
-		return model.StatusUnknown
-	}
-	operational, degraded, failed, unknown := 0, 0, 0, 0
-	for _, result := range results {
-		switch result.Status {
-		case model.StatusOperational:
-			operational++
-		case model.StatusDegraded:
-			degraded++
-		case model.StatusFailed, model.StatusError:
-			failed++
-		default:
-			unknown++
-		}
-	}
-	return groupStatus(operational, degraded, failed, unknown)
-}
-
 func AggregateGroup(key string, group model.Group, results []model.ProbeResult, now time.Time) model.ProbeResult {
 	if len(results) == 0 && len(group.AccountIDs) == 0 && len(group.Members) == 0 {
 		return model.ProbeResult{TargetKey: key, Kind: model.KindGroup, EntityID: group.ID, Status: model.StatusUnknown}
@@ -159,39 +139,18 @@ func normalizeMembers(group model.Group, results []model.ProbeResult) []model.Gr
 		if _, exists := seen[member.AccountID]; exists {
 			return
 		}
-		if member.RequestCount < 0 {
-			member.RequestCount = 0
-		}
 		seen[member.AccountID] = struct{}{}
 		members = append(members, member)
 	}
 	for _, member := range group.Members {
 		appendMember(member)
 	}
-	seenAccountIDs := make(map[int64]struct{}, len(members))
-	for _, member := range members {
-		seenAccountIDs[member.AccountID] = struct{}{}
-	}
 	for _, accountID := range group.AccountIDs {
-		if _, exists := seenAccountIDs[accountID]; exists {
-			continue
-		}
 		appendMember(model.GroupMember{AccountID: accountID})
-		seenAccountIDs[accountID] = struct{}{}
 	}
 	for _, result := range results {
 		appendMember(model.GroupMember{AccountID: result.EntityID})
 	}
-	sort.SliceStable(members, func(i, j int) bool {
-		left, right := members[i], members[j]
-		if left.AccountPriority != right.AccountPriority {
-			return left.AccountPriority < right.AccountPriority
-		}
-		if left.GroupPriority != right.GroupPriority {
-			return left.GroupPriority < right.GroupPriority
-		}
-		return left.AccountID < right.AccountID
-	})
 	return members
 }
 

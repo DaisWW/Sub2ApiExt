@@ -559,15 +559,6 @@ func overlayLatestTargetStatus(samples []model.StatusSample, status, source stri
 	}
 }
 
-func hasObservedStatusSample(samples []model.StatusSample) bool {
-	for _, sample := range samples {
-		if isObservedStatus(sample.Status) {
-			return true
-		}
-	}
-	return false
-}
-
 func isObservedStatus(status string) bool {
 	switch status {
 	case model.StatusOperational, model.StatusDegraded, model.StatusFailed, model.StatusError:

@@ -23,28 +23,6 @@ func TestSummarize(t *testing.T) {
 	}
 }
 
-func TestStatusFromResults(t *testing.T) {
-	cases := []struct {
-		name string
-		in   []model.ProbeResult
-		want string
-	}{
-		{"empty", nil, model.StatusUnknown},
-		{"all ok", []model.ProbeResult{{Status: model.StatusOperational}, {Status: model.StatusDegraded}}, model.StatusOperational},
-		{"mixed", []model.ProbeResult{{Status: model.StatusOperational}, {Status: model.StatusFailed}}, model.StatusOperational},
-		{"slow fallback", []model.ProbeResult{{Status: model.StatusDegraded}, {Status: model.StatusFailed}}, model.StatusDegraded},
-		{"failed and unknown", []model.ProbeResult{{Status: model.StatusFailed}, {Status: model.StatusUnknown}}, model.StatusUnknown},
-		{"none", []model.ProbeResult{{Status: model.StatusError}}, model.StatusFailed},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := StatusFromResults(tc.in); got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestAggregateGroup(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	group := model.Group{ID: 3, Name: "primary"}

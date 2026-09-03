@@ -411,7 +411,7 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 		}
 		memberResults := b.groupMemberResults(group, accounts)
 		if len(memberResults) == 0 ||
-			(!containsFreshObservation(memberResults) && !groupAggregateNeeded(group)) {
+			(!containsPersistableObservation(memberResults) && !groupAggregateNeeded(group)) {
 			continue
 		}
 		// Keep disabled/error accounts out of the aggregation input as well as
@@ -567,8 +567,4 @@ func containsPersistableObservation(results []model.ProbeResult) bool {
 		}
 	}
 	return false
-}
-
-func containsFreshObservation(results []model.ProbeResult) bool {
-	return containsPersistableObservation(results)
 }

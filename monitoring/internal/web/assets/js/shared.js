@@ -52,6 +52,15 @@ export function statusLabel(status) {
   }[normalizeStatus(status)];
 }
 
+export function sourceLabel(source) {
+  if (source === 'history') return '真实请求';
+  if (source === 'aggregate') return '账户聚合';
+  if (source === 'probe') return '主动探测';
+  if (source === 'request_error') return '真实请求错误';
+  if (source === 'cache') return '缓存证据';
+  return '当前状态';
+}
+
 export function statusClass(status) {
   const normalized = normalizeStatus(status);
   if (normalized === 'disabled') return 'status-failed';
