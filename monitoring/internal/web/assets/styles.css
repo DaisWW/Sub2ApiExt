@@ -142,7 +142,9 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .donut-empty { min-height: 150px; }
 .donut { width: 144px; aspect-ratio: 1; display: grid; place-items: center; border-radius: 50%; background: var(--surface); position: relative; }
 .donut::after { display: none; }
-.donut-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.donut-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.donut-slice { cursor: help; transition: opacity .15s ease; }
+.donut-slice:hover { opacity: .86; }
 .donut-hole { z-index: 1; display: grid; place-items: center; gap: 2px; text-align: center; }
 .donut-hole strong { font-size: 20px; font-variant-numeric: tabular-nums; }
 .donut-hole span { color: var(--muted); font-size: 10px; }

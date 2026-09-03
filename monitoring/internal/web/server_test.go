@@ -125,7 +125,7 @@ func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
 	}
 }
 
-func TestUsageShareDonutSlicesAreInert(t *testing.T) {
+func TestUsageShareDonutSlicesAreInteractive(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/usage.js", nil)
 	response := httptest.NewRecorder()
@@ -143,8 +143,8 @@ func TestUsageShareDonutSlicesAreInert(t *testing.T) {
 		t.Fatal("renderDonutSlice implementation is incomplete")
 	}
 	slice := body[start : start+end]
-	if strings.Contains(slice, "data-chart-tooltip") || strings.Contains(slice, "<title>") {
-		t.Fatal("donut slices still expose pointer tooltip interaction")
+	if !strings.Contains(slice, "data-chart-tooltip") || !strings.Contains(slice, "<title>") {
+		t.Fatal("donut slices must expose pointer tooltip interaction")
 	}
 	renderStart := strings.Index(body, "function renderShareDonut")
 	if renderStart < 0 {
@@ -155,8 +155,8 @@ func TestUsageShareDonutSlicesAreInert(t *testing.T) {
 		t.Fatal("renderShareDonut implementation is incomplete")
 	}
 	render := body[renderStart : renderStart+renderEnd]
-	if !strings.Contains(render, "bindChartTooltip(container, '.donut-legend [data-chart-tooltip]'") {
-		t.Fatal("share donut tooltip binding is not limited to the legend")
+	if !strings.Contains(render, "bindChartTooltip(container, '[data-chart-tooltip]'") {
+		t.Fatal("share donut tooltip binding must include slices and legend items")
 	}
 	if !strings.Contains(body, "bindChartTooltip($('#usageTrendChart'") {
 		t.Fatal("usage trend tooltip binding was removed")
@@ -176,11 +176,11 @@ func TestUsageShareDonutSlicesAreInert(t *testing.T) {
 	if donutRuleEnd < 0 {
 		t.Fatal("donut SVG rule is incomplete")
 	}
-	if !strings.Contains(styles[donutRuleStart:donutRuleStart+donutRuleEnd], "pointer-events: none") {
-		t.Fatal("donut SVG still receives pointer events")
+	if strings.Contains(styles[donutRuleStart:donutRuleStart+donutRuleEnd], "pointer-events: none") {
+		t.Fatal("donut SVG must receive pointer events")
 	}
-	if strings.Contains(styles, ".donut-slice {") || strings.Contains(styles, ".donut-slice:hover") {
-		t.Fatal("donut slice hover styles are still present")
+	if !strings.Contains(styles, ".donut-slice {") || !strings.Contains(styles, ".donut-slice:hover") {
+		t.Fatal("donut slice hover styles are missing")
 	}
 }
 
