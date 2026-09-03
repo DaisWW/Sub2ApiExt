@@ -125,6 +125,65 @@ func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
 	}
 }
 
+func TestUsageShareDonutSlicesAreInert(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	request := httptest.NewRequest(http.MethodGet, "/js/usage.js", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("got status %d", response.Code)
+	}
+	body := response.Body.String()
+	start := strings.Index(body, "function renderDonutSlice")
+	if start < 0 {
+		t.Fatal("renderDonutSlice implementation is missing")
+	}
+	end := strings.Index(body[start:], "\n}\n\nfunction donutSlicePath")
+	if end < 0 {
+		t.Fatal("renderDonutSlice implementation is incomplete")
+	}
+	slice := body[start : start+end]
+	if strings.Contains(slice, "data-chart-tooltip") || strings.Contains(slice, "<title>") {
+		t.Fatal("donut slices still expose pointer tooltip interaction")
+	}
+	renderStart := strings.Index(body, "function renderShareDonut")
+	if renderStart < 0 {
+		t.Fatal("renderShareDonut implementation is missing")
+	}
+	renderEnd := strings.Index(body[renderStart:], "\n}\n\nfunction shareItems")
+	if renderEnd < 0 {
+		t.Fatal("renderShareDonut implementation is incomplete")
+	}
+	render := body[renderStart : renderStart+renderEnd]
+	if !strings.Contains(render, "bindChartTooltip(container, '.donut-legend [data-chart-tooltip]'") {
+		t.Fatal("share donut tooltip binding is not limited to the legend")
+	}
+	if !strings.Contains(body, "bindChartTooltip($('#usageTrendChart'") {
+		t.Fatal("usage trend tooltip binding was removed")
+	}
+	stylesRequest := httptest.NewRequest(http.MethodGet, "/styles.css", nil)
+	stylesResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(stylesResponse, stylesRequest)
+	if stylesResponse.Code != http.StatusOK {
+		t.Fatalf("styles.css returned status %d", stylesResponse.Code)
+	}
+	styles := stylesResponse.Body.String()
+	donutRuleStart := strings.Index(styles, ".donut-svg")
+	if donutRuleStart < 0 {
+		t.Fatal("donut SVG rule is missing")
+	}
+	donutRuleEnd := strings.Index(styles[donutRuleStart:], "\n")
+	if donutRuleEnd < 0 {
+		t.Fatal("donut SVG rule is incomplete")
+	}
+	if !strings.Contains(styles[donutRuleStart:donutRuleStart+donutRuleEnd], "pointer-events: none") {
+		t.Fatal("donut SVG still receives pointer events")
+	}
+	if strings.Contains(styles, ".donut-slice {") || strings.Contains(styles, ".donut-slice:hover") {
+		t.Fatal("donut slice hover styles are still present")
+	}
+}
+
 func TestEmbeddedToolbarReservesParentControlSpace(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	for path, marker := range map[string]string{

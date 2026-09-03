@@ -255,7 +255,7 @@ function renderShareDonut(containerId, sourceItems, summary, emptyText, itemLabe
   const tooltipId = `${containerId}Tooltip`;
   const slices = items.map((item, index) => {
     const percent = item.sliceValue * 100 / sliceTotal;
-    const slice = renderDonutSlice(item, index, percent, offset, sliceTotal, metric);
+    const slice = renderDonutSlice(index, percent, offset);
     offset += percent;
     return slice;
   });
@@ -267,7 +267,7 @@ function renderShareDonut(containerId, sourceItems, summary, emptyText, itemLabe
     </div>
     <div class="donut-legend">${items.map((item, index) => renderLegendItem(item, sliceTotal, index, tooltipId, metric)).join('')}</div>
     <div class="chart-tooltip" id="${tooltipId}" role="tooltip" hidden></div>`;
-  bindChartTooltip(container, '[data-chart-tooltip]', $(`#${tooltipId}`));
+  bindChartTooltip(container, '.donut-legend [data-chart-tooltip]', $(`#${tooltipId}`));
 }
 
 function shareItems(sourceItems, summary, metric) {
@@ -299,14 +299,10 @@ function shareItems(sourceItems, summary, metric) {
   return items;
 }
 
-function renderDonutSlice(item, index, percent, offset, total, metric) {
-  const label = shareTooltipLabel(item, total, metric);
+function renderDonutSlice(index, percent, offset) {
   const color = donutColors[index % donutColors.length];
   return `<path class="donut-slice" d="${donutSlicePath(percent, offset)}"
-    fill="${color}" fill-rule="evenodd"
-    data-chart-tooltip="${escapeHTML(label)}">
-    <title>${escapeHTML(label)}</title>
-  </path>`;
+    fill="${color}" fill-rule="evenodd"></path>`;
 }
 
 function donutSlicePath(percent, offset) {
