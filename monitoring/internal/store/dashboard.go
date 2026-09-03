@@ -594,18 +594,12 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 }
 
 func carryForwardStatusSamples(samples []model.StatusSample) {
-	// Carry a known state forward through gaps after the first observation.
-	// Leading buckets stay unknown internally: an observation later in the
-	// window cannot prove what happened before it. The web layer renders those
-	// empty buckets with a neutral tone, so the user does not see an invented
-	// historical failure or a falsely green baseline.
+	// Carry the latest known state through empty buckets. A source change marks
+	// evidence as old, but it does not erase the last user-visible state: a
+	// silent interval is not proof that the account or route became unknown.
 	var previous *model.StatusSample
 	for i := range samples {
 		sample := &samples[i]
-		if sample.Source == "source_change" {
-			previous = nil
-			continue
-		}
 		if isObservedStatus(sample.Status) {
 			observed := *sample
 			previous = &observed
@@ -623,12 +617,6 @@ func carryForwardTargetStatus(samples []model.StatusSample, status, source strin
 	}
 	baseline := model.StatusSample{Status: status, Source: source, CheckedAt: checkedAt}
 	for index := range samples {
-		if samples[index].Source == "source_change" {
-			if !samples[index].CheckedAt.Before(checkedAt) {
-				return
-			}
-			continue
-		}
 		// Preserve both real observations and gaps that were already carried
 		// from an earlier observation. Only genuinely empty buckets at or after
 		// the target-level evidence can use this baseline. In particular, do not

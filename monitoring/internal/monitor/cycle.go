@@ -410,8 +410,7 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 			continue
 		}
 		memberResults := b.groupMemberResults(group, accounts)
-		if len(memberResults) == 0 ||
-			(!containsPersistableObservation(memberResults) && !groupAggregateNeeded(group)) {
+		if len(memberResults) == 0 {
 			continue
 		}
 		// Keep disabled/error accounts out of the aggregation input as well as
@@ -421,6 +420,9 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 		result := stats.AggregateGroup(
 			model.TargetKey(model.KindGroup, group.ID), aggregationGroup, memberResults, now,
 		)
+		if !groupAggregateNeeded(group) && !groupAggregateChanged(group, result) {
+			continue
+		}
 		b.observations = append(b.observations, result)
 		b.persisted = append(b.persisted, result)
 	}
@@ -429,6 +431,21 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 func groupAggregateNeeded(group model.Group) bool {
 	return group.LastAggregateAt == nil ||
 		(group.SourceUpdatedAt != nil && group.LastAggregateAt.Before(*group.SourceUpdatedAt))
+}
+
+func groupAggregateChanged(group model.Group, result model.ProbeResult) bool {
+	if group.LastAggregateStatus != result.Status || group.LastAggregateMessage != result.Message {
+		return true
+	}
+	return !sameOptionalInt(group.LastAggregateLatencyMs, result.LatencyMs) ||
+		!sameOptionalInt(group.LastAggregateFirstByteMs, result.FirstByteMs)
+}
+
+func sameOptionalInt(left, right *int) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (b *cycleBatch) groupMemberResults(group model.Group, accounts map[int64]model.Account) []model.ProbeResult {
@@ -558,13 +575,4 @@ func targetNames(snapshot model.Snapshot) map[string]string {
 		names[model.TargetKey(model.KindGroup, group.ID)] = group.Name
 	}
 	return names
-}
-
-func containsPersistableObservation(results []model.ProbeResult) bool {
-	for _, result := range results {
-		if result.Source == "probe" || result.Source == "history" || result.Source == "request_error" {
-			return true
-		}
-	}
-	return false
 }

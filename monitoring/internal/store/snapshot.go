@@ -134,10 +134,12 @@ SELECT g.id, g.name, g.platform, g.status, g.updated_at,
            JOIN channels c ON c.id = cg.channel_id
            WHERE cg.group_id = g.id
              AND LOWER(TRIM(c.status)) = 'active'
-       ), latest_aggregate.checked_at
+       ), latest_aggregate.checked_at, latest_aggregate.status,
+       latest_aggregate.latency_ms, latest_aggregate.first_byte_ms,
+       latest_aggregate.message
 FROM groups g
 LEFT JOIN LATERAL (
-    SELECT mc.checked_at
+    SELECT mc.checked_at, mc.status, mc.latency_ms, mc.first_byte_ms, mc.message
     FROM monitoring_checks mc
     WHERE mc.target_key = 'group:' || g.id::text
       AND mc.kind = 'group' AND mc.source = 'aggregate'
@@ -210,12 +212,15 @@ func (s *Store) loadAccountSnapshot(ctx context.Context, accounts map[int64]*mod
 }
 
 type groupSnapshotRow struct {
-	groupID          sql.NullInt64
-	name, platform   sql.NullString
-	status           sql.NullString
-	updatedAt        sql.NullTime
-	lastAggregateAt  sql.NullTime
-	hasActiveChannel bool
+	groupID                                          sql.NullInt64
+	name, platform                                   sql.NullString
+	status                                           sql.NullString
+	updatedAt                                        sql.NullTime
+	lastAggregateAt                                  sql.NullTime
+	lastAggregateStatus                              sql.NullString
+	lastAggregateLatencyMs, lastAggregateFirstByteMs sql.NullInt64
+	lastAggregateMessage                             sql.NullString
+	hasActiveChannel                                 bool
 }
 
 func (s *Store) loadGroups(ctx context.Context, groups map[int64]*model.Group) error {
@@ -228,7 +233,9 @@ func (s *Store) loadGroups(ctx context.Context, groups map[int64]*model.Group) e
 		var row groupSnapshotRow
 		if err := rows.Scan(
 			&row.groupID, &row.name, &row.platform, &row.status, &row.updatedAt,
-			&row.hasActiveChannel, &row.lastAggregateAt,
+			&row.hasActiveChannel, &row.lastAggregateAt, &row.lastAggregateStatus,
+			&row.lastAggregateLatencyMs, &row.lastAggregateFirstByteMs,
+			&row.lastAggregateMessage,
 		); err != nil {
 			return fmt.Errorf("scan group snapshot: %w", err)
 		}
@@ -265,6 +272,20 @@ func mergeGroupSnapshotRow(row groupSnapshotRow, groups map[int64]*model.Group) 
 	} else {
 		group.LastAggregateAt = nil
 	}
+	group.LastAggregateStatus = strings.TrimSpace(row.lastAggregateStatus.String)
+	if row.lastAggregateLatencyMs.Valid {
+		value := int(row.lastAggregateLatencyMs.Int64)
+		group.LastAggregateLatencyMs = &value
+	} else {
+		group.LastAggregateLatencyMs = nil
+	}
+	if row.lastAggregateFirstByteMs.Valid {
+		value := int(row.lastAggregateFirstByteMs.Int64)
+		group.LastAggregateFirstByteMs = &value
+	} else {
+		group.LastAggregateFirstByteMs = nil
+	}
+	group.LastAggregateMessage = strings.TrimSpace(row.lastAggregateMessage.String)
 }
 
 func (r *snapshotRow) scan(rows *sql.Rows) error {

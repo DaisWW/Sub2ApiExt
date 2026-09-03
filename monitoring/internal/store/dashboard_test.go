@@ -479,7 +479,7 @@ func TestDashboardTimelineKeepsHistoryAcrossSourceChanges(t *testing.T) {
 	}
 	recent := dashboardQuery[recentStart:bucketsStart]
 	if !strings.Contains(recent, "'source_change'") {
-		t.Fatal("timeline must include a source-change carry boundary")
+		t.Fatal("timeline must retain a source-change carry marker")
 	}
 }
 
@@ -526,7 +526,7 @@ func TestCarryForwardStatusSamplesLeavesUnknownWithoutPriorState(t *testing.T) {
 	}
 }
 
-func TestCarryForwardStatusSamplesStopsAtSourceChange(t *testing.T) {
+func TestCarryForwardStatusSamplesContinuesAcrossSourceChange(t *testing.T) {
 	start := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	samples := []model.StatusSample{
 		{Status: model.StatusOperational, CheckedAt: start, Source: "aggregate"},
@@ -534,9 +534,13 @@ func TestCarryForwardStatusSamplesStopsAtSourceChange(t *testing.T) {
 		{Status: model.StatusUnknown, CheckedAt: start.Add(2 * time.Hour)},
 	}
 	carryForwardStatusSamples(samples)
-	if samples[1].Status != model.StatusUnknown || samples[1].CarriedFrom != nil ||
-		samples[2].Status != model.StatusUnknown || samples[2].CarriedFrom != nil {
-		t.Fatalf("source change did not stop the historical carry: %+v", samples)
+	for index := 1; index < len(samples); index++ {
+		if samples[index].Status != model.StatusOperational || samples[index].Source != "aggregate" {
+			t.Fatalf("sample %d did not retain the last valid state across source change: %+v", index, samples)
+		}
+		if samples[index].CarriedFrom == nil || !samples[index].CarriedFrom.Equal(start) {
+			t.Fatalf("sample %d has wrong carried origin: %+v", index, samples)
+		}
 	}
 }
 
@@ -575,7 +579,7 @@ func TestCarryForwardTargetStatusUsesEvidenceInsideWindow(t *testing.T) {
 	}
 }
 
-func TestCarryForwardTargetStatusStopsAtLaterSourceChange(t *testing.T) {
+func TestCarryForwardTargetStatusContinuesAcrossLaterSourceChange(t *testing.T) {
 	windowStart := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	checkedAt := windowStart.Add(-time.Minute)
 	samples := []model.StatusSample{
@@ -584,12 +588,12 @@ func TestCarryForwardTargetStatusStopsAtLaterSourceChange(t *testing.T) {
 		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(3 * time.Hour)},
 	}
 	carryForwardTargetStatus(samples, model.StatusOperational, "history", checkedAt)
-	if samples[0].Status != model.StatusOperational || samples[0].CarriedFrom == nil {
-		t.Fatalf("bucket before source change should use the baseline: %+v", samples[0])
-	}
-	for _, index := range []int{1, 2} {
-		if samples[index].Status != model.StatusUnknown || samples[index].CarriedFrom != nil {
-			t.Fatalf("bucket %d crossed the source-change boundary: %+v", index, samples[index])
+	for index := range samples {
+		if samples[index].Status != model.StatusOperational || samples[index].Source != "history" {
+			t.Fatalf("bucket %d did not use the baseline across source change: %+v", index, samples)
+		}
+		if samples[index].CarriedFrom == nil || !samples[index].CarriedFrom.Equal(checkedAt) {
+			t.Fatalf("bucket %d has wrong carried origin: %+v", index, samples)
 		}
 	}
 }

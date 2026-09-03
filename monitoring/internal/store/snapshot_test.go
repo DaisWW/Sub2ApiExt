@@ -408,6 +408,29 @@ func TestMergeGroupSnapshotRowAddsEmptyGroup(t *testing.T) {
 	}
 }
 
+func TestMergeGroupSnapshotRowKeepsLatestAggregateState(t *testing.T) {
+	checkedAt := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	latency := int64(1200)
+	firstByte := int64(300)
+	groups := make(map[int64]*model.Group)
+	mergeGroupSnapshotRow(groupSnapshotRow{
+		groupID:                  sql.NullInt64{Int64: 12, Valid: true},
+		lastAggregateAt:          sql.NullTime{Time: checkedAt, Valid: true},
+		lastAggregateStatus:      sql.NullString{String: model.StatusDegraded, Valid: true},
+		lastAggregateLatencyMs:   sql.NullInt64{Int64: latency, Valid: true},
+		lastAggregateFirstByteMs: sql.NullInt64{Int64: firstByte, Valid: true},
+		lastAggregateMessage:     sql.NullString{String: "仍有可用账户", Valid: true},
+	}, groups)
+
+	group := groups[12]
+	if group == nil || group.LastAggregateAt == nil || !group.LastAggregateAt.Equal(checkedAt) ||
+		group.LastAggregateStatus != model.StatusDegraded || group.LastAggregateLatencyMs == nil ||
+		*group.LastAggregateLatencyMs != int(latency) || group.LastAggregateFirstByteMs == nil ||
+		*group.LastAggregateFirstByteMs != int(firstByte) || group.LastAggregateMessage != "仍有可用账户" {
+		t.Fatalf("latest aggregate state was not merged: %+v", group)
+	}
+}
+
 func TestAlertStateFailureStreakIgnoresStateBeforeAccountUpdate(t *testing.T) {
 	accountUpdatedAt := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
 	staleState := sql.NullTime{Time: accountUpdatedAt.Add(-time.Minute), Valid: true}

@@ -520,12 +520,57 @@ func TestAggregateGroupsSkipsCachedOnlyCycle(t *testing.T) {
 		Accounts: []model.Account{{ID: 1, Status: "active", Schedulable: true}},
 		Groups: []model.Group{{
 			ID: 12, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1},
-			LastAggregateAt: &lastAggregate,
+			LastAggregateAt: &lastAggregate, LastAggregateStatus: model.StatusOperational,
+			LastAggregateMessage: "全部账户正常",
 		}},
 	}
 	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
 	if len(batch.observations) != 0 || len(batch.persisted) != 0 {
 		t.Fatalf("纯缓存轮次不应生成分组观测：%+v", batch)
+	}
+}
+
+func TestAggregateGroupsRefreshesChangedCachedState(t *testing.T) {
+	now := time.Now().UTC()
+	lastAggregate := now.Add(-time.Minute)
+	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
+		1: {TargetKey: "account:1", Kind: model.KindAccount, EntityID: 1, Status: model.StatusFailed, Source: "cache", CheckedAt: now.Add(-2 * time.Minute)},
+	}}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{{ID: 1, Status: "active", Schedulable: true}},
+		Groups: []model.Group{{
+			ID: 18, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1},
+			LastAggregateAt: &lastAggregate, LastAggregateStatus: model.StatusOperational,
+		}},
+	}
+
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusFailed {
+		t.Fatalf("缓存账户状态变化后未刷新分组聚合：%+v", batch.persisted)
+	}
+}
+
+func TestAggregateGroupsUsesCachedHealthyFallbackWhenAggregateWasFailed(t *testing.T) {
+	now := time.Now().UTC()
+	lastAggregate := now.Add(-time.Minute)
+	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
+		1: {TargetKey: "account:1", Kind: model.KindAccount, EntityID: 1, Status: model.StatusFailed, Source: "cache", CheckedAt: now.Add(-2 * time.Minute)},
+		2: {TargetKey: "account:2", Kind: model.KindAccount, EntityID: 2, Status: model.StatusOperational, Source: "cache", CheckedAt: now.Add(-2 * time.Minute)},
+	}}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{
+			{ID: 1, Status: "active", Schedulable: true},
+			{ID: 2, Status: "active", Schedulable: true},
+		},
+		Groups: []model.Group{{
+			ID: 19, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1, 2},
+			LastAggregateAt: &lastAggregate, LastAggregateStatus: model.StatusFailed,
+		}},
+	}
+
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusOperational {
+		t.Fatalf("缓存健康账户未让分组恢复可用：%+v", batch.persisted)
 	}
 }
 
@@ -554,6 +599,10 @@ func TestNewSuccessfulHistoryCreatesGroupAggregateOnce(t *testing.T) {
 
 	account.LastObservedActivityAt = &activity
 	group.LastAggregateAt = &now
+	group.LastAggregateStatus = first.persisted[1].Status
+	group.LastAggregateLatencyMs = first.persisted[1].LatencyMs
+	group.LastAggregateFirstByteMs = first.persisted[1].FirstByteMs
+	group.LastAggregateMessage = first.persisted[1].Message
 	second, queued := newCycleBatch(model.Snapshot{Accounts: []model.Account{account}}, now.Add(time.Minute), time.Minute)
 	second.aggregateGroups(model.Snapshot{Accounts: []model.Account{account}, Groups: []model.Group{group}}, map[int64]model.Account{account.ID: account}, now.Add(time.Minute))
 	if len(queued) != 0 || len(second.persisted) != 0 || len(second.observations) != 0 {

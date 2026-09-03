@@ -88,9 +88,13 @@ type Group struct {
 	// SourceFingerprint and SourceUpdatedAt are monitoring-owned source
 	// identity and evidence watermark. UpdatedAt remains the upstream raw
 	// timestamp for compatibility and diagnostics.
-	SourceFingerprint string     `json:"-"`
-	SourceUpdatedAt   *time.Time `json:"-"`
-	LastAggregateAt   *time.Time `json:"-"`
+	SourceFingerprint        string     `json:"-"`
+	SourceUpdatedAt          *time.Time `json:"-"`
+	LastAggregateAt          *time.Time `json:"-"`
+	LastAggregateStatus      string     `json:"-"`
+	LastAggregateLatencyMs   *int       `json:"-"`
+	LastAggregateFirstByteMs *int       `json:"-"`
+	LastAggregateMessage     string     `json:"-"`
 }
 
 type Snapshot struct {

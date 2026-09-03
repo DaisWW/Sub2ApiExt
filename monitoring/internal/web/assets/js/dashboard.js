@@ -404,8 +404,8 @@ function renderStatusHistory(samples, item) {
     const sampleStatus = normalizeStatus(sample?.status);
     const successful = sampleStatus === 'operational' || sampleStatus === 'degraded';
     const failed = sampleStatus === 'failed' || sampleStatus === 'error';
-    const displaySampleStatus = sample?.source === 'source_change'
-      ? 'unknown'
+    const displaySampleStatus = sample?.source === 'source_change' && sampleStatus === 'unknown'
+      ? displayHealthStatus(item, normalizeStatus(item?.status), sample?.latency_ms, sample?.checked_at)
       : displayHealthStatus(item, sampleStatus, sample?.latency_ms, sample?.checked_at);
     const carried = Boolean(sample?.carried_from) && (failed || successful);
     const label = carried
