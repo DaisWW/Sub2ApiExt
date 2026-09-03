@@ -222,6 +222,12 @@ export class DashboardPanel {
     const note = targetNote
       ? `<div class="target-note">${escapeHTML(targetNote)}</div>`
       : '';
+    const evidenceAgeLabel = item.stale && item.latest_source
+      ? `沿用最近${staleLabel(item, status)}`
+      : '';
+    const statusTitle = evidenceAgeLabel
+      ? `当前状态：${evidenceAgeLabel}`
+      : '当前状态：最新证据';
     return `
       <article class="target-card target-${displayStatus}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
         role="button" tabindex="0" aria-label="查看 ${escapeHTML(item.name)} 的历史记录">
@@ -229,12 +235,12 @@ export class DashboardPanel {
           <div class="target-copy">
             <div class="target-kind">${item.kind === 'group' ? 'GROUP' : 'ACCOUNT'}</div>
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
-            <div class="target-platform">${escapeHTML(item.platform || 'mixed')}</div>
+            <div class="target-platform">${escapeHTML(item.platform || 'mixed')}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
             ${note}
           </div>
           <div class="target-head-meta">
             ${currentRate ? `<span class="current-rate" title="${currentRateTitle}">${currentRateLabel} ${currentRate}</span>` : ''}
-            <span class="status-badge ${statusClass(displayStatus)}" title="当前状态：最新证据">${targetStatusLabel(displayStatus)}</span>
+            <span class="status-badge ${statusClass(displayStatus)}" title="${escapeHTML(statusTitle)}">${targetStatusLabel(displayStatus)}</span>
           </div>
         </div>
         <div class="availability">
@@ -322,6 +328,9 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
       ? 'failed'
       : 'unknown';
   }
+  // Group status is already the account aggregate. Its latency is diagnostic;
+  // deriving the color again could turn an operational mixed group yellow.
+  if (item?.kind === 'group') return status === 'degraded' ? 'degraded' : 'operational';
   const latency = Number(sampleLatencyMs);
   if (Number.isFinite(latency) && latency > 0) {
     return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
@@ -330,19 +339,7 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
   // segment without its own latency must keep its recorded status instead of
   // repainting the whole timeline with the card's current median.
   if (!sampleCheckedAt && item?.kind !== 'group' && isSlowTarget(item, status)) return 'degraded';
-  // For an individual account, a raw degraded result already means the
-  // account is usable but slow. A group keeps degraded only when its latest
-  // successful request carries a measured slow latency.
-  if (status === 'degraded' && item?.kind !== 'group') return 'degraded';
-  if (status === 'degraded' && item?.kind === 'group') {
-    const latestLatency = Number(item?.latest_latency_ms);
-    return Number.isFinite(latestLatency) && latestLatency >= slowLatencyThresholdMs
-      ? 'degraded'
-      : 'operational';
-  }
-  // Group aggregation can report a routing risk as `degraded` even when the
-  // observed response is fast. Keep the public group color tied to measured
-  // latency; a usable, fast route remains green.
+  if (status === 'degraded') return 'degraded';
   return 'operational';
 }
 
@@ -392,27 +389,27 @@ function availabilityToneForStatus(status) {
 function renderStatusHistory(samples, item) {
   const recent = Array.isArray(samples) ? samples.slice(-24) : [];
   const hasUnknownSamples = recent.some((sample) => normalizeStatus(sample?.status) === 'unknown');
-  const currentStatus = normalizeStatus(item?.status);
-  const currentDisplayStatus = displayHealthStatus(item, currentStatus);
   const gatewayError = String(item?.source_status || '').trim().toLowerCase() === 'error';
   const recoveryPending = hasRecoveryTrigger(item);
-  const emptyTone = recoveryPending ? 'bad' : statusTone(currentDisplayStatus);
-  const emptyLabel = recoveryPending
-    ? '错误/不可用 · 等待恢复探测'
-    : `${healthLabel(currentDisplayStatus)} · ${sourceLabel(item?.latest_source)}`;
+  const emptyTone = 'neutral';
+  const emptyLabel = '待确认 · 无历史桶数据';
   const empty = Array.from({ length: Math.max(0, 24 - recent.length) }, () => `<i class="${emptyTone}" role="img" aria-label="${escapeHTML(emptyLabel)}" title="${escapeHTML(emptyLabel)}"></i>`);
   const items = recent.map((sample) => {
     const sampleStatus = normalizeStatus(sample?.status);
     const successful = sampleStatus === 'operational' || sampleStatus === 'degraded';
     const failed = sampleStatus === 'failed' || sampleStatus === 'error';
-    const displaySampleStatus = displayHealthStatus(
-      item, sampleStatus, sample?.latency_ms, sample?.checked_at
-    );
-    const label = failed || successful
+    const displaySampleStatus = sample?.source === 'source_change'
+      ? 'unknown'
+      : displayHealthStatus(item, sampleStatus, sample?.latency_ms, sample?.checked_at);
+    const carried = Boolean(sample?.carried_from) && (failed || successful);
+    const label = carried
+      ? `截至 ${formatTime(sample?.checked_at)} · 无新请求，沿用 ${formatTime(sample?.carried_from)} 的${healthLabel(displaySampleStatus)}状态 · ${sourceLabel(sample?.source)}`
+      : failed || successful
       ? `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus)} · ${sourceLabel(sample?.source)}`
       : `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus)}`;
     const tone = statusTone(displaySampleStatus);
-    return `<i class="${tone}" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
+    const classes = [tone, carried ? 'carried' : ''].filter(Boolean).join(' ');
+    return `<i class="${classes}" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
   });
   const caption = statusHistoryCaption(recent, item, gatewayError, recoveryPending);
   return `<div class="status-history-block">
@@ -445,12 +442,13 @@ function statusHistoryCaption(samples, item, gatewayError, recoveryPending) {
       samples.some((sample) => ['failed', 'error'].includes(normalizeStatus(sample?.status)))) {
     return '探测失败 · 等待新的渠道证据';
   }
+  if (samples.some((sample) => sample?.carried_from)) return '空档沿用最近有效状态';
   if (item?.latest_source === 'history') return '真实请求证据';
   if (item?.latest_source === 'request_error') return '真实请求错误证据';
   if (item?.latest_source === 'probe') return '主动探测证据';
-  if (item?.latest_source === 'aggregate') return '后台巡检证据';
+  if (item?.latest_source === 'aggregate') return '账户聚合证据';
   if (displayHealthStatus(item, normalizeStatus(item?.status)) === 'unknown') {
-    return '待确认 · 等待真实请求证据';
+    return item?.kind === 'group' ? '待确认 · 等待账户健康证据' : '待确认 · 等待真实请求证据';
   }
   return '当前状态';
 }
@@ -470,18 +468,26 @@ function renderMetric(label, value, help = '', tone = '') {
 
 function sourceLabel(source) {
   if (source === 'history') return '真实请求';
-  if (source === 'aggregate') return '后台巡检';
+  if (source === 'aggregate') return '账户聚合';
   if (source === 'probe') return '主动探测';
   if (source === 'request_error') return '真实请求错误';
   if (source === 'cache') return '缓存证据';
   return '当前状态';
 }
 
+function staleLabel(item, status) {
+  if ((status === 'failed' || status === 'error') && item?.latest_source === 'request_error') return '请求错误状态';
+  if (status === 'degraded') return '延迟状态';
+  if (status === 'failed' || status === 'error') return '错误状态';
+  if (item?.latest_source === 'probe') return '探测状态';
+  if (item?.latest_source === 'history') return '请求状态';
+  return '有效状态';
+}
+
 function displayEvidenceMessage(item, value) {
   const message = String(value || '').trim();
   if (item?.kind !== 'group') return message;
-  // Candidate counts are internal routing diagnostics. Group cards only
-  // expose the latest real request evidence and its measured latency.
+  if (item?.latest_source === 'aggregate') return message;
   if (item?.latest_source === 'history') {
     const latency = Number(item?.latest_latency_ms);
     return Number.isFinite(latency) && latency > 0
@@ -524,7 +530,7 @@ function evidenceNote(item, status) {
 
 function evidenceFooter(item, status) {
   if (!item.latest_source) {
-    if (item.kind === 'group') return '等待真实请求证据';
+    if (item.kind === 'group') return '等待账户健康证据';
     return String(item.source_status || '').trim().toLowerCase() === 'error'
       ? (hasRecoveryTrigger(item) ? '等待恢复探测' : '等待新的渠道错误')
       : '错误后才主动探测';
@@ -536,7 +542,9 @@ function evidenceFooter(item, status) {
   if ((status === 'failed' || status === 'error') && item.latest_source === 'probe' && !hasRecoveryTrigger(item)) {
     return `历史探测失败 · 当前不重试 · ${formatTime(item.last_checked_at)}`;
   }
-  const label = status === 'operational' && item.latest_source === 'probe' ? '恢复证据' : '最新证据';
+  const label = item.stale
+    ? '沿用证据'
+    : status === 'operational' && item.latest_source === 'probe' ? '恢复证据' : '最新证据';
   return `${label} · ${sourceLabel(item.latest_source)} · ${formatTime(item.last_checked_at)}`;
 }
 

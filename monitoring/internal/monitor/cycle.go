@@ -23,13 +23,16 @@ const (
 	recoveryProbeInterval     = 15 * time.Minute
 	idleRecoveryProbeInterval = 2 * time.Hour
 	idleActivityWindow        = 6 * time.Hour
+	degradedLatencyMs         = 20_000
 )
 
 type accountEvidence struct {
-	status    string
-	source    string
-	checkedAt *time.Time
-	valid     bool
+	status      string
+	source      string
+	checkedAt   *time.Time
+	latencyMs   *int
+	firstByteMs *int
+	valid       bool
 }
 
 func (s *Service) runCycle(ctx context.Context) error {
@@ -81,12 +84,12 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 		}
 		recoveryEligible := probeEligible(account)
 		evidence := latestAccountEvidence(account)
-		if evidence.valid && successfulEvidence(evidence.status) && !successfulEvidenceNeedsRecovery(account, evidence) {
+		if evidence.valid && successfulEvidence(evidence.status) {
 			// A successful real request or probe is sufficient until the next
 			// real channel error. Routine freshness checks would spend upstream
 			// quota while the account is idle.
-			if evidence.source == "history" && shouldObserveHistoryRecovery(account, evidence, now, interval) {
-				batch.addPassiveAccount(account)
+			if evidence.source == "history" && shouldObserveHistory(account, evidence) {
+				batch.addPassiveAccount(account, evidence)
 			} else {
 				batch.addCachedEvidence(account.ID, evidence)
 			}
@@ -98,7 +101,11 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 			// Preserve a known failure for group aggregation, but never retry it
 			// unless the gateway has reported a channel error (or the account is
 			// already in its error state).
-			batch.addCachedEvidence(account.ID, evidence)
+			if evidence.source == "request_error" && shouldObserveChannelError(account) {
+				batch.addChannelError(account)
+			} else {
+				batch.addCachedEvidence(account.ID, evidence)
+			}
 		}
 		if !recoveryEligible || !probe.SupportsAccount(account) {
 			continue
@@ -110,7 +117,7 @@ func newCycleBatch(snapshot model.Snapshot, now time.Time, interval time.Duratio
 		// retry/idle backoff below.
 		immediateRecovery := recoveryProbeImmediate(account, evidence, now)
 		lastAttempt := account.LastProbeAt
-		if evidence.valid && evidence.checkedAt != nil {
+		if evidence.valid && evidence.checkedAt != nil && evidence.source != "request_error" {
 			lastAttempt = evidence.checkedAt
 		} else if !probeEvidenceStatus(account.LastProbeStatus) {
 			// A timestamp without a usable result is not a recovery attempt we
@@ -168,13 +175,6 @@ func accountIdle(account model.Account, now time.Time) bool {
 	return account.LastActivityAt == nil || now.Sub(*account.LastActivityAt) >= idleActivityWindow
 }
 
-func successfulEvidenceNeedsRecovery(account model.Account, evidence accountEvidence) bool {
-	if !probeEligible(account) {
-		return false
-	}
-	return evidence.checkedAt == nil || account.LastChannelErrorAt.After(*evidence.checkedAt)
-}
-
 func recoveryProbeImmediate(account model.Account, evidence accountEvidence, now time.Time) bool {
 	if !probeEligible(account) {
 		return false
@@ -203,8 +203,7 @@ func recoveryProbeImmediate(account model.Account, evidence accountEvidence, now
 		// same incident ran within the minimum cooldown.
 		return probeDue(account.LastProbeAt, now, recoveryProbeInterval)
 	}
-	if !evidence.valid || !successfulEvidence(evidence.status) ||
-		!successfulEvidenceNeedsRecovery(account, evidence) {
+	if !evidence.valid || !successfulEvidence(evidence.status) {
 		return false
 	}
 	if account.LastProbeAt == nil || !probeEvidenceStatus(account.LastProbeStatus) {
@@ -265,8 +264,14 @@ func latestAccountEvidence(account model.Account) accountEvidence {
 	var evidence accountEvidence
 	sourceUpdatedAt := accountEvidenceSourceUpdatedAt(account)
 	if evidenceTimeValid(account.LastActivityAt, sourceUpdatedAt) {
+		status := model.StatusOperational
+		if account.LastActivityLatencyMs != nil && *account.LastActivityLatencyMs >= degradedLatencyMs {
+			status = model.StatusDegraded
+		}
 		evidence = accountEvidence{
-			status: model.StatusOperational, source: "history", checkedAt: account.LastActivityAt, valid: true,
+			status: status, source: "history", checkedAt: account.LastActivityAt,
+			latencyMs: account.LastActivityLatencyMs, firstByteMs: account.LastActivityFirstByteMs,
+			valid: true,
 		}
 	}
 	if evidenceTimeValid(account.LastProbeAt, sourceUpdatedAt) &&
@@ -274,7 +279,15 @@ func latestAccountEvidence(account model.Account) accountEvidence {
 		(evidence.checkedAt == nil || account.LastProbeAt.After(*evidence.checkedAt)) {
 		evidence = accountEvidence{
 			status: account.LastProbeStatus, source: "probe", checkedAt: account.LastProbeAt,
+			latencyMs: account.LastProbeLatencyMs, firstByteMs: account.LastProbeFirstByteMs,
 			valid: probeEvidenceStatus(account.LastProbeStatus),
+		}
+	}
+	if evidenceTimeValid(account.LastChannelErrorAt, sourceUpdatedAt) &&
+		(evidence.checkedAt == nil || !account.LastChannelErrorAt.Before(*evidence.checkedAt)) {
+		evidence = accountEvidence{
+			status: model.StatusFailed, source: "request_error",
+			checkedAt: account.LastChannelErrorAt, valid: true,
 		}
 	}
 	return evidence
@@ -308,42 +321,63 @@ func probeEvidenceStatus(status string) bool {
 	return successfulEvidence(status) || status == model.StatusFailed || status == model.StatusError
 }
 
-func shouldObserveHistoryRecovery(account model.Account, evidence accountEvidence, now time.Time, interval time.Duration) bool {
+func shouldObserveHistory(account model.Account, evidence accountEvidence) bool {
 	if evidence.source != "history" || evidence.checkedAt == nil {
 		return false
 	}
-	if account.LastProbeAt == nil || !evidence.checkedAt.After(*account.LastProbeAt) ||
-		(account.LastProbeStatus != model.StatusFailed && account.LastProbeStatus != model.StatusError) {
-		return false
-	}
-	// ProbeFailureStreak is reset by EvaluateAlert after this recovery evidence
-	// is consumed. It prevents the same unchanged usage row from generating a
-	// recovery observation on every scan cycle.
-	if account.ProbeFailureStreak > 0 {
-		return true
-	}
-	// A just-arrived request can be observed before the alert-state write from
-	// the preceding probe is visible in the next snapshot.
-	return now.Sub(*evidence.checkedAt) < interval
+	return account.LastObservedActivityAt == nil ||
+		evidence.checkedAt.After(*account.LastObservedActivityAt)
+}
+
+func shouldObserveChannelError(account model.Account) bool {
+	return account.LastChannelErrorAt != nil &&
+		(account.LastObservedChannelErrorAt == nil ||
+			account.LastChannelErrorAt.After(*account.LastObservedChannelErrorAt))
 }
 
 func probeDue(lastProbeAt *time.Time, now time.Time, interval time.Duration) bool {
 	return lastProbeAt == nil || !lastProbeAt.Add(interval).After(now)
 }
 
-func (b *cycleBatch) addPassiveAccount(account model.Account) {
+func (b *cycleBatch) addPassiveAccount(account model.Account, evidence accountEvidence) {
+	if evidence.checkedAt == nil {
+		return
+	}
 	result := model.ProbeResult{
-		TargetKey: model.TargetKey(model.KindAccount, account.ID),
-		Kind:      model.KindAccount,
-		EntityID:  account.ID,
-		Status:    model.StatusOperational,
-		CheckedAt: *account.LastActivityAt,
-		Message:   "近期存在真实请求",
-		Source:    "history",
+		TargetKey:   model.TargetKey(model.KindAccount, account.ID),
+		Kind:        model.KindAccount,
+		EntityID:    account.ID,
+		Status:      evidence.status,
+		LatencyMs:   evidence.latencyMs,
+		FirstByteMs: evidence.firstByteMs,
+		CheckedAt:   *evidence.checkedAt,
+		Message:     "近期存在真实请求",
+		Source:      "history",
 	}
 	b.accountResults[account.ID] = result
 	b.observations = append(b.observations, result)
+	b.persisted = append(b.persisted, result)
 	b.passiveAccounts++
+}
+
+func (b *cycleBatch) addChannelError(account model.Account) {
+	if account.LastChannelErrorAt == nil {
+		return
+	}
+	result := model.ProbeResult{
+		TargetKey:  model.TargetKey(model.KindAccount, account.ID),
+		Kind:       model.KindAccount,
+		EntityID:   account.ID,
+		Status:     model.StatusFailed,
+		StatusCode: account.LastChannelErrorStatusCode,
+		ErrorClass: account.LastChannelErrorClass,
+		Message:    "真实请求报错，等待恢复探测",
+		CheckedAt:  *account.LastChannelErrorAt,
+		Source:     "request_error",
+	}
+	b.accountResults[account.ID] = result
+	b.observations = append(b.observations, result)
+	b.persisted = append(b.persisted, result)
 }
 
 func (b *cycleBatch) addCachedEvidence(accountID int64, evidence accountEvidence) {
@@ -351,12 +385,14 @@ func (b *cycleBatch) addCachedEvidence(accountID int64, evidence accountEvidence
 		return
 	}
 	b.accountResults[accountID] = model.ProbeResult{
-		TargetKey: model.TargetKey(model.KindAccount, accountID),
-		Kind:      model.KindAccount,
-		EntityID:  accountID,
-		Status:    evidence.status,
-		CheckedAt: *evidence.checkedAt,
-		Source:    "cache",
+		TargetKey:   model.TargetKey(model.KindAccount, accountID),
+		Kind:        model.KindAccount,
+		EntityID:    accountID,
+		Status:      evidence.status,
+		LatencyMs:   evidence.latencyMs,
+		FirstByteMs: evidence.firstByteMs,
+		CheckedAt:   *evidence.checkedAt,
+		Source:      "cache",
 	}
 }
 
@@ -374,7 +410,8 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 			continue
 		}
 		memberResults := b.groupMemberResults(group, accounts)
-		if len(memberResults) == 0 || !containsFreshObservation(memberResults) {
+		if len(memberResults) == 0 ||
+			(!containsFreshObservation(memberResults) && !groupAggregateNeeded(group)) {
 			continue
 		}
 		// Keep disabled/error accounts out of the aggregation input as well as
@@ -385,10 +422,13 @@ func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64
 			model.TargetKey(model.KindGroup, group.ID), aggregationGroup, memberResults, now,
 		)
 		b.observations = append(b.observations, result)
-		if containsPersistableObservation(memberResults) {
-			b.persisted = append(b.persisted, result)
-		}
+		b.persisted = append(b.persisted, result)
 	}
+}
+
+func groupAggregateNeeded(group model.Group) bool {
+	return group.LastAggregateAt == nil ||
+		(group.SourceUpdatedAt != nil && group.LastAggregateAt.Before(*group.SourceUpdatedAt))
 }
 
 func (b *cycleBatch) groupMemberResults(group model.Group, accounts map[int64]model.Account) []model.ProbeResult {
@@ -460,9 +500,8 @@ func (s *Service) evaluateAlerts(ctx context.Context, results []model.ProbeResul
 	}
 	for _, result := range results {
 		if !shouldEvaluateAlert(result) {
-			// Group member aggregation is retained for routing diagnostics, but it
-			// is not a user-facing outage signal. Group status comes from the
-			// latest final request and its measured latency in the dashboard.
+			// Group aggregation drives the dashboard, but account alerts already
+			// identify the actionable failure and must not be duplicated per group.
 			continue
 		}
 		if err := s.store.EvaluateAlert(ctx, result, names[result.TargetKey], policy); err != nil {
@@ -523,7 +562,7 @@ func targetNames(snapshot model.Snapshot) map[string]string {
 
 func containsPersistableObservation(results []model.ProbeResult) bool {
 	for _, result := range results {
-		if result.Source == "probe" || result.Source == "history" {
+		if result.Source == "probe" || result.Source == "history" || result.Source == "request_error" {
 			return true
 		}
 	}

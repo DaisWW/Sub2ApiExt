@@ -52,11 +52,14 @@ func TestNewCycleBatchUsesSuccessfulHistoryWithoutProbing(t *testing.T) {
 	if len(accounts) != 0 {
 		t.Fatalf("已有成功历史时仍排入了 %d 个主动探测", len(accounts))
 	}
-	if batch.verifiedAccounts != 1 || batch.passiveAccounts != 0 {
+	if batch.verifiedAccounts != 1 || batch.passiveAccounts != 1 {
 		t.Fatalf("成功历史验证统计异常：%+v", batch)
 	}
-	if cached := batch.accountResults[1]; cached.Source != "cache" || cached.Status != model.StatusOperational {
-		t.Fatalf("未保留成功历史证据：%+v", cached)
+	if observed := batch.accountResults[1]; observed.Source != "history" || observed.Status != model.StatusOperational {
+		t.Fatalf("未保留成功历史证据：%+v", observed)
+	}
+	if len(batch.persisted) != 1 || batch.persisted[0].Source != "history" {
+		t.Fatalf("新成功历史必须推进持久水位：%+v", batch.persisted)
 	}
 }
 
@@ -441,7 +444,7 @@ func TestLatestAccountEvidenceKeepsRealRequestOverInvalidProbe(t *testing.T) {
 	probeAt := now.Add(-5 * time.Minute)
 	account := model.Account{
 		ID: 18, Platform: "openai", Type: "api_key", Status: "active", Schedulable: true,
-		UpdatedAt: &updated, LastActivityAt: &activity,
+		UpdatedAt: &updated, LastActivityAt: &activity, LastObservedActivityAt: &activity,
 		LastProbeAt: &probeAt, LastProbeStatus: model.StatusDisabled,
 	}
 	evidence := latestAccountEvidence(account)
@@ -451,6 +454,19 @@ func TestLatestAccountEvidenceKeepsRealRequestOverInvalidProbe(t *testing.T) {
 	batch, queued := newCycleBatch(model.Snapshot{Accounts: []model.Account{account}}, now, time.Minute)
 	if len(queued) != 0 || batch.accountResults[account.ID].Source != "cache" {
 		t.Fatalf("real request was not reused after invalid probe: queued=%v result=%+v", accountIDsForTest(queued), batch.accountResults[account.ID])
+	}
+}
+
+func TestLatestAccountEvidenceLetsChannelErrorWinTimestampTie(t *testing.T) {
+	at := time.Now().UTC()
+	account := model.Account{
+		ID: 20, Status: "active", Schedulable: true,
+		LastActivityAt: &at, LastProbeAt: &at, LastProbeStatus: model.StatusOperational,
+		LastChannelErrorAt: &at,
+	}
+	evidence := latestAccountEvidence(account)
+	if !evidence.valid || evidence.source != "request_error" || evidence.status != model.StatusFailed {
+		t.Fatalf("同一时间戳的渠道错误必须优先：%+v", evidence)
 	}
 }
 
@@ -487,7 +503,7 @@ func TestNewCycleBatchConsumesHistoryRecoveryOnce(t *testing.T) {
 	if len(queued) != 0 || len(first.observations) != 1 {
 		t.Fatalf("首次真实请求恢复未生成观测：queued=%v observations=%d", accountIDsForTest(queued), len(first.observations))
 	}
-	account.ProbeFailureStreak = 0
+	account.LastObservedActivityAt = &activity
 	second, queued := newCycleBatch(model.Snapshot{Accounts: []model.Account{account}}, now, time.Minute)
 	if len(queued) != 0 || len(second.observations) != 0 {
 		t.Fatalf("同一条历史恢复被重复消费：queued=%v observations=%d", accountIDsForTest(queued), len(second.observations))
@@ -496,16 +512,115 @@ func TestNewCycleBatchConsumesHistoryRecoveryOnce(t *testing.T) {
 
 func TestAggregateGroupsSkipsCachedOnlyCycle(t *testing.T) {
 	now := time.Now().UTC()
+	lastAggregate := now.Add(-time.Minute)
 	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
 		1: {TargetKey: "account:1", Kind: model.KindAccount, EntityID: 1, Status: model.StatusOperational, Source: "cache", CheckedAt: now},
 	}}
 	snapshot := model.Snapshot{
 		Accounts: []model.Account{{ID: 1, Status: "active", Schedulable: true}},
-		Groups:   []model.Group{{ID: 12, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1}}},
+		Groups: []model.Group{{
+			ID: 12, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1},
+			LastAggregateAt: &lastAggregate,
+		}},
 	}
 	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
 	if len(batch.observations) != 0 || len(batch.persisted) != 0 {
 		t.Fatalf("纯缓存轮次不应生成分组观测：%+v", batch)
+	}
+}
+
+func TestNewSuccessfulHistoryCreatesGroupAggregateOnce(t *testing.T) {
+	now := time.Now().UTC()
+	activity := now.Add(-time.Minute)
+	updated := now.Add(-time.Hour)
+	lastAggregate := now.Add(-2 * time.Hour)
+	account := model.Account{
+		ID: 21, Platform: "openai", Type: "api_key", Status: "active", Schedulable: true,
+		UpdatedAt: &updated, LastActivityAt: &activity,
+	}
+	group := model.Group{
+		ID: 31, Status: "active", ProbeEnabled: true, AccountIDs: []int64{account.ID},
+		LastAggregateAt: &lastAggregate,
+	}
+
+	first, queued := newCycleBatch(model.Snapshot{Accounts: []model.Account{account}}, now, time.Minute)
+	if len(queued) != 0 || len(first.persisted) != 1 || first.persisted[0].Source != "history" {
+		t.Fatalf("首次成功证据未被消费一次：queued=%v persisted=%+v", accountIDsForTest(queued), first.persisted)
+	}
+	first.aggregateGroups(model.Snapshot{Accounts: []model.Account{account}, Groups: []model.Group{group}}, map[int64]model.Account{account.ID: account}, now)
+	if len(first.persisted) != 2 || first.persisted[1].Source != "aggregate" || first.persisted[1].Status != model.StatusOperational {
+		t.Fatalf("首次成功证据未生成可用分组聚合：%+v", first.persisted)
+	}
+
+	account.LastObservedActivityAt = &activity
+	group.LastAggregateAt = &now
+	second, queued := newCycleBatch(model.Snapshot{Accounts: []model.Account{account}}, now.Add(time.Minute), time.Minute)
+	second.aggregateGroups(model.Snapshot{Accounts: []model.Account{account}, Groups: []model.Group{group}}, map[int64]model.Account{account.ID: account}, now.Add(time.Minute))
+	if len(queued) != 0 || len(second.persisted) != 0 || len(second.observations) != 0 {
+		t.Fatalf("同一成功证据被重复写入：queued=%v batch=%+v", accountIDsForTest(queued), second)
+	}
+}
+
+func TestNewChannelErrorAggregatesWhenProbeUnsupported(t *testing.T) {
+	now := time.Now().UTC()
+	errorAt := now.Add(-time.Minute)
+	lastAggregate := now.Add(-time.Hour)
+	account := model.Account{
+		ID: 22, Platform: "gemini", Type: "service_account", Status: "active", Schedulable: true,
+		LastChannelErrorAt: &errorAt, LastChannelErrorClass: "upstream_5xx",
+	}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{account},
+		Groups: []model.Group{{
+			ID: 32, Status: "active", ProbeEnabled: true, AccountIDs: []int64{account.ID},
+			LastAggregateAt: &lastAggregate,
+		}},
+	}
+
+	batch, queued := newCycleBatch(snapshot, now, time.Minute)
+	if len(queued) != 0 || len(batch.persisted) != 1 || batch.persisted[0].Source != "request_error" {
+		t.Fatalf("不支持探测时渠道错误仍应立即成为账户证据：queued=%v persisted=%+v", accountIDsForTest(queued), batch.persisted)
+	}
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.persisted) != 2 || batch.persisted[1].Source != "aggregate" || batch.persisted[1].Status != model.StatusFailed {
+		t.Fatalf("渠道错误未生成失败分组聚合：%+v", batch.persisted)
+	}
+}
+
+func TestAggregateGroupsBootstrapsFromCachedEvidence(t *testing.T) {
+	now := time.Now().UTC()
+	account := model.Account{ID: 23, Status: "active", Schedulable: true}
+	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
+		account.ID: {TargetKey: "account:23", Kind: model.KindAccount, EntityID: account.ID, Status: model.StatusOperational, Source: "cache", CheckedAt: now.Add(-time.Hour)},
+	}}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{account},
+		Groups:   []model.Group{{ID: 33, Status: "active", ProbeEnabled: true, AccountIDs: []int64{account.ID}}},
+	}
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusOperational {
+		t.Fatalf("新分组未使用缓存账户证据建立基线：%+v", batch.persisted)
+	}
+}
+
+func TestAggregateGroupsRebuildsAfterSourceChange(t *testing.T) {
+	now := time.Now().UTC()
+	lastAggregate := now.Add(-2 * time.Hour)
+	sourceUpdated := now.Add(-time.Hour)
+	account := model.Account{ID: 24, Status: "active", Schedulable: true}
+	batch := &cycleBatch{accountResults: map[int64]model.ProbeResult{
+		account.ID: {TargetKey: "account:24", Kind: model.KindAccount, EntityID: account.ID, Status: model.StatusOperational, Source: "cache", CheckedAt: now.Add(-3 * time.Hour)},
+	}}
+	snapshot := model.Snapshot{
+		Accounts: []model.Account{account},
+		Groups: []model.Group{{
+			ID: 34, Status: "active", ProbeEnabled: true, AccountIDs: []int64{account.ID},
+			LastAggregateAt: &lastAggregate, SourceUpdatedAt: &sourceUpdated,
+		}},
+	}
+	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
+	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusOperational {
+		t.Fatalf("成员来源变化后未重建分组聚合：%+v", batch.persisted)
 	}
 }
 
@@ -564,8 +679,8 @@ func TestAggregateGroupsIncludesCachedFailureWithFreshProbe(t *testing.T) {
 		Groups: []model.Group{{ID: 13, Status: "active", ProbeEnabled: true, AccountIDs: []int64{1, 2}}},
 	}
 	batch.aggregateGroups(snapshot, indexAccounts(snapshot.Accounts), now)
-	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusDegraded {
-		t.Fatalf("分组未保留退避成员的失败状态：%+v", batch.persisted)
+	if len(batch.persisted) != 1 || batch.persisted[0].Status != model.StatusOperational {
+		t.Fatalf("只要仍有一个可用账户，分组应保持可用：%+v", batch.persisted)
 	}
 }
 

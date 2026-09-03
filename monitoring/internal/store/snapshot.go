@@ -17,7 +17,8 @@ import (
 
 const snapshotQuery = `
 WITH recent_account_usage AS MATERIALIZED (
-    SELECT DISTINCT ON (ul.account_id) ul.account_id, ul.created_at, ul.model
+    SELECT DISTINCT ON (ul.account_id) ul.account_id, ul.created_at, ul.model,
+           ul.duration_ms, ul.first_token_ms
     FROM usage_logs ul
     JOIN (
         SELECT account_id, MAX(created_at) AS created_at
@@ -36,7 +37,7 @@ WITH recent_account_usage AS MATERIALIZED (
     GROUP BY ul.group_id, ul.account_id
 ), latest_account_probe AS MATERIALIZED (
     SELECT DISTINCT ON (mc.target_key) mc.target_key, mc.checked_at, mc.status,
-           mc.error_class, mc.status_code
+           mc.latency_ms, mc.first_byte_ms, mc.error_class, mc.status_code
     FROM monitoring_checks mc
     WHERE mc.source = 'probe' AND mc.target_key LIKE 'account:%'
     ORDER BY mc.target_key, mc.checked_at DESC, mc.id DESC
@@ -50,8 +51,11 @@ SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.
        a.updated_at,
        persisted_target.source_fingerprint, persisted_target.source_updated_at,
        a.proxy_id, p.protocol, p.host, p.port, p.username, p.password, p.status,
-       recent.created_at, recent.model,
-       last_probe.checked_at, last_probe.status, last_probe.error_class, last_probe.status_code,
+       recent.created_at, recent.model, recent.duration_ms, recent.first_token_ms,
+       last_probe.checked_at, last_probe.status, last_probe.latency_ms,
+       last_probe.first_byte_ms, last_probe.error_class, last_probe.status_code,
+       persisted_target.last_observed_activity_at,
+       persisted_target.last_observed_channel_error_at,
        channel_error.created_at, channel_error.error_class, channel_error.status_code,
        COALESCE(alert_state.failure_streak, 0), alert_state.updated_at,
        ag.priority, COALESCE(member_usage.request_count, 0),
@@ -130,34 +134,44 @@ SELECT g.id, g.name, g.platform, g.status, g.updated_at,
            JOIN channels c ON c.id = cg.channel_id
            WHERE cg.group_id = g.id
              AND LOWER(TRIM(c.status)) = 'active'
-       )
+       ), latest_aggregate.checked_at
 FROM groups g
+LEFT JOIN LATERAL (
+    SELECT mc.checked_at
+    FROM monitoring_checks mc
+    WHERE mc.target_key = 'group:' || g.id::text
+      AND mc.kind = 'group' AND mc.source = 'aggregate'
+    ORDER BY mc.checked_at DESC, mc.id DESC
+    LIMIT 1
+) latest_aggregate ON TRUE
 WHERE g.deleted_at IS NULL`
 
 type snapshotRow struct {
-	id, groupID, proxyID                  sql.NullInt64
-	name, platform, accountType, status   sql.NullString
-	accountPriority                       sql.NullInt64
-	proxyProtocol, proxyHost, proxyUser   sql.NullString
-	proxyPassword, proxyStatus            sql.NullString
-	proxyPort                             sql.NullInt64
-	updatedAt, lastActivity, lastProbe    sql.NullTime
-	persistedSourceFingerprint            sql.NullString
-	persistedSourceUpdatedAt              sql.NullTime
-	lastProbeStatus, lastProbeErrorClass  sql.NullString
-	lastProbeStatusCode                   sql.NullInt64
-	lastChannelError                      sql.NullTime
-	lastChannelErrorClass                 sql.NullString
-	lastChannelErrorCode                  sql.NullInt64
-	probeFailureStreak                    sql.NullInt64
-	alertStateUpdatedAt                   sql.NullTime
-	recentModel                           sql.NullString
-	groupPriority, groupRequestCount      sql.NullInt64
-	schedulable                           bool
-	groupHasActiveChannel                 bool
-	credentials                           []byte
-	groupName, groupPlatform, groupStatus sql.NullString
-	groupUpdatedAt                        sql.NullTime
+	id, groupID, proxyID                                      sql.NullInt64
+	name, platform, accountType, status                       sql.NullString
+	accountPriority                                           sql.NullInt64
+	proxyProtocol, proxyHost, proxyUser                       sql.NullString
+	proxyPassword, proxyStatus                                sql.NullString
+	proxyPort                                                 sql.NullInt64
+	updatedAt, lastActivity, lastProbe                        sql.NullTime
+	lastObservedActivity, lastObservedError                   sql.NullTime
+	persistedSourceFingerprint                                sql.NullString
+	persistedSourceUpdatedAt                                  sql.NullTime
+	lastProbeStatus, lastProbeErrorClass                      sql.NullString
+	lastActivityLatency, lastActivityFirstByte                sql.NullInt64
+	lastProbeLatency, lastProbeFirstByte, lastProbeStatusCode sql.NullInt64
+	lastChannelError                                          sql.NullTime
+	lastChannelErrorClass                                     sql.NullString
+	lastChannelErrorCode                                      sql.NullInt64
+	probeFailureStreak                                        sql.NullInt64
+	alertStateUpdatedAt                                       sql.NullTime
+	recentModel                                               sql.NullString
+	groupPriority, groupRequestCount                          sql.NullInt64
+	schedulable                                               bool
+	groupHasActiveChannel                                     bool
+	credentials                                               []byte
+	groupName, groupPlatform, groupStatus                     sql.NullString
+	groupUpdatedAt                                            sql.NullTime
 }
 
 // LoadSnapshot 只读取网关账户、分组和最近成功请求，不修改业务表或监控表。
@@ -200,6 +214,7 @@ type groupSnapshotRow struct {
 	name, platform   sql.NullString
 	status           sql.NullString
 	updatedAt        sql.NullTime
+	lastAggregateAt  sql.NullTime
 	hasActiveChannel bool
 }
 
@@ -211,7 +226,10 @@ func (s *Store) loadGroups(ctx context.Context, groups map[int64]*model.Group) e
 	defer rows.Close()
 	for rows.Next() {
 		var row groupSnapshotRow
-		if err := rows.Scan(&row.groupID, &row.name, &row.platform, &row.status, &row.updatedAt, &row.hasActiveChannel); err != nil {
+		if err := rows.Scan(
+			&row.groupID, &row.name, &row.platform, &row.status, &row.updatedAt,
+			&row.hasActiveChannel, &row.lastAggregateAt,
+		); err != nil {
 			return fmt.Errorf("scan group snapshot: %w", err)
 		}
 		mergeGroupSnapshotRow(row, groups)
@@ -241,6 +259,12 @@ func mergeGroupSnapshotRow(row groupSnapshotRow, groups map[int64]*model.Group) 
 	} else {
 		group.UpdatedAt = nil
 	}
+	if row.lastAggregateAt.Valid {
+		value := row.lastAggregateAt.Time.UTC()
+		group.LastAggregateAt = &value
+	} else {
+		group.LastAggregateAt = nil
+	}
 }
 
 func (r *snapshotRow) scan(rows *sql.Rows) error {
@@ -249,8 +273,11 @@ func (r *snapshotRow) scan(rows *sql.Rows) error {
 		&r.updatedAt,
 		&r.persistedSourceFingerprint, &r.persistedSourceUpdatedAt,
 		&r.proxyID, &r.proxyProtocol, &r.proxyHost, &r.proxyPort, &r.proxyUser, &r.proxyPassword,
-		&r.proxyStatus, &r.lastActivity, &r.recentModel, &r.lastProbe,
-		&r.lastProbeStatus, &r.lastProbeErrorClass, &r.lastProbeStatusCode,
+		&r.proxyStatus, &r.lastActivity, &r.recentModel,
+		&r.lastActivityLatency, &r.lastActivityFirstByte,
+		&r.lastProbe, &r.lastProbeStatus, &r.lastProbeLatency, &r.lastProbeFirstByte,
+		&r.lastProbeErrorClass, &r.lastProbeStatusCode,
+		&r.lastObservedActivity, &r.lastObservedError,
 		&r.lastChannelError, &r.lastChannelErrorClass, &r.lastChannelErrorCode,
 		&r.probeFailureStreak,
 		&r.alertStateUpdatedAt,
@@ -297,6 +324,14 @@ func (r snapshotRow) account() (*model.Account, error) {
 		value := r.lastActivity.Time.UTC()
 		account.LastActivityAt = &value
 	}
+	if r.lastActivityLatency.Valid {
+		value := int(r.lastActivityLatency.Int64)
+		account.LastActivityLatencyMs = &value
+	}
+	if r.lastActivityFirstByte.Valid {
+		value := int(r.lastActivityFirstByte.Int64)
+		account.LastActivityFirstByteMs = &value
+	}
 	if effectiveUpdatedAt.Valid {
 		value := effectiveUpdatedAt.Time.UTC()
 		account.UpdatedAt = &value
@@ -306,10 +341,26 @@ func (r snapshotRow) account() (*model.Account, error) {
 		account.LastProbeAt = &value
 	}
 	account.LastProbeStatus = strings.TrimSpace(r.lastProbeStatus.String)
+	if r.lastProbeLatency.Valid {
+		value := int(r.lastProbeLatency.Int64)
+		account.LastProbeLatencyMs = &value
+	}
+	if r.lastProbeFirstByte.Valid {
+		value := int(r.lastProbeFirstByte.Int64)
+		account.LastProbeFirstByteMs = &value
+	}
 	account.LastProbeErrorClass = strings.TrimSpace(r.lastProbeErrorClass.String)
 	if r.lastProbeStatusCode.Valid {
 		value := int(r.lastProbeStatusCode.Int64)
 		account.LastProbeStatusCode = &value
+	}
+	if r.lastObservedActivity.Valid {
+		value := r.lastObservedActivity.Time.UTC()
+		account.LastObservedActivityAt = &value
+	}
+	if r.lastObservedError.Valid {
+		value := r.lastObservedError.Time.UTC()
+		account.LastObservedChannelErrorAt = &value
 	}
 	if r.lastChannelError.Valid {
 		value := r.lastChannelError.Time.UTC()
@@ -381,10 +432,12 @@ func nullableTime(value *time.Time) sql.NullTime {
 }
 
 func channelErrorResolved(errorAt time.Time, activityAt, probeAt *time.Time, probeStatus string) bool {
-	if activityAt != nil && !activityAt.Before(errorAt) {
+	// A gateway success must be strictly later. Usage and error rows can share
+	// timestamp precision; treating equality as recovery can hide the error.
+	if activityAt != nil && activityAt.After(errorAt) {
 		return true
 	}
-	return probeAt != nil && !probeAt.Before(errorAt) &&
+	return probeAt != nil && probeAt.After(errorAt) &&
 		(probeStatus == model.StatusOperational || probeStatus == model.StatusDegraded)
 }
 

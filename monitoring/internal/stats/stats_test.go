@@ -31,7 +31,9 @@ func TestStatusFromResults(t *testing.T) {
 	}{
 		{"empty", nil, model.StatusUnknown},
 		{"all ok", []model.ProbeResult{{Status: model.StatusOperational}, {Status: model.StatusDegraded}}, model.StatusOperational},
-		{"mixed", []model.ProbeResult{{Status: model.StatusOperational}, {Status: model.StatusFailed}}, model.StatusDegraded},
+		{"mixed", []model.ProbeResult{{Status: model.StatusOperational}, {Status: model.StatusFailed}}, model.StatusOperational},
+		{"slow fallback", []model.ProbeResult{{Status: model.StatusDegraded}, {Status: model.StatusFailed}}, model.StatusDegraded},
+		{"failed and unknown", []model.ProbeResult{{Status: model.StatusFailed}, {Status: model.StatusUnknown}}, model.StatusUnknown},
 		{"none", []model.ProbeResult{{Status: model.StatusError}}, model.StatusFailed},
 	}
 	for _, tc := range cases {
@@ -51,7 +53,7 @@ func TestAggregateGroup(t *testing.T) {
 		{Status: model.StatusFailed, LatencyMs: intPtr(90)},
 	}
 	got := AggregateGroup("group:3", group, results, now)
-	if got.Status != model.StatusDegraded || got.LatencyMs == nil || *got.LatencyMs != 10 || got.CheckedAt != now {
+	if got.Status != model.StatusOperational || got.LatencyMs == nil || *got.LatencyMs != 10 || got.CheckedAt != now {
 		t.Fatalf("unexpected group result: %+v", got)
 	}
 }
@@ -64,8 +66,8 @@ func TestAggregateGroupUsesHealthyLatencyForMixedRoute(t *testing.T) {
 		{Status: model.StatusFailed, LatencyMs: intPtr(30000)},
 	}
 	got := AggregateGroup("group:3", group, results, now)
-	if got.Status != model.StatusDegraded {
-		t.Fatalf("mixed group status = %q, want degraded risk", got.Status)
+	if got.Status != model.StatusOperational {
+		t.Fatalf("mixed group status = %q, want operational while one account is usable", got.Status)
 	}
 	if got.LatencyMs == nil || *got.LatencyMs != 1200 {
 		t.Fatalf("mixed group latency = %+v, want healthy path latency", got.LatencyMs)
@@ -88,7 +90,7 @@ func TestAggregateFailedGroupKeepsMeasuredLatency(t *testing.T) {
 	}
 }
 
-func TestAggregateGroupTreatsLowerPriorityFailureAsFallbackRisk(t *testing.T) {
+func TestAggregateGroupUsesAnyOperationalAccount(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	group := model.Group{
 		ID: 4,
@@ -109,7 +111,7 @@ func TestAggregateGroupTreatsLowerPriorityFailureAsFallbackRisk(t *testing.T) {
 	}
 }
 
-func TestAggregateGroupMarksFailedPrimaryWithHealthyFallbackDegraded(t *testing.T) {
+func TestAggregateGroupMarksHealthyFallbackOperational(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	group := model.Group{
 		ID: 5,
@@ -122,12 +124,12 @@ func TestAggregateGroupMarksFailedPrimaryWithHealthyFallbackDegraded(t *testing.
 		{EntityID: 1, Status: model.StatusFailed},
 		{EntityID: 2, Status: model.StatusOperational},
 	}, now)
-	if got.Status != model.StatusDegraded {
-		t.Fatalf("failed primary with fallback should be degraded: %+v", got)
+	if got.Status != model.StatusOperational {
+		t.Fatalf("failed primary with healthy fallback should be operational: %+v", got)
 	}
 }
 
-func TestAggregateGroupUsesRecentTrafficWithinEqualPriorityTier(t *testing.T) {
+func TestAggregateGroupIgnoresPriorityForHealthStatus(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	group := model.Group{
 		ID: 6,
@@ -145,7 +147,7 @@ func TestAggregateGroupUsesRecentTrafficWithinEqualPriorityTier(t *testing.T) {
 	}
 }
 
-func TestAggregateGroupRequiresKnownHealthyCandidate(t *testing.T) {
+func TestAggregateGroupUsesHealthyFallbackWithUnknownPeer(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	group := model.Group{
 		ID: 7,
@@ -158,8 +160,8 @@ func TestAggregateGroupRequiresKnownHealthyCandidate(t *testing.T) {
 		{EntityID: 1, Status: model.StatusUnknown},
 		{EntityID: 2, Status: model.StatusOperational},
 	}, now)
-	if got.Status != model.StatusDegraded {
-		t.Fatalf("unknown primary with a fallback should be degraded: %+v", got)
+	if got.Status != model.StatusOperational {
+		t.Fatalf("unknown primary with a healthy fallback should be operational: %+v", got)
 	}
 }
 
@@ -175,6 +177,18 @@ func TestAggregateGroupAllKnownFailuresIsFailed(t *testing.T) {
 	}, now)
 	if got.Status != model.StatusFailed {
 		t.Fatalf("all known candidates failed should be failed: %+v", got)
+	}
+}
+
+func TestAggregateGroupUsesDegradedWhenOnlySlowAccountWorks(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{ID: 9, AccountIDs: []int64{1, 2}}
+	got := AggregateGroup("group:9", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusDegraded, LatencyMs: intPtr(25_000)},
+		{EntityID: 2, Status: model.StatusFailed},
+	}, now)
+	if got.Status != model.StatusDegraded || got.LatencyMs == nil || *got.LatencyMs != 25_000 {
+		t.Fatalf("only slow usable account should make group degraded: %+v", got)
 	}
 }
 

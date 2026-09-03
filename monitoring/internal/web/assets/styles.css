@@ -264,6 +264,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .status-history i.warn { background: var(--amber); }
 .status-history i.bad { background: var(--red); }
 .status-history i.neutral { background: #536174; }
+.status-history i.carried { opacity: .55; }
 .status-history i[title] { cursor: help; }
 .status-history-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 9px; line-height: 1; }
 .status-history-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }

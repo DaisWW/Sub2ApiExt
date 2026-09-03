@@ -47,8 +47,8 @@ func accountSourceFingerprint(account model.Account) string {
 }
 
 // groupSourceFingerprint captures routing inputs for a group. RequestCount is
-// intentionally excluded because it changes with every request and is itself
-// evidence used for aggregation, not a source/configuration change.
+// intentionally excluded because it changes with every request and is
+// bookkeeping rather than a source/configuration change.
 func groupSourceFingerprint(group model.Group, accounts map[int64]*model.Account) string {
 	type memberFingerprint struct {
 		AccountID          int64  `json:"account_id"`

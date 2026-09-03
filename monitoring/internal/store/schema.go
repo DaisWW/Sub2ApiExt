@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS monitoring_targets (
 	last_channel_error_class TEXT NOT NULL DEFAULT '',
 	last_channel_error_status_code INTEGER,
 	last_channel_error_resolved_at TIMESTAMPTZ,
+	last_observed_activity_at TIMESTAMPTZ,
+	last_observed_channel_error_at TIMESTAMPTZ,
 	source_fingerprint TEXT NOT NULL DEFAULT '',
 	source_updated_at TIMESTAMPTZ,
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -32,6 +34,10 @@ ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS last_channel_error_status_code INTEGER;
 ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS last_channel_error_resolved_at TIMESTAMPTZ;
+ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS last_observed_activity_at TIMESTAMPTZ;
+ALTER TABLE monitoring_targets
+    ADD COLUMN IF NOT EXISTS last_observed_channel_error_at TIMESTAMPTZ;
 ALTER TABLE monitoring_targets
     ADD COLUMN IF NOT EXISTS source_fingerprint TEXT NOT NULL DEFAULT '';
 ALTER TABLE monitoring_targets

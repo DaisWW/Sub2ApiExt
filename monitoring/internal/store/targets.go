@@ -313,9 +313,13 @@ func accountChannelErrorResolvedAt(account model.Account) *time.Time {
 		}
 	}
 
-	add(account.LastActivityAt)
+	if account.LastActivityAt != nil &&
+		(account.LastChannelErrorAt == nil || account.LastActivityAt.After(*account.LastChannelErrorAt)) {
+		add(account.LastActivityAt)
+	}
 	if account.LastProbeAt != nil &&
-		(account.LastProbeStatus == model.StatusOperational || account.LastProbeStatus == model.StatusDegraded) {
+		(account.LastProbeStatus == model.StatusOperational || account.LastProbeStatus == model.StatusDegraded) &&
+		(account.LastChannelErrorAt == nil || account.LastProbeAt.After(*account.LastChannelErrorAt)) {
 		add(account.LastProbeAt)
 	}
 	if source := accountSourceUpdatedAt(account); source != nil && sourceUpdateResolvesChannelError(account) {
@@ -326,11 +330,14 @@ func accountChannelErrorResolvedAt(account model.Account) *time.Time {
 
 func sourceUpdateResolvesChannelError(account model.Account) bool {
 	source := accountSourceUpdatedAt(account)
-	if source == nil || account.LastChannelErrorAt == nil ||
-		!source.After(*account.LastChannelErrorAt) {
+	if source == nil {
+		return false
+	}
+	if account.LastChannelErrorAt == nil {
 		return true
 	}
-	return source.Sub(*account.LastChannelErrorAt) > model.SourceUpdateActivityGrace
+	return source.After(*account.LastChannelErrorAt) &&
+		source.Sub(*account.LastChannelErrorAt) > model.SourceUpdateActivityGrace
 }
 
 func groupLastActivity(group model.Group, accounts map[int64]*model.Account) *time.Time {

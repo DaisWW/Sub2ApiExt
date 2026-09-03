@@ -25,28 +25,36 @@ const (
 // Account 是监控所需的最小账户快照。凭据不会由 HTTP 层返回，
 // 也不会被监控服务持久化。
 type Account struct {
-	ID                  int64
-	Name                string
-	Platform            string
-	Type                string
-	Priority            int
-	Status              string
-	Schedulable         bool
-	Credentials         map[string]any
-	GroupIDs            []int64
-	LastActivityAt      *time.Time
-	UpdatedAt           *time.Time
-	LastProbeAt         *time.Time
-	LastProbeStatus     string
-	LastProbeErrorClass string
-	LastProbeStatusCode *int
-	ProbeFailureStreak  int
+	ID                      int64
+	Name                    string
+	Platform                string
+	Type                    string
+	Priority                int
+	Status                  string
+	Schedulable             bool
+	Credentials             map[string]any
+	GroupIDs                []int64
+	LastActivityAt          *time.Time
+	LastActivityLatencyMs   *int
+	LastActivityFirstByteMs *int
+	UpdatedAt               *time.Time
+	LastProbeAt             *time.Time
+	LastProbeStatus         string
+	LastProbeLatencyMs      *int
+	LastProbeFirstByteMs    *int
+	LastProbeErrorClass     string
+	LastProbeStatusCode     *int
+	ProbeFailureStreak      int
 	// LastChannelErrorAt is the latest real gateway error attributed to this
 	// account. It is a trigger for recovery probing, never a periodic probe
 	// signal by itself.
 	LastChannelErrorAt         *time.Time
 	LastChannelErrorClass      string
 	LastChannelErrorStatusCode *int
+	// LastObserved* are monitoring-owned consumption watermarks. They prevent
+	// the latest gateway event from generating the same aggregate every cycle.
+	LastObservedActivityAt     *time.Time `json:"-"`
+	LastObservedChannelErrorAt *time.Time `json:"-"`
 	RecentModel                string
 	ChatGPTAccount             string
 	ProxyURL                   string
@@ -58,9 +66,8 @@ type Account struct {
 	SourceUpdatedAt   *time.Time `json:"-"`
 }
 
-// GroupMember 是分组内一个可调度账户的路由元数据和近期真实流量。
-// 账户优先级是主要排序信号，GroupPriority（数字越小越优先）用于同级候选；
-// RequestCount 用于修正仅按成员等权聚合的偏差。
+// GroupMember 是分组内一个可调度账户的路由元数据和近期真实流量，
+// 供后台路由诊断使用；分组公开健康只看成员账户结果，不按这些字段加权。
 type GroupMember struct {
 	AccountID       int64
 	GroupPriority   int
@@ -83,6 +90,7 @@ type Group struct {
 	// timestamp for compatibility and diagnostics.
 	SourceFingerprint string     `json:"-"`
 	SourceUpdatedAt   *time.Time `json:"-"`
+	LastAggregateAt   *time.Time `json:"-"`
 }
 
 type Snapshot struct {

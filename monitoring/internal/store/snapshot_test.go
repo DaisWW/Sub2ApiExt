@@ -264,6 +264,24 @@ func TestSnapshotRowDropsChannelErrorAfterSuccessfulRequest(t *testing.T) {
 	}
 }
 
+func TestChannelErrorIsNotResolvedByEvidenceAtSameTimestamp(t *testing.T) {
+	at := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		activityAt *time.Time
+		probeAt    *time.Time
+	}{
+		{name: "request", activityAt: &at},
+		{name: "probe", probeAt: &at},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if channelErrorResolved(at, test.activityAt, test.probeAt, model.StatusOperational) {
+				t.Fatal("evidence sharing an error timestamp must not hide the error")
+			}
+		})
+	}
+}
+
 func TestSnapshotRowUsesRecentRequestAsEffectiveUpdate(t *testing.T) {
 	activity := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	updated := activity.Add(10 * time.Second)

@@ -176,3 +176,17 @@ func TestAccountChannelErrorResolvedAtAcceptsLaterSourceChange(t *testing.T) {
 		t.Fatalf("later source change watermark = %v, want %s", got, updated)
 	}
 }
+
+func TestAccountChannelErrorResolvedAtRejectsTimestampTie(t *testing.T) {
+	at := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	account := model.Account{
+		LastActivityAt:     &at,
+		LastProbeAt:        &at,
+		LastProbeStatus:    model.StatusOperational,
+		LastChannelErrorAt: &at,
+		UpdatedAt:          &at,
+	}
+	if got := accountChannelErrorResolvedAt(account); got != nil {
+		t.Fatalf("same-timestamp success must not resolve channel error: %s", got)
+	}
+}

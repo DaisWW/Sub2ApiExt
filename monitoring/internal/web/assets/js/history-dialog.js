@@ -39,21 +39,22 @@ export class HistoryDialog {
     try {
       const data = await api(`/api/v1/monitor/history?target=${encodeURIComponent(target)}&limit=240`);
       if (!this.#requests.isCurrent(requestId) || !this.#dialog.open) return;
-      this.#render(data.items || []);
+      this.#render(data.items || [], target);
     } catch (error) {
       if (!this.#requests.isCurrent(requestId) || !this.#dialog.open) return;
       $('#historyBody').innerHTML = `<tr><td colspan="4">${escapeHTML(error.message)}</td></tr>`;
     }
   }
 
-  #render(items) {
-    const visibleItems = items.filter((item) => !(item?.kind === 'group' && item?.source === 'aggregate'));
+  #render(items, target) {
+    const visibleItems = items;
+    const groupHistory = String(target || '').startsWith('group:');
     const successful = visibleItems.filter(isSuccessful).length;
     const availability = visibleItems.length ? successful * 100 / visibleItems.length : 0;
     $('#historySummary').innerHTML = `
-      <span>最近 24 小时 · 列表样本 ${visibleItems.length}</span>
-      <span>列表样本可用率 ${formatPct(availability)}</span>
-      <span>真实请求为首字，主动探测为首字节近似值；健康颜色只表示可用、延迟高或错误/不可用</span>`;
+      <span>最近 24 小时 · ${groupHistory ? '账户聚合记录' : '账户健康记录'} ${visibleItems.length}</span>
+      <span>记录可用率 ${formatPct(availability)}</span>
+      <span>${groupHistory ? '分组状态与卡片使用同一份账户聚合数据' : '真实请求为首字，主动探测为首字节近似值'}</span>`;
     $('#historyBody').innerHTML = visibleItems.length
       ? visibleItems.map(renderHistoryRow).join('')
       : '<tr><td colspan="4">最近 24 小时没有历史记录</td></tr>';
@@ -84,19 +85,18 @@ function displayHistoryStatus(item) {
   const normalized = normalizeStatus(item?.status);
   if (normalized === 'failed' || normalized === 'error' || normalized === 'disabled') return 'failed';
   if (normalized === 'unknown') return 'unknown';
+  if (item?.kind === 'group') return normalized === 'degraded' ? 'degraded' : 'operational';
   const latency = Number(item?.latency_ms);
   if (Number.isFinite(latency) && latency > 0) {
     return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
   }
-  // A group's degraded aggregate can mean a member risk rather than a slow
-  // response. Keep the channel green when the measured path is otherwise OK.
-  if (normalized === 'degraded' && item?.source !== 'aggregate') return 'degraded';
-  return 'operational';
+  if (normalized === 'degraded') return 'degraded';
+	return 'operational';
 }
 
 function sourceLabel(source) {
   if (source === 'history') return '真实请求';
-  if (source === 'aggregate') return '后台巡检';
+  if (source === 'aggregate') return '账户聚合';
   if (source === 'probe') return '主动探测';
   if (source === 'request_error') return '真实请求错误';
   if (source === 'cache') return '缓存证据';

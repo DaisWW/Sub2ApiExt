@@ -95,7 +95,7 @@ func TestApplyLatestTargetStateExplainsMissingGroupEvidence(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{Kind: model.KindGroup, ProbeEnabled: true}}
 	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
 		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
-	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无真实请求，等待下一次请求确认" {
+	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无账户健康证据，等待真实请求或恢复探测" {
 		t.Fatalf("missing group evidence = %+v", target.Target)
 	}
 }
@@ -179,29 +179,16 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"period_usage AS MATERIALIZED",
 		"eligible_usage AS MATERIALIZED",
 		"latest_account_usage AS MATERIALIZED",
-		"latest_group_usage AS MATERIALIZED",
-		"group_request_rows AS MATERIALIZED",
-		"group_request_ranked AS",
-		"group_error_candidates AS MATERIALIZED",
 		"account_error_events AS MATERIALIZED",
-		"ops_error_logs",
-		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0)) AS status_code",
-		"COALESCE(NULLIF(upstream_status_code, 0), NULLIF(status_code, 0), 0) <> 429",
-		"PARTITION BY group_id, request_key",
-		"latest_group_error AS MATERIALIZED",
-		"mc.source <> 'aggregate'",
+		"targets.kind = 'account' AND mc.source IN ('probe', 'request_error')",
+		"targets.kind = 'group' AND mc.source = 'aggregate'",
 		"recent_samples AS",
 		"FROM recent_samples",
 		"mc.source = 'aggregate'",
-		"group_error_wins",
-		"group_success_wins",
-		"group_aggregate_wins",
-		"targets.kind <> 'group' OR mc.source = 'aggregate'",
-		"latest_group_error.created_at >= latest_checks.checked_at",
-		"latest_group_usage.created_at >= latest_checks.checked_at",
-		"latest_checks.checked_at > latest_group_error.created_at",
-		"latest_checks.checked_at > latest_group_usage.created_at",
-		"COALESCE(group_success_latency_ms, 0) >= 20000",
+		"targets.kind = 'account' AND mc.source = 'probe'",
+		"baseline_checks AS MATERIALIZED",
+		"baseline_samples AS",
+		"'carried_from', recent_ranked.carried_from",
 		"COALESCE(account_success_latency_ms, 0) >= 20000",
 		"generate_series(0, 23)",
 		"PARTITION BY target_key, bucket_index",
@@ -234,7 +221,6 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"WHEN t.kind = 'account' THEN a.rate_multiplier::double precision",
 		"LEFT JOIN accounts a ON t.kind = 'account' AND a.id = t.entity_id AND a.deleted_at IS NULL",
 		"LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL",
-		"WHEN kind = 'group' THEN NULL",
 	} {
 		if !strings.Contains(dashboardQuery, fragment) {
 			t.Fatalf("dashboard query missing %q", fragment)
@@ -250,7 +236,7 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		t.Fatal("dashboard query must not accept a configurable health window")
 	}
 	if count := strings.Count(dashboardQuery, "FROM usage_logs ul"); count != 1 {
-		t.Fatalf("dashboard query scans usage_logs %d times, want one filtered source", count)
+		t.Fatalf("dashboard query must scan the fixed usage window once, got %d usage sources", count)
 	}
 	samplesStart := strings.Index(dashboardQuery, "), samples AS (")
 	statsStart := strings.Index(dashboardQuery, "), stats AS (")
@@ -259,17 +245,18 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	if samplesStart < 0 || statsStart <= samplesStart || recentSamplesStart <= statsStart || bucketsStart <= recentSamplesStart {
 		t.Fatalf("dashboard query must separate traffic samples from aggregate health samples: samples=%d stats=%d recent=%d buckets=%d", samplesStart, statsStart, recentSamplesStart, bucketsStart)
 	}
-	trafficSamples := dashboardQuery[samplesStart:statsStart]
-	if !strings.Contains(trafficSamples, "mc.source <> 'aggregate'") || strings.Contains(trafficSamples, "mc.source = 'aggregate'") {
-		t.Fatal("dashboard traffic statistics must exclude group aggregate observations")
+	groupSamples := dashboardQuery[samplesStart:statsStart]
+	if !strings.Contains(groupSamples, "targets.kind = 'account' AND mc.source IN ('probe', 'request_error')") ||
+		!strings.Contains(groupSamples, "targets.kind = 'group' AND mc.source = 'aggregate'") {
+		t.Fatal("dashboard statistics must use account checks for accounts and aggregate checks for groups")
 	}
 	statsQuery := dashboardQuery[statsStart:recentSamplesStart]
 	if !strings.Contains(statsQuery, "FROM samples") {
-		t.Fatal("dashboard traffic statistics must use only traffic samples")
+		t.Fatal("dashboard statistics must use the shared samples source")
 	}
 	recentSamples := dashboardQuery[recentSamplesStart:bucketsStart]
-	if !strings.Contains(recentSamples, "mc.kind = 'group'") || !strings.Contains(recentSamples, "mc.source = 'aggregate'") {
-		t.Fatal("dashboard health trajectory must include group aggregate observations")
+	if !strings.Contains(recentSamples, "FROM samples") {
+		t.Fatal("dashboard trajectory must use the same samples source as statistics")
 	}
 	if strings.Contains(dashboardQuery, "first_seen_at") {
 		t.Fatal("dashboard query must not depend on the removed idle timestamp")
@@ -284,13 +271,11 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		!strings.Contains(dashboardQuery, "WHERE t.active = TRUE\n  AND (") {
 		t.Fatal("dashboard target visibility filter is missing")
 	}
-	rowsStart := strings.Index(dashboardQuery, "group_request_rows AS MATERIALIZED")
-	rankedStart := strings.Index(dashboardQuery, "group_request_ranked AS")
-	errorsStart := strings.Index(dashboardQuery, "group_error_candidates AS MATERIALIZED")
-	if rowsStart < 0 || rankedStart <= rowsStart || errorsStart <= rankedStart {
-		t.Fatalf("dashboard query must rank all request rows before filtering failures: rows=%d ranked=%d errors=%d", rowsStart, rankedStart, errorsStart)
+	if strings.Contains(dashboardQuery, "group_request_rows AS MATERIALIZED") ||
+		strings.Contains(dashboardQuery, "FROM group_error_events") {
+		t.Fatal("dashboard group health must not use real group-request evidence")
 	}
-	selectStart := strings.Index(dashboardQuery, "SELECT t.target_key")
+	selectStart := strings.LastIndex(dashboardQuery, "SELECT t.target_key")
 	if selectStart < 0 {
 		t.Fatal("dashboard query select list is missing")
 	}
@@ -305,11 +290,11 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 
 func TestDashboardQueryUsesCurrentHourStatsAndHourlyTrajectory(t *testing.T) {
 	statsStart := strings.Index(dashboardQuery, "), stats AS (")
-	recentSamplesStart := strings.Index(dashboardQuery, "), recent_samples AS (")
-	if statsStart < 0 || recentSamplesStart <= statsStart {
-		t.Fatalf("dashboard query stats section is missing: stats=%d recent=%d", statsStart, recentSamplesStart)
+	baselineStart := strings.Index(dashboardQuery, "), baseline_checks AS MATERIALIZED (")
+	if statsStart < 0 || baselineStart <= statsStart {
+		t.Fatalf("dashboard query stats section is missing: stats=%d baseline=%d", statsStart, baselineStart)
 	}
-	statsQuery := dashboardQuery[statsStart:recentSamplesStart]
+	statsQuery := dashboardQuery[statsStart:baselineStart]
 	if !strings.Contains(statsQuery, "WHERE samples.checked_at >= bounds.end_at - bounds.bucket_seconds * INTERVAL '1 second'") {
 		t.Fatal("dashboard card statistics must use only the current one-hour window")
 	}
@@ -319,6 +304,37 @@ func TestDashboardQueryUsesCurrentHourStatsAndHourlyTrajectory(t *testing.T) {
 	if !strings.Contains(dashboardQuery, "generate_series(0, 23)") ||
 		!strings.Contains(dashboardQuery, "EXTRACT(EPOCH FROM INTERVAL '1 hour') AS bucket_seconds") {
 		t.Fatal("dashboard trajectory must remain 24 one-hour buckets")
+	}
+}
+
+func TestDashboardQueryKeepsHistoricalEvidenceOutsideDisplayWindow(t *testing.T) {
+	for _, fragment := range []string{
+		"JOIN usage_logs history_usage",
+		"history_usage.created_at < bounds.end_at",
+		"history_usage.created_at = targets.last_activity_at",
+		"history_usage.actual_cost > 0",
+		"usage.created_at >= targets.source_updated_at - INTERVAL '2 minutes'",
+		"mc.checked_at < bounds.start_at",
+		"baseline_ranked.checked_at AS carried_from",
+	} {
+		if !strings.Contains(dashboardQuery, fragment) {
+			t.Fatalf("dashboard query must retain historical evidence: missing %q", fragment)
+		}
+	}
+	latestAccountStart := strings.Index(dashboardQuery, "), latest_account_usage AS MATERIALIZED (")
+	accountErrorsStart := strings.Index(dashboardQuery, "), account_error_events AS MATERIALIZED (")
+	if latestAccountStart < 0 || accountErrorsStart <= latestAccountStart {
+		t.Fatalf("dashboard query historical usage sections are missing: account=%d errors=%d", latestAccountStart, accountErrorsStart)
+	}
+	latestUsage := dashboardQuery[latestAccountStart:accountErrorsStart]
+	if !strings.Contains(latestUsage, "history_usage.created_at = targets.last_activity_at") {
+		t.Fatal("latest account evidence must use the persisted activity timestamp for historical fallback")
+	}
+	if strings.Contains(latestUsage, "history_usage.created_at >= bounds.start_at") {
+		t.Fatal("latest account historical fallback must not use the 24-hour display start")
+	}
+	if strings.Contains(latestUsage, "history_usage.actual_cost >= 0") {
+		t.Fatal("historical account evidence must ignore zero-cost rows")
 	}
 }
 
@@ -343,16 +359,53 @@ func TestDashboardQueryCountsUnresolvedAccountChannelErrors(t *testing.T) {
 	}
 }
 
-func TestDashboardQuerySuppressesIntermediateGroupErrors(t *testing.T) {
-	for _, fragment := range []string{
-		"successful_group_request_keys AS MATERIALIZED",
-		"regexp_replace(usage.request_id, '^client:', '')",
-		"AND NOT EXISTS (",
-		"success.request_key IN (group_request_ranked.request_id, group_request_ranked.client_request_id)",
-	} {
-		if !strings.Contains(dashboardQuery, fragment) {
-			t.Fatalf("dashboard query must suppress errors followed by a final success: missing %q", fragment)
-		}
+func TestDashboardQueryUsesOneGroupHealthSource(t *testing.T) {
+	samplesStart := strings.Index(dashboardQuery, "), samples AS (")
+	statsStart := strings.Index(dashboardQuery, "), stats AS (")
+	recentStart := strings.Index(dashboardQuery, "), recent_samples AS (")
+	if samplesStart < 0 || statsStart <= samplesStart || recentStart <= statsStart {
+		t.Fatalf("dashboard query sample sections are missing: samples=%d stats=%d recent=%d", samplesStart, statsStart, recentStart)
+	}
+	samples := dashboardQuery[samplesStart:statsStart]
+	stats := dashboardQuery[statsStart:recentStart]
+	recent := dashboardQuery[recentStart:]
+	if !strings.Contains(samples, "targets.kind = 'group' AND mc.source = 'aggregate'") {
+		t.Fatal("group health samples must be aggregate monitoring checks")
+	}
+	if !strings.Contains(stats, "FROM samples") || !strings.Contains(recent, "FROM samples") {
+		t.Fatal("group statistics and trajectory must both consume samples")
+	}
+	if strings.Contains(samples, "FROM group_error_events") || strings.Contains(samples, "usage.group_id") {
+		t.Fatal("group health samples must not fall back to real group-request data")
+	}
+}
+
+func TestDashboardTimelineKeepsHistoryAcrossSourceChanges(t *testing.T) {
+	samplesStart := strings.Index(dashboardQuery, "), samples AS (")
+	statsStart := strings.Index(dashboardQuery, "), stats AS (")
+	baselineStart := strings.Index(dashboardQuery, "), baseline_checks AS MATERIALIZED (")
+	recentStart := strings.Index(dashboardQuery, "), recent_samples AS (")
+	bucketsStart := strings.Index(dashboardQuery, "), bucket_positions AS (")
+	if samplesStart < 0 || statsStart <= samplesStart || baselineStart <= statsStart ||
+		recentStart <= baselineStart || bucketsStart <= recentStart {
+		t.Fatal("dashboard timeline sections are missing")
+	}
+	samples := dashboardQuery[samplesStart:statsStart]
+	if strings.Contains(samples, "mc.checked_at >= targets.source_updated_at") ||
+		strings.Contains(samples, "usage.created_at >= targets.source_updated_at") {
+		t.Fatal("window history must survive a current source change")
+	}
+	stats := dashboardQuery[statsStart:baselineStart]
+	if !strings.Contains(stats, "samples.checked_at >= targets.source_updated_at - INTERVAL '2 minutes'") {
+		t.Fatal("current-hour statistics must still use the current source boundary")
+	}
+	baseline := dashboardQuery[baselineStart:recentStart]
+	if !strings.Contains(baseline, "targets.source_updated_at > bounds.start_at") {
+		t.Fatal("a source change inside the window must retain the pre-window baseline")
+	}
+	recent := dashboardQuery[recentStart:bucketsStart]
+	if !strings.Contains(recent, "'source_change'") {
+		t.Fatal("timeline must include a source-change carry boundary")
 	}
 }
 
@@ -399,6 +452,20 @@ func TestCarryForwardStatusSamplesLeavesUnknownWithoutPriorState(t *testing.T) {
 	}
 }
 
+func TestCarryForwardStatusSamplesStopsAtSourceChange(t *testing.T) {
+	start := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	samples := []model.StatusSample{
+		{Status: model.StatusOperational, CheckedAt: start, Source: "aggregate"},
+		{Status: model.StatusUnknown, CheckedAt: start.Add(time.Hour), Source: "source_change"},
+		{Status: model.StatusUnknown, CheckedAt: start.Add(2 * time.Hour)},
+	}
+	carryForwardStatusSamples(samples)
+	if samples[1].Status != model.StatusUnknown || samples[1].CarriedFrom != nil ||
+		samples[2].Status != model.StatusUnknown || samples[2].CarriedFrom != nil {
+		t.Fatalf("source change did not stop the historical carry: %+v", samples)
+	}
+}
+
 func TestCarryForwardTargetStatusUsesEvidenceOlderThanWindow(t *testing.T) {
 	windowStart := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	samples := []model.StatusSample{
@@ -431,6 +498,25 @@ func TestCarryForwardTargetStatusUsesEvidenceInsideWindow(t *testing.T) {
 	if samples[1].Status != model.StatusOperational || samples[1].CarriedFrom == nil ||
 		!samples[1].CarriedFrom.Equal(checkedAt) {
 		t.Fatalf("bucket after in-window evidence was not carried: %+v", samples[1])
+	}
+}
+
+func TestCarryForwardTargetStatusStopsAtLaterSourceChange(t *testing.T) {
+	windowStart := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	checkedAt := windowStart.Add(-time.Minute)
+	samples := []model.StatusSample{
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(time.Hour)},
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(90 * time.Minute), Source: "source_change"},
+		{Status: model.StatusUnknown, CheckedAt: windowStart.Add(3 * time.Hour)},
+	}
+	carryForwardTargetStatus(samples, model.StatusOperational, "history", checkedAt)
+	if samples[0].Status != model.StatusOperational || samples[0].CarriedFrom == nil {
+		t.Fatalf("bucket before source change should use the baseline: %+v", samples[0])
+	}
+	for _, index := range []int{1, 2} {
+		if samples[index].Status != model.StatusUnknown || samples[index].CarriedFrom != nil {
+			t.Fatalf("bucket %d crossed the source-change boundary: %+v", index, samples[index])
+		}
 	}
 }
 
