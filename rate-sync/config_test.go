@@ -28,6 +28,49 @@ func TestLoadConfigUsesSimpleDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesUpstreamFactorsAsAllowlistAndFactors(t *testing.T) {
+	path := writeTestConfig(t, `{
+  "sync_target":"account",
+  "upstream_factors":{
+    "WWW.CODEXAPIS.COM.":1,
+    "xixiapi.io":0.9,
+    "PPSUBAPI.COM":0.9
+  }
+}`)
+
+	config, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.SyncHosts) != 3 || len(config.Factors) != 3 {
+		t.Fatalf("unexpected upstream config: %+v", config)
+	}
+	for host := range config.Factors {
+		if _, ok := config.SyncHosts[host]; !ok {
+			t.Fatalf("upstream host %q was not added to sync allowlist", host)
+		}
+	}
+	if factor, host, err := config.factorForBaseURL("https://www.codexapis.com/v1"); err != nil || factor != 1 || host != "www.codexapis.com" {
+		t.Fatalf("DaoGe factorForBaseURL() = %v, %q, %v", factor, host, err)
+	}
+	if factor, host, err := config.factorForBaseURL("https://ppsubapi.com"); err != nil || factor != 0.9 || host != "ppsubapi.com" {
+		t.Fatalf("TokenHorse factorForBaseURL() = %v, %q, %v", factor, host, err)
+	}
+}
+
+func TestLoadConfigCanonicalEmptyUpstreamFactorsDoNotAllowAllHosts(t *testing.T) {
+	config, err := loadConfig(writeTestConfig(t, `{"sync_target":"account","upstream_factors":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.SyncHosts == nil {
+		t.Fatal("canonical empty upstream_factors should remain an explicit empty allowlist")
+	}
+	if !config.syncHostsConfigured {
+		t.Fatal("canonical upstream_factors should mark the allowlist as configured")
+	}
+}
+
 func TestLoadConfigAllowsOptionalRuntimeSettings(t *testing.T) {
 	path := writeTestConfig(t, `{
 	  "sync_target":"account",
@@ -92,9 +135,25 @@ func TestLoadConfigRejectsInvalidFactor(t *testing.T) {
 		`{"factors":{"https://lucen.cc":0.85}}`,
 		`{"factors":{"lucen.cc":0}}`,
 		`{"factors":{"lucen.cc/path":0.85}}`,
+		`{"upstream_factors":{"https://lucen.cc":0.9}}`,
+		`{"upstream_factors":{"lucen.cc":0}}`,
+		`{"upstream_factors":{"lucen.cc/path":0.9}}`,
 	} {
 		if _, err := loadConfig(writeTestConfig(t, input)); err == nil {
 			t.Fatalf("loadConfig(%s) error = nil", input)
+		}
+	}
+}
+
+func TestLoadConfigRejectsMixedUpstreamFactorFormats(t *testing.T) {
+	for _, input := range []string{
+		`{"upstream_factors":{"lucen.cc":0.9},"sync_hosts":["lucen.cc"]}`,
+		`{"upstream_factors":{"lucen.cc":0.9},"factors":{"lucen.cc":0.9}}`,
+		`{"upstream_factors":{},"sync_hosts":[]}`,
+		`{"upstream_factors":null}`,
+	} {
+		if _, err := loadConfig(writeTestConfig(t, input)); err == nil || !strings.Contains(err.Error(), "upstream_factors") {
+			t.Fatalf("loadConfig(%s) error = %v, want mixed-format error", input, err)
 		}
 	}
 }

@@ -20,19 +20,23 @@ const (
 )
 
 type fileConfig struct {
-	Sub2APIURL        string             `json:"sub2api_url"`
-	ProxyURL          string             `json:"proxy_url"`
-	ProxyFallbackURLs []string           `json:"proxy_fallback_urls"`
-	Interval          string             `json:"interval"`
-	SyncTarget        string             `json:"sync_target"`
-	SyncHosts         []string           `json:"sync_hosts"`
-	UsageBootstrap    bool               `json:"usage_bootstrap"`
-	HistoryWindow     string             `json:"history_window"`
-	MinHistoryCostUSD float64            `json:"min_history_cost_usd"`
-	DryRun            bool               `json:"dry_run"`
-	Confirmations     int                `json:"confirmations"`
-	StateFile         string             `json:"state_file"`
-	Factors           map[string]float64 `json:"factors"`
+	Sub2APIURL         string             `json:"sub2api_url"`
+	ProxyURL           string             `json:"proxy_url"`
+	ProxyFallbackURLs  []string           `json:"proxy_fallback_urls"`
+	Interval           string             `json:"interval"`
+	SyncTarget         string             `json:"sync_target"`
+	SyncHosts          []string           `json:"sync_hosts"`
+	UsageBootstrap     bool               `json:"usage_bootstrap"`
+	HistoryWindow      string             `json:"history_window"`
+	MinHistoryCostUSD  float64            `json:"min_history_cost_usd"`
+	DryRun             bool               `json:"dry_run"`
+	Confirmations      int                `json:"confirmations"`
+	StateFile          string             `json:"state_file"`
+	UpstreamFactors    map[string]float64 `json:"upstream_factors"`
+	Factors            map[string]float64 `json:"factors"`
+	upstreamFactorsSet bool
+	syncHostsSet       bool
+	factorsSet         bool
 }
 
 type Config struct {
@@ -42,6 +46,7 @@ type Config struct {
 	AdminAPIKey       string
 	Interval          time.Duration
 	SyncTarget        string
+	// SyncHosts is derived from the canonical upstream_factors mapping.
 	SyncHosts         map[string]struct{}
 	UsageBootstrap    bool
 	HistoryWindow     time.Duration
@@ -49,7 +54,10 @@ type Config struct {
 	DryRun            bool
 	Confirmations     int
 	StateFile         string
-	Factors           map[string]float64
+	// Factors contains the normalized discount coefficients derived from upstream_factors.
+	Factors map[string]float64
+	// syncHostsConfigured distinguishes an explicit canonical empty allowlist from legacy defaults.
+	syncHostsConfigured bool
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -64,6 +72,13 @@ func loadConfig(path string) (*Config, error) {
 	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, fmt.Errorf("解析配置文件: %w", err)
+	}
+	_, raw.upstreamFactorsSet = fields["upstream_factors"]
+	_, raw.syncHostsSet = fields["sync_hosts"]
+	_, raw.factorsSet = fields["factors"]
 	return normalizeFileConfig(raw)
 }
 
@@ -93,29 +108,67 @@ func normalizeFileConfig(raw fileConfig) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	factors, err := normalizeFactors(raw.Factors)
+	factors, syncHosts, err := normalizeUpstreamConfig(raw)
 	if err != nil {
 		return nil, err
+	}
+	canonicalUpstream := raw.upstreamFactorsSet || raw.UpstreamFactors != nil
+	return &Config{
+		Sub2APIURL:          strings.TrimRight(raw.Sub2APIURL, "/"),
+		ProxyURL:            strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
+		ProxyFallbackURLs:   proxyFallbackURLs,
+		Interval:            interval,
+		SyncTarget:          raw.SyncTarget,
+		SyncHosts:           syncHosts,
+		UsageBootstrap:      raw.UsageBootstrap,
+		HistoryWindow:       historyWindow,
+		MinHistoryCostUSD:   raw.MinHistoryCostUSD,
+		DryRun:              raw.DryRun,
+		Confirmations:       raw.Confirmations,
+		StateFile:           raw.StateFile,
+		Factors:             factors,
+		syncHostsConfigured: canonicalUpstream,
+	}, nil
+}
+
+func normalizeUpstreamConfig(raw fileConfig) (map[string]float64, map[string]struct{}, error) {
+	hasUpstreamFactors := raw.upstreamFactorsSet || raw.UpstreamFactors != nil
+	hasSyncHosts := raw.syncHostsSet || raw.SyncHosts != nil
+	hasFactors := raw.factorsSet || raw.Factors != nil
+	if hasUpstreamFactors {
+		if hasSyncHosts || hasFactors {
+			return nil, nil, fmt.Errorf("upstream_factors 不能与 sync_hosts 或 factors 同时配置，请只保留 upstream_factors")
+		}
+		if raw.UpstreamFactors == nil {
+			return nil, nil, fmt.Errorf("upstream_factors 必须是域名到折扣系数的对象")
+		}
+		factors, err := normalizeFactorsForField(raw.UpstreamFactors, "upstream_factors")
+		if err != nil {
+			return nil, nil, err
+		}
+		syncHosts := make(map[string]struct{}, len(factors))
+		for host := range factors {
+			syncHosts[host] = struct{}{}
+		}
+		return factors, syncHosts, nil
+	}
+
+	// 兼容旧版拆分配置；新配置应使用 upstream_factors，避免白名单和系数漂移。
+	if raw.factorsSet && raw.Factors == nil {
+		return nil, nil, fmt.Errorf("factors 必须是域名到系数的对象")
+	}
+	factors, err := normalizeFactors(raw.Factors)
+	if err != nil {
+		return nil, nil, err
+	}
+	if raw.syncHostsSet && raw.SyncHosts == nil {
+		return nil, nil, fmt.Errorf("sync_hosts 必须是域名数组")
 	}
 	syncHosts, err := normalizeSyncHosts(raw.SyncHosts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &Config{
-		Sub2APIURL:        strings.TrimRight(raw.Sub2APIURL, "/"),
-		ProxyURL:          strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
-		ProxyFallbackURLs: proxyFallbackURLs,
-		Interval:          interval,
-		SyncTarget:        raw.SyncTarget,
-		SyncHosts:         syncHosts,
-		UsageBootstrap:    raw.UsageBootstrap,
-		HistoryWindow:     historyWindow,
-		MinHistoryCostUSD: raw.MinHistoryCostUSD,
-		DryRun:            raw.DryRun,
-		Confirmations:     raw.Confirmations,
-		StateFile:         raw.StateFile,
-		Factors:           factors,
-	}, nil
+	return factors, syncHosts, nil
 }
 
 func applyConfigDefaults(raw *fileConfig) {
@@ -204,17 +257,21 @@ func normalizeProxyFallbacks(proxyURL string, fallbackURLs []string) ([]string, 
 }
 
 func normalizeFactors(values map[string]float64) (map[string]float64, error) {
+	return normalizeFactorsForField(values, "factors")
+}
+
+func normalizeFactorsForField(values map[string]float64, name string) (map[string]float64, error) {
 	factors := make(map[string]float64, len(values))
 	for value, factor := range values {
-		host, err := normalizeFactorHost(value)
+		host, err := normalizeHost(value, name)
 		if err != nil {
 			return nil, err
 		}
 		if factor <= 0 || math.IsNaN(factor) || math.IsInf(factor, 0) {
-			return nil, fmt.Errorf("factors[%q] 必须是大于 0 的有限数字", value)
+			return nil, fmt.Errorf("%s[%q] 必须是大于 0 的有限数字", name, value)
 		}
 		if _, exists := factors[host]; exists {
-			return nil, fmt.Errorf("factors 中的域名 %q 重复", host)
+			return nil, fmt.Errorf("%s 中的域名 %q 重复", name, host)
 		}
 		factors[host] = factor
 	}
@@ -222,6 +279,9 @@ func normalizeFactors(values map[string]float64) (map[string]float64, error) {
 }
 
 func normalizeSyncHosts(values []string) (map[string]struct{}, error) {
+	if values == nil {
+		return nil, nil
+	}
 	syncHosts := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		host, err := normalizeHost(value, "sync_hosts")
@@ -246,10 +306,6 @@ func (c *Config) factorForBaseURL(baseURL string) (float64, string, error) {
 		return factor, host, nil
 	}
 	return 1, host, nil
-}
-
-func normalizeFactorHost(value string) (string, error) {
-	return normalizeHost(value, "factors")
 }
 
 func normalizeHost(value, field string) (string, error) {

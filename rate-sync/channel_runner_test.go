@@ -43,3 +43,18 @@ func TestRunChannelChecksDoesNotStartAfterCancellation(t *testing.T) {
 		t.Fatalf("canceled checks were started: stats=%+v rules=%d", stats, len(syncer.state.Rules))
 	}
 }
+
+func TestManualEmptySyncHostsRemainUnrestricted(t *testing.T) {
+	channel := testChannel("https://upstream.example", 0.1)
+	syncer := &Syncer{
+		config: &Config{SyncTarget: "account", SyncHosts: map[string]struct{}{}},
+		state:  newState(),
+		logger: log.New(io.Discard, "", 0),
+	}
+	plan := newChannelCheckPlan("account", []Channel{channel}, nil)
+	stats := syncStats{}
+	report := newSyncReport("account", []Channel{channel})
+	if !plan.admitAccountHost(syncer, &channel, report, &stats) {
+		t.Fatal("an unconfigured empty SyncHosts map should remain unrestricted")
+	}
+}

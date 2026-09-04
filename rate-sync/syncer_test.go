@@ -530,6 +530,54 @@ func TestNewAPIFallsBackToBillingLogRatioWhenPricingRequiresLogin(t *testing.T) 
 	}
 }
 
+func TestNewAPIFallsBackToBillingLogRatioWhenPricingReportsUnauthorized(t *testing.T) {
+	pricingCalls := 0
+	logCalls := 0
+	usageCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pricing":
+			pricingCalls++
+			writeJSON(t, w, groupRatioResponse{Success: false, Message: "Unauthorized, invalid access token"})
+		case "/api/log/token":
+			logCalls++
+			writeJSON(t, w, newAPITokenLogResponse{
+				Success: true,
+				Data: []newAPITokenLog{{
+					ID: 1, CreatedAt: 100, Type: newAPIConsumeLogType,
+					Group: "gptplus", Other: `{"group_ratio":0.1}`,
+				}},
+			})
+		case "/v1/usage":
+			usageCalls++
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	updatedRate := 0.0
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload accountUpdate
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updatedRate = payload.RateMultiplier
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	source := &staticChannelSource{channels: []Channel{testChannel(upstream.URL, 0.5)}}
+	syncer := newAccountTestSyncer(t, source, admin.URL, false, 1, upstream.URL, 0.9)
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if pricingCalls != 1 || logCalls != 1 || usageCalls != 0 || updatedRate != 0.09 {
+		t.Fatalf("pricing=%d log=%d usage=%d updated=%.4f", pricingCalls, logCalls, usageCalls, updatedRate)
+	}
+}
+
 func TestNewAPIFallbackRefreshesBillingLogEveryCycle(t *testing.T) {
 	logCalls := 0
 	ratios := []float64{0.1, 0.035, 0.035}

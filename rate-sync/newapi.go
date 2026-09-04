@@ -17,6 +17,7 @@ const (
 
 type groupRatioResponse struct {
 	Success    bool               `json:"success"`
+	Message    string             `json:"message"`
 	GroupRatio map[string]float64 `json:"group_ratio"`
 }
 
@@ -46,7 +47,8 @@ func (s *Syncer) applyNewAPITemplate(ctx context.Context, channel *Channel, stat
 	if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
 		return false, nil
 	}
-	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden ||
+		(status >= 200 && status < 300 && !pricing.Success && strings.TrimSpace(pricing.Message) != "") {
 		return s.applyNewAPILogRatio(ctx, channel, state)
 	}
 	if status < 200 || status >= 300 {

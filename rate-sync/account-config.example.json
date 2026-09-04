@@ -3,13 +3,8 @@
   "sync_target": "account",
   "confirmations": 1,
   "usage_bootstrap": true,
-  "sync_hosts": [
-    "www.codexapis.com",
-    "xixiapi.io",
-    "lucen.cc",
-    "ppsubapi.com"
-  ],
-  "factors": {
+  "upstream_factors": {
+    "www.codexapis.com": 1.0,
     "lucen.cc": 0.9,
     "xixiapi.io": 0.9,
     "ppsubapi.com": 0.9

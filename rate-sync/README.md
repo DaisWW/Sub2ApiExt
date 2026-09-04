@@ -2,6 +2,8 @@
 
 独立的倍率同步服务，不修改 Sub2API 源码或数据库结构。分组 worker 每 60 秒从 Sub2API 的 PostgreSQL 自动发现可用渠道：只有一个可用账号的分组直接继承该账号倍率；多个账号的分组使用成功请求记录维护快慢成本记忆并动态调价。账户 worker 每 900 秒读取刀哥、Lucen 和 TokenHorse 的上游价格并更新账户倍率。两者都通过 Sub2API Admin API 写回。
 
+> 重要：账户配置只维护 `upstream_factors` 一个映射。它的值是“上游倍率的折扣系数”，不是最终账户倍率；映射中的域名同时构成允许自动同步的上游白名单。例如上游倍率 `0.115`、配置系数 `0.9` 时，最终写回 `0.1035`（`0.115 × 0.9`）。禁止因为配置值为 `0.9` 就直接把账户倍率写成 `0.9`。
+
 ## 最简配置
 
 默认行为是更新分组倍率。账号 worker 使用同一套探测模板更新账户倍率：
@@ -15,9 +17,9 @@
 }
 ```
 
-`sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。特殊上游系数只在账户配置中使用；账户配置还设置了 `sync_hosts` 白名单，只处理 `www.codexapis.com`、`xixiapi.io`、`lucen.cc` 和 `ppsubapi.com`；白名单之外的账号保持手动倍率。
+`sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。特殊上游系数只在账户配置中使用；账户配置的 `upstream_factors` 同时定义自动同步白名单和对应折扣系数，只处理映射中的上游域名；映射之外的账号保持手动倍率。新增上游或修改系数时只改这个映射，不要再同时维护其他倍率字段。
 
-账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen 和 TokenHorse 的上游倍率在写回前乘一次 `0.9`（覆盖 `lucen.cc`、`xixiapi.io` 和 `ppsubapi.com`）；分组 worker 不会再次乘该系数。
+账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen 和 TokenHorse 的上游倍率在写回前各自乘一次映射中的 `0.9`（覆盖 `lucen.cc`、`xixiapi.io` 和 `ppsubapi.com`）；分组 worker 不会再次乘该系数。
 
 账户模式优先读取上游直接价格（NewAPI 的价格表和最新计费日志）；只有直接价格接口不可用时才读取 `/v1/usage`。`usage_bootstrap: true` 可让当前本地倍率仍为 `1.0` 的占位账号在没有新增请求时，用累计 `actual_cost / cost` 先建立候选倍率；已设置过非 `1.0` 倍率的账号不会被累计值覆盖。
 
@@ -42,7 +44,8 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 
 ```json
 {
-  "factors": {
+  "upstream_factors": {
+    "www.codexapis.com": 1.0,
     "lucen.cc": 0.9,
     "xixiapi.io": 0.9,
     "ppsubapi.com": 0.9
@@ -65,10 +68,12 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 
 规则如下：
 
-- 未配置域名的本地系数默认为 `1.0`。
-- 账户 worker 同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 和 TokenHorse 只需各配置一次 `0.9`。
+- 旧版拆分配置中，已允许但未配置系数的域名默认为 `1.0`；使用新配置时，`upstream_factors` 未列出的域名不会进入账户自动同步。
+- `upstream_factors` 中的每个域名同时加入账户 worker 白名单；同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 和 TokenHorse 只需各配置一次 `0.9`。
 - 渠道、账号或分组改名不影响同步；内部使用账号 ID 和分组 ID 作为稳定身份。
-- 账户 worker 的上游域名变化且仍需非 `1.0` 系数时，才需要修改账户配置中的 `factors`。
+- 账户 worker 的上游域名变化或折扣系数变化时，只需修改账户配置中的 `upstream_factors`。
+
+旧版 `sync_hosts` 与 `factors` 仍可读取以便平滑迁移，但不要和 `upstream_factors` 混用；一旦采用新字段，应删除旧字段。
 
 以下通用项均可省略，代码默认值分别是 `300s`、`2` 和 `false`；生产配置已显式设置分组 `60s`、账户 `900s` 和单次确认：
 

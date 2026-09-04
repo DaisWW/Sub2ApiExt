@@ -99,6 +99,8 @@ Git 只保存配置模板：
 
 真实数据库密码由部署脚本从现有 PostgreSQL 容器读取，并写入 ProgramData 下受限权限的运行文件，不会写入本仓库。
 
+账户倍率配置只维护 `C:\ProgramData\Sub2API\extensions\rate-sync\account-config.json` 中的 `upstream_factors`，Git 模板对应 `rate-sync/account-config.example.json`。它的值是折扣系数，不是最终账户倍率；例如上游倍率 `0.115` 配置 `0.9`，最终写回 `0.1035`（`0.115 × 0.9`）。该映射同时定义自动同步白名单，新增渠道或修改折扣时只改这一处。
+
 ## 开发验证
 
 ```powershell

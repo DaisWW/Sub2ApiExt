@@ -71,7 +71,7 @@ func (p *channelCheckPlan) admit(s *Syncer, channel *Channel, report *syncReport
 }
 
 func (p *channelCheckPlan) admitAccountHost(s *Syncer, channel *Channel, report *syncReport, stats *syncStats) bool {
-	if len(s.config.SyncHosts) == 0 {
+	if !s.config.syncHostsConfigured && len(s.config.SyncHosts) == 0 {
 		return true
 	}
 	_, host, err := s.config.factorForBaseURL(channel.BaseURL)

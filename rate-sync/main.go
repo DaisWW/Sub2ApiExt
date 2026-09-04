@@ -60,13 +60,12 @@ func main() {
 	defer stop()
 
 	logger.Printf(
-		"rate-sync 已启动: 自动发现=true templates=2 sync_target=%s interval=%s dry_run=%t confirmations=%d factors=%d sync_hosts=%d usage_bootstrap=%t",
+		"rate-sync 已启动: 自动发现=true templates=2 sync_target=%s interval=%s dry_run=%t confirmations=%d upstream_factors=%d usage_bootstrap=%t",
 		config.SyncTarget,
 		config.Interval,
 		config.DryRun,
 		config.Confirmations,
 		len(config.Factors),
-		len(config.SyncHosts),
 		config.UsageBootstrap,
 	)
 	run := func() {
