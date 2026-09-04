@@ -7,6 +7,7 @@ import {
   formatPct,
   formatTime,
   historyStatusClass,
+  latencyMetricClass,
   normalizeStatus,
   slowLatencyThresholdMs,
   sourceLabel,
@@ -81,11 +82,14 @@ function renderHistoryRow(item, groupHistory) {
   const message = String(item.message || '请求失败');
   const error = status === 'failed' ? `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>` : '';
   const account = historyAccountLabel(item, groupHistory);
+  const firstByteTone = latencyMetricClass(item.first_byte_ms);
+  const latencyTone = latencyMetricClass(item.latency_ms);
   return `<tr>
     <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small></td>
     ${groupHistory ? `<td class="history-account">${escapeHTML(account)}</td>` : ''}
     <td class="table-status ${historyStatusClass(status)}">${historyStatusLabel(status)}${error}</td>
-    <td>${formatMs(item.first_byte_ms)}</td><td>${formatMs(item.latency_ms)}</td>
+    <td class="latency-value${firstByteTone ? ` ${firstByteTone}` : ''}">${formatMs(item.first_byte_ms)}</td>
+    <td class="latency-value${latencyTone ? ` ${latencyTone}` : ''}">${formatMs(item.latency_ms)}</td>
   </tr>`;
 }
 

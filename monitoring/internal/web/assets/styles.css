@@ -254,8 +254,8 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding-top: 13px; border-top: 1px solid var(--line); }
 .metric-label { color: var(--muted); font-size: 10px; }
 .metric-value { margin-top: 5px; overflow: hidden; color: var(--soft); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.metric-value.good { color: var(--mint); }
-.metric-value.warn { color: var(--amber); }
+.metric-value.good, .latency-value.good { color: var(--mint); }
+.metric-value.warn, .latency-value.warn { color: var(--amber); }
 .card-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 17px; color: var(--muted); font-size: 11px; }
 .status-history-block { min-width: 0; flex: 1 1 auto; display: grid; gap: 5px; }
 .status-history { width: 100%; height: 8px; min-width: 120px; display: grid; grid-template-columns: repeat(24, minmax(2px, 1fr)); gap: 2px; }

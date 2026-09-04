@@ -8,6 +8,7 @@ import {
   formatMs,
   formatPct,
   formatTime,
+  latencyMetricClass,
   normalizeStatus,
   slowLatencyThresholdMs,
   sourceLabel,
@@ -263,7 +264,7 @@ export class DashboardPanel {
           ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 1 小时成功样本的首字/首字节中位数', latencyMetricClass(firstByte.median_ms))}
           ${renderMetric('最快', formatMs(latency.fastest_ms), '', latencyMetricClass(latency.fastest_ms))}
           ${renderMetric('中位数', formatMedianMs(latency), '', latencyMetricClass(latency.median_ms))}
-          ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值')}
+          ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值', latencyMetricClass(latency.p95_ms))}
         </div>
         <div class="card-foot">
           ${renderStatusHistory(item.recent_samples || [], item)}
@@ -452,13 +453,6 @@ function statusHistoryCaption(samples, item, gatewayError, recoveryPending) {
     return item?.kind === 'group' ? '待确认 · 等待账户健康证据' : '待确认 · 等待真实请求证据';
   }
   return '当前状态';
-}
-
-function latencyMetricClass(value) {
-  if (value == null || value === '') return '';
-  const milliseconds = Number(value);
-  if (!Number.isFinite(milliseconds)) return '';
-  return milliseconds >= slowLatencyThresholdMs ? 'warn' : 'good';
 }
 
 function renderMetric(label, value, help = '', tone = '') {

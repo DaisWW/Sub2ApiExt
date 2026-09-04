@@ -1,7 +1,6 @@
 export const $ = (selector) => document.querySelector(selector);
 
-// A slow response is still usable; the dashboard only promotes it to yellow
-// once the end-to-end latency reaches twenty seconds.
+// Keep latency colors consistent across end-to-end and first-byte metrics.
 export const slowLatencyThresholdMs = 20000;
 
 export class LatestRequest {
@@ -77,16 +76,33 @@ export function historyStatusClass(status) {
 
 export function formatMs(value) {
   if (value == null) return '—';
-  const milliseconds = Math.max(0, Math.round(value));
-  if (milliseconds < 60000) return `${milliseconds} ms`;
-  const totalSeconds = Math.round(milliseconds / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds)) return '—';
+  const roundedMilliseconds = Math.max(0, Math.round(milliseconds));
+  const totalSeconds = Math.round(roundedMilliseconds / 1000);
+  if (totalSeconds < 60) {
+    const seconds = roundedMilliseconds / 1000;
+    const precision = seconds < 1 ? 3 : 2;
+    return `${seconds.toFixed(precision).replace(/\.?0+$/, '')}s`;
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return `${minutes}分${seconds}秒`;
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds).padStart(2, '0')}s`;
+  }
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
 }
 
 export function formatMedianMs(stats) {
   return stats?.median_ms == null ? '—' : formatMs(stats.median_ms);
+}
+
+export function latencyMetricClass(value) {
+  if (value == null || value === '') return '';
+  const milliseconds = Number(value);
+  if (!Number.isFinite(milliseconds)) return '';
+  return milliseconds >= slowLatencyThresholdMs ? 'warn' : 'good';
 }
 
 export function formatPct(value) {
