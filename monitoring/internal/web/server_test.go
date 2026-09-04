@@ -230,6 +230,8 @@ func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 		"/": {
 			"id=\"historyAccountHeader\"",
 			"经由账户",
+			"首字/首字节",
+			"总耗时",
 		},
 		"/js/history-dialog.js": {
 			"historyAccountLabel(item, groupHistory)",
@@ -237,6 +239,7 @@ func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 			"const availabilityLabel = groupHistory ? '真实请求可用率' : '记录可用率'",
 			"分组真实请求记录",
 			"账户 #${accountID}",
+			"colspan=\"${groupHistory ? 4 : 3}\"",
 		},
 		"/js/dashboard.js": {
 			"this.#openHistory(card.dataset.target, card.dataset.name)",
@@ -263,6 +266,9 @@ func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "分组聚合") {
 		t.Fatal("history dialog must not render group aggregate rows")
+	}
+	if strings.Contains(response.Body.String(), "historyStatusClass") || strings.Contains(response.Body.String(), "<th scope=\"col\">状态</th>") {
+		t.Fatal("history dialog must not render a status column")
 	}
 }
 

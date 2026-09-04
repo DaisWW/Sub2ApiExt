@@ -6,12 +6,10 @@ import {
   formatMs,
   formatPct,
   formatTime,
-  historyStatusClass,
   latencyMetricClass,
   normalizeStatus,
   slowLatencyThresholdMs,
-  sourceLabel,
-  statusLabel
+  sourceLabel
 } from './shared.js';
 
 export class HistoryDialog {
@@ -37,7 +35,7 @@ export class HistoryDialog {
     const groupHistory = String(target || '').startsWith('group:');
     $('#dialogTitle').textContent = name;
     setAccountColumnVisible(groupHistory);
-    $('#historyBody').innerHTML = `<tr><td colspan="${groupHistory ? 5 : 4}">读取历史中...</td></tr>`;
+    $('#historyBody').innerHTML = `<tr><td colspan="${groupHistory ? 4 : 3}">读取历史中...</td></tr>`;
     $('#historySummary').textContent = '';
     if (!this.#dialog.open) this.#dialog.showModal();
     try {
@@ -46,7 +44,7 @@ export class HistoryDialog {
       this.#render(data.items || [], target);
     } catch (error) {
       if (!this.#requests.isCurrent(requestId) || !this.#dialog.open) return;
-      $('#historyBody').innerHTML = `<tr><td colspan="${groupHistory ? 5 : 4}">${escapeHTML(error.message)}</td></tr>`;
+      $('#historyBody').innerHTML = `<tr><td colspan="${groupHistory ? 4 : 3}">${escapeHTML(error.message)}</td></tr>`;
     }
   }
 
@@ -63,7 +61,7 @@ export class HistoryDialog {
       <span>${groupHistory ? '每条真实请求标注实际经由账户' : '真实请求为首字，主动探测为首字节近似值'}</span>`;
     $('#historyBody').innerHTML = items.length
       ? items.map((item) => renderHistoryRow(item, groupHistory)).join('')
-      : `<tr><td colspan="${groupHistory ? 5 : 4}">最近 24 小时没有历史记录</td></tr>`;
+      : `<tr><td colspan="${groupHistory ? 4 : 3}">最近 24 小时没有历史记录</td></tr>`;
   }
 }
 
@@ -80,14 +78,15 @@ function isSuccessful(item) {
 function renderHistoryRow(item, groupHistory) {
   const status = displayHistoryStatus(item);
   const message = String(item.message || '请求失败');
-  const error = status === 'failed' ? `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>` : '';
   const account = historyAccountLabel(item, groupHistory);
   const firstByteTone = latencyMetricClass(item.first_byte_ms);
   const latencyTone = latencyMetricClass(item.latency_ms);
+  const errorDetail = status === 'failed'
+    ? `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>`
+    : '';
   return `<tr>
-    <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small></td>
+    <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small>${errorDetail}</td>
     ${groupHistory ? `<td class="history-account">${escapeHTML(account)}</td>` : ''}
-    <td class="table-status ${historyStatusClass(status)}">${historyStatusLabel(status)}${error}</td>
     <td class="latency-value${firstByteTone ? ` ${firstByteTone}` : ''}">${formatMs(item.first_byte_ms)}</td>
     <td class="latency-value${latencyTone ? ` ${latencyTone}` : ''}">${formatMs(item.latency_ms)}</td>
   </tr>`;
@@ -102,10 +101,6 @@ function historyAccountLabel(item, groupHistory) {
   if (accountName) return accountName;
   if (Number.isSafeInteger(accountID) && accountID > 0) return `账户 #${accountID}`;
   return groupHistory ? '未知账户' : '当前账户';
-}
-
-function historyStatusLabel(status) {
-  return statusLabel(status);
 }
 
 function displayHistoryStatus(item) {

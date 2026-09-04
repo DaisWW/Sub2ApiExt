@@ -40,17 +40,6 @@ export function normalizeStatus(status) {
   return knownStatuses.has(status) ? status : 'unknown';
 }
 
-export function statusLabel(status) {
-  return {
-    operational: '可用',
-    degraded: '可用但延迟高',
-    failed: '错误/不可用',
-    error: '错误/不可用',
-    unknown: '待确认',
-    disabled: '错误/不可用'
-  }[normalizeStatus(status)];
-}
-
 export function sourceLabel(source) {
   if (source === 'history') return '真实请求';
   if (source === 'aggregate') return '账户聚合';
@@ -64,14 +53,6 @@ export function statusClass(status) {
   const normalized = normalizeStatus(status);
   if (normalized === 'disabled') return 'status-failed';
   return `status-${normalized}`;
-}
-
-export function historyStatusClass(status) {
-  const normalized = normalizeStatus(status);
-  if (normalized === 'operational') return 'ok';
-  if (normalized === 'degraded') return 'warn';
-  if (normalized === 'unknown') return 'neutral';
-  return 'bad';
 }
 
 export function formatMs(value) {

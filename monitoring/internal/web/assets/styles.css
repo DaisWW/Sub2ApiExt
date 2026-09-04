@@ -350,11 +350,6 @@ td { color: var(--soft); }
 .history-source, .history-error { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; font-weight: 400; }
 .history-error { max-width: 180px; overflow: hidden; text-overflow: ellipsis; color: var(--red); }
 .history-account { max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
-.table-status { font-weight: 700; }
-.table-status.ok { color: var(--mint); }
-.table-status.bad { color: var(--red); }
-.table-status.warn { color: var(--amber); }
-.table-status.neutral { color: var(--muted); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 @media (max-width: 1060px) {
