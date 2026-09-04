@@ -279,6 +279,7 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 		"const availabilityLabel = `近 1 小时通过率${availabilityDetail}`",
 		"const currentSample = recentSamples[recentSamples.length - 1]",
 		"const availabilityTone = availabilityToneForStatus(currentGridStatus)",
+		"renderMetric('首字最快', formatMs(firstByte.fastest_ms)",
 		"function availabilityToneForStatus(status)",
 	} {
 		if !strings.Contains(body, marker) {

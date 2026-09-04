@@ -251,7 +251,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .availability-value.warn { color: var(--amber); }
 .availability-value.bad { color: var(--red); }
 .availability-value.neutral { color: var(--muted); }
-.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding-top: 13px; border-top: 1px solid var(--line); }
+.metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; padding-top: 13px; border-top: 1px solid var(--line); }
 .metric-label { color: var(--muted); font-size: 10px; }
 .metric-value { margin-top: 5px; overflow: hidden; color: var(--soft); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .metric-value.good, .latency-value.good { color: var(--mint); }
