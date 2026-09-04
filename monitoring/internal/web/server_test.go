@@ -234,8 +234,8 @@ func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 		"/js/history-dialog.js": {
 			"historyAccountLabel(item, groupHistory)",
 			"setAccountColumnVisible(groupHistory)",
-			"const healthItems = groupHistory ? items.filter((item) => item?.source === 'aggregate') : items",
-			"分组聚合",
+			"const availabilityLabel = groupHistory ? '真实请求可用率' : '记录可用率'",
+			"分组真实请求记录",
 			"账户 #${accountID}",
 		},
 		"/js/dashboard.js": {
@@ -260,6 +260,9 @@ func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if strings.Contains(response.Body.String(), "currentTarget") || strings.Contains(response.Body.String(), "renderMembers") {
 		t.Fatal("history dialog must not render the full current member list")
+	}
+	if strings.Contains(response.Body.String(), "分组聚合") {
+		t.Fatal("history dialog must not render group aggregate rows")
 	}
 }
 

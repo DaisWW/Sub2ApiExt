@@ -52,15 +52,14 @@ export class HistoryDialog {
   #render(items, target) {
     const groupHistory = String(target || '').startsWith('group:');
     setAccountColumnVisible(groupHistory);
-    const healthItems = groupHistory ? items.filter((item) => item?.source === 'aggregate') : items;
-    const successful = healthItems.filter(isSuccessful).length;
-    const availability = healthItems.length ? successful * 100 / healthItems.length : null;
-    const availabilityLabel = groupHistory ? '聚合通过率' : '记录可用率';
+    const successful = items.filter(isSuccessful).length;
+    const availability = items.length ? successful * 100 / items.length : null;
+    const availabilityLabel = groupHistory ? '真实请求可用率' : '记录可用率';
     const availabilityValue = availability === null ? '—' : formatPct(availability);
     $('#historySummary').innerHTML = `
-      <span>最近 24 小时 · ${groupHistory ? '分组健康与请求记录' : '账户健康记录'} ${items.length}</span>
+      <span>最近 24 小时 · ${groupHistory ? '分组真实请求记录' : '账户健康记录'} ${items.length}</span>
       <span>${availabilityLabel} ${availabilityValue}</span>
-      <span>${groupHistory ? '真实请求标注实际经由账户，聚合记录用于健康状态' : '真实请求为首字，主动探测为首字节近似值'}</span>`;
+      <span>${groupHistory ? '每条真实请求标注实际经由账户' : '真实请求为首字，主动探测为首字节近似值'}</span>`;
     $('#historyBody').innerHTML = items.length
       ? items.map((item) => renderHistoryRow(item, groupHistory)).join('')
       : `<tr><td colspan="${groupHistory ? 5 : 4}">最近 24 小时没有历史记录</td></tr>`;
@@ -98,7 +97,6 @@ function historyAccountLabel(item, groupHistory) {
   }
   if (accountName) return accountName;
   if (Number.isSafeInteger(accountID) && accountID > 0) return `账户 #${accountID}`;
-  if (groupHistory && item?.source === 'aggregate') return '分组聚合';
   return groupHistory ? '未知账户' : '当前账户';
 }
 

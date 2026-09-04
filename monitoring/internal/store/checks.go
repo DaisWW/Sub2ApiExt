@@ -38,8 +38,8 @@ SELECT monitoring_checks.target_key, monitoring_checks.kind, monitoring_checks.e
 FROM monitoring_checks
 JOIN authorized_target auth ON auth.target_key = monitoring_checks.target_key
 WHERE monitoring_checks.checked_at >= NOW() - INTERVAL '24 hours'
-  AND ((auth.kind = 'account' AND monitoring_checks.source IN ('probe', 'request_error'))
-       OR (auth.kind = 'group' AND monitoring_checks.source = 'aggregate'))
+  AND auth.kind = 'account'
+  AND monitoring_checks.source IN ('probe', 'request_error')
 UNION ALL
 SELECT 'account:' || usage_logs.account_id::text, 'account', usage_logs.account_id, usage_logs.group_id,
        usage_logs.account_id,

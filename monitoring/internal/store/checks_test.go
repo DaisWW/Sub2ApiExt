@@ -7,7 +7,7 @@ import (
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
-func TestHistoryQueryUsesAccountEvidenceAndGroupAggregates(t *testing.T) {
+func TestHistoryQueryUsesAccountEvidenceAndGroupRequests(t *testing.T) {
 	for _, fragment := range []string{
 		"WITH authorized_target AS",
 		"FROM monitoring_targets",
@@ -18,8 +18,7 @@ func TestHistoryQueryUsesAccountEvidenceAndGroupAggregates(t *testing.T) {
 		"auth.last_channel_error_at > auth.last_channel_error_resolved_at",
 		"errors.target_key, 'account', errors.account_id, NULL::bigint,",
 		"FROM account_error_events",
-		"auth.kind = 'account' AND monitoring_checks.source IN ('probe', 'request_error')",
-		"auth.kind = 'group' AND monitoring_checks.source = 'aggregate'",
+		"monitoring_checks.source IN ('probe', 'request_error')",
 		"auth.kind = 'group'",
 		"usage_logs.account_id",
 		"CASE\n           WHEN usage_logs.account_id IS NULL THEN '未知账户'",
@@ -33,6 +32,9 @@ func TestHistoryQueryUsesAccountEvidenceAndGroupAggregates(t *testing.T) {
 	}
 	if strings.Contains(historyQuery, "FROM ops_error_logs") {
 		t.Fatal("group history must not read raw error logs directly")
+	}
+	if strings.Contains(historyQuery, "monitoring_checks.source = 'aggregate'") {
+		t.Fatal("group history must not return aggregate health rows")
 	}
 	if strings.Contains(historyQuery, "CASE WHEN kind = 'group' AND source = 'history'") {
 		t.Fatal("history rows must not be prioritized by type before the global limit")
