@@ -1,6 +1,6 @@
 # Sub2API Rate Sync
 
-独立的倍率同步服务，不修改 Sub2API 源码或数据库结构。分组 worker 每 60 秒从 Sub2API 的 PostgreSQL 自动发现可用渠道：只有一个可用账号的分组直接继承该账号倍率；多个账号的分组使用成功请求记录维护快慢成本记忆并动态调价。账户 worker 每 900 秒读取刀哥和 Lucen 的上游价格并更新账户倍率。两者都通过 Sub2API Admin API 写回。
+独立的倍率同步服务，不修改 Sub2API 源码或数据库结构。分组 worker 每 60 秒从 Sub2API 的 PostgreSQL 自动发现可用渠道：只有一个可用账号的分组直接继承该账号倍率；多个账号的分组使用成功请求记录维护快慢成本记忆并动态调价。账户 worker 每 900 秒读取刀哥、Lucen 和 TokenHorse 的上游价格并更新账户倍率。两者都通过 Sub2API Admin API 写回。
 
 ## 最简配置
 
@@ -15,9 +15,9 @@
 }
 ```
 
-`sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。特殊上游系数只在账户配置中使用；账户配置还设置了 `sync_hosts` 白名单，只处理 `www.codexapis.com`、`xixiapi.io` 和 `lucen.cc`；白名单之外的账号保持手动倍率。
+`sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。特殊上游系数只在账户配置中使用；账户配置还设置了 `sync_hosts` 白名单，只处理 `www.codexapis.com`、`xixiapi.io`、`lucen.cc` 和 `ppsubapi.com`；白名单之外的账号保持手动倍率。
 
-账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen 的上游倍率在写回前乘一次 `0.9`（覆盖 `lucen.cc` 和 `xixiapi.io`）；分组 worker 不会再次乘该系数。
+账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen 和 TokenHorse 的上游倍率在写回前乘一次 `0.9`（覆盖 `lucen.cc`、`xixiapi.io` 和 `ppsubapi.com`）；分组 worker 不会再次乘该系数。
 
 账户模式优先读取上游直接价格（NewAPI 的价格表和最新计费日志）；只有直接价格接口不可用时才读取 `/v1/usage`。`usage_bootstrap: true` 可让当前本地倍率仍为 `1.0` 的占位账号在没有新增请求时，用累计 `actual_cost / cost` 先建立候选倍率；已设置过非 `1.0` 倍率的账号不会被累计值覆盖。
 
@@ -44,7 +44,8 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 {
   "factors": {
     "lucen.cc": 0.9,
-    "xixiapi.io": 0.9
+    "xixiapi.io": 0.9,
+    "ppsubapi.com": 0.9
   }
 }
 ```
@@ -65,7 +66,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 规则如下：
 
 - 未配置域名的本地系数默认为 `1.0`。
-- 账户 worker 同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 只需配置一次 `0.9`。
+- 账户 worker 同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 和 TokenHorse 只需各配置一次 `0.9`。
 - 渠道、账号或分组改名不影响同步；内部使用账号 ID 和分组 ID 作为稳定身份。
 - 账户 worker 的上游域名变化且仍需非 `1.0` 系数时，才需要修改账户配置中的 `factors`。
 
@@ -88,7 +89,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 - 分组已挂到一个 `active` 渠道；
 - 账号有有效的 `base_url` 和 `api_key`。
 
-当前用户侧“可用渠道”页面对应的可用绑定会自动发现。分组 worker 处理历史成本；账户 worker 只处理白名单中的刀哥和 Lucen。itai 等未列入白名单的账号保持手动。
+当前用户侧“可用渠道”页面对应的可用绑定会自动发现。分组 worker 处理历史成本；账户 worker 只处理白名单中的刀哥、Lucen 和 TokenHorse。itai 等未列入白名单的账号保持手动。
 
 新增渠道满足这些条件后，最长一个同步周期会自动纳入，无需修改 JSON 或重新部署。单账号分组直接跟随唯一账号的已保存倍率，不读取历史用量；账号倍率尚未有效同步时保持当前分组倍率，等待账户 worker 同步，不会回退到上游探测。多账号分组才使用动态快慢记忆，没有足够初始化用量时保持原值等待数据。
 

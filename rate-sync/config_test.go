@@ -31,7 +31,8 @@ func TestLoadConfigUsesSimpleDefaults(t *testing.T) {
 func TestLoadConfigAllowsOptionalRuntimeSettings(t *testing.T) {
 	path := writeTestConfig(t, `{
 	  "sync_target":"account",
-	  "sync_hosts":["WWW.CODEXAPIS.COM", "xixiapi.io"],
+	  "sync_hosts":["WWW.CODEXAPIS.COM", "xixiapi.io", "ppsubapi.com"],
+	  "factors":{"ppsubapi.com":0.9},
 	  "usage_bootstrap":true,
 	  "proxy_url":"http://host.docker.internal:7897",
 	  "proxy_fallback_urls":["http://host.docker.internal:7890"],
@@ -51,6 +52,9 @@ func TestLoadConfigAllowsOptionalRuntimeSettings(t *testing.T) {
 	}
 	if _, ok := config.SyncHosts["xixiapi.io"]; !ok {
 		t.Fatalf("sync_hosts missing Lucen host: %+v", config.SyncHosts)
+	}
+	if factor, host, err := config.factorForBaseURL("https://ppsubapi.com"); err != nil || factor != 0.9 || host != "ppsubapi.com" {
+		t.Fatalf("factorForBaseURL() = %v, %q, %v", factor, host, err)
 	}
 }
 

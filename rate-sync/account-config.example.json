@@ -6,10 +6,12 @@
   "sync_hosts": [
     "www.codexapis.com",
     "xixiapi.io",
-    "lucen.cc"
+    "lucen.cc",
+    "ppsubapi.com"
   ],
   "factors": {
     "lucen.cc": 0.9,
-    "xixiapi.io": 0.9
+    "xixiapi.io": 0.9,
+    "ppsubapi.com": 0.9
   }
 }
