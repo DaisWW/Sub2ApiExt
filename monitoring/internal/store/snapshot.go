@@ -47,7 +47,7 @@ WITH recent_account_usage AS MATERIALIZED (
     JOIN channels c ON c.id = cg.channel_id
     WHERE LOWER(TRIM(c.status)) = 'active'
 )
-SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, a.priority, a.credentials,
+SELECT a.id, a.name, a.platform, a.type, a.status, a.schedulable, COALESCE(a.priority, 50), a.credentials,
        a.updated_at,
        persisted_target.source_fingerprint, persisted_target.source_updated_at,
        a.proxy_id, p.protocol, p.host, p.port, p.username, p.password, p.status,
@@ -100,7 +100,8 @@ LEFT JOIN LATERAL (
               LOWER(BTRIM(COALESCE(oe.error_phase, ''))) IN ('account_auth', 'network', 'upstream')
               OR LOWER(BTRIM(COALESCE(oe.error_source, ''))) IN ('upstream_http', 'upstream_network')
           )
-          AND COALESCE(NULLIF(oe.upstream_status_code, 0), oe.status_code, 0) <> 429
+          AND COALESCE(oe.upstream_status_code, 0) <> 429
+          AND COALESCE(oe.status_code, 0) <> 429
         UNION ALL
         SELECT persisted_target.last_channel_error_at,
                NULLIF(BTRIM(persisted_target.last_channel_error_class), ''),
@@ -135,11 +136,12 @@ SELECT g.id, g.name, g.platform, g.status, g.updated_at,
            WHERE cg.group_id = g.id
              AND LOWER(TRIM(c.status)) = 'active'
        ), latest_aggregate.checked_at, latest_aggregate.status,
+       latest_aggregate.health_reason,
        latest_aggregate.latency_ms, latest_aggregate.first_byte_ms,
        latest_aggregate.message
 FROM groups g
 LEFT JOIN LATERAL (
-    SELECT mc.checked_at, mc.status, mc.latency_ms, mc.first_byte_ms, mc.message
+    SELECT mc.checked_at, mc.status, mc.health_reason, mc.latency_ms, mc.first_byte_ms, mc.message
     FROM monitoring_checks mc
     WHERE mc.target_key = 'group:' || g.id::text
       AND mc.kind = 'group' AND mc.source = 'aggregate'
@@ -218,6 +220,7 @@ type groupSnapshotRow struct {
 	updatedAt                                        sql.NullTime
 	lastAggregateAt                                  sql.NullTime
 	lastAggregateStatus                              sql.NullString
+	lastAggregateHealthReason                        sql.NullString
 	lastAggregateLatencyMs, lastAggregateFirstByteMs sql.NullInt64
 	lastAggregateMessage                             sql.NullString
 	hasActiveChannel                                 bool
@@ -234,6 +237,7 @@ func (s *Store) loadGroups(ctx context.Context, groups map[int64]*model.Group) e
 		if err := rows.Scan(
 			&row.groupID, &row.name, &row.platform, &row.status, &row.updatedAt,
 			&row.hasActiveChannel, &row.lastAggregateAt, &row.lastAggregateStatus,
+			&row.lastAggregateHealthReason,
 			&row.lastAggregateLatencyMs, &row.lastAggregateFirstByteMs,
 			&row.lastAggregateMessage,
 		); err != nil {
@@ -273,6 +277,7 @@ func mergeGroupSnapshotRow(row groupSnapshotRow, groups map[int64]*model.Group) 
 		group.LastAggregateAt = nil
 	}
 	group.LastAggregateStatus = strings.TrimSpace(row.lastAggregateStatus.String)
+	group.LastAggregateHealthReason = strings.TrimSpace(row.lastAggregateHealthReason.String)
 	if row.lastAggregateLatencyMs.Valid {
 		value := int(row.lastAggregateLatencyMs.Int64)
 		group.LastAggregateLatencyMs = &value
@@ -590,9 +595,7 @@ func buildSnapshot(accounts map[int64]*model.Account, groups map[int64]*model.Gr
 		copy.AccountIDs = filterAccountIDs(group.AccountIDs, enabledAccounts)
 		copy.Members = filterGroupMembers(*group, enabledAccounts)
 		copy.ProbeEnabled = groupProbeEnabled(copy, enabledAccounts)
-		fingerprintGroup := *group
-		fingerprintGroup.ProbeEnabled = copy.ProbeEnabled
-		copy.SourceFingerprint = groupSourceFingerprint(fingerprintGroup, accounts)
+		copy.SourceFingerprint = groupSourceFingerprint(*group, accounts)
 		activeGroups[id] = &copy
 	}
 

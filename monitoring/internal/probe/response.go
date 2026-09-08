@@ -39,6 +39,13 @@ func (p *Prober) doRequest(client *http.Client, request *http.Request, result mo
 		result.Status = model.StatusOperational
 		return result
 	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		result.Status = model.StatusDegraded
+		result.HealthReason = model.HealthReasonRateLimited
+		result.ErrorClass = model.HealthReasonRateLimited
+		result.Message = "上游阶段性限速（HTTP 429）"
+		return result
+	}
 	result.Status = model.StatusFailed
 	result.ErrorClass = "upstream"
 	result.Message = responseMessage(response.StatusCode)

@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS monitoring_checks (
     entity_id BIGINT NOT NULL,
     group_id BIGINT,
     status TEXT NOT NULL,
+    health_reason TEXT NOT NULL DEFAULT '',
     latency_ms INTEGER,
     first_byte_ms INTEGER,
     status_code INTEGER,
@@ -65,6 +66,8 @@ CREATE TABLE IF NOT EXISTS monitoring_checks (
 );
 ALTER TABLE monitoring_checks
     ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'probe';
+ALTER TABLE monitoring_checks
+    ADD COLUMN IF NOT EXISTS health_reason TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS monitoring_checks_target_time_idx
     ON monitoring_checks (target_key, checked_at DESC);
 CREATE INDEX IF NOT EXISTS monitoring_checks_time_idx

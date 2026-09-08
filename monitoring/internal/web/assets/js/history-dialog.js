@@ -52,12 +52,14 @@ export class HistoryDialog {
     const groupHistory = String(target || '').startsWith('group:');
     setAccountColumnVisible(groupHistory);
     const successful = items.filter(isSuccessful).length;
+    const rateLimited = items.filter((item) => item?.health_reason === 'rate_limited').length;
     const availability = items.length ? successful * 100 / items.length : null;
     const availabilityLabel = groupHistory ? '真实请求可用率' : '记录可用率';
     const availabilityValue = availability === null ? '—' : formatPct(availability);
     $('#historySummary').innerHTML = `
       <span>最近 24 小时 · ${groupHistory ? '分组真实请求记录' : '账户健康记录'} ${items.length}</span>
       <span>${availabilityLabel} ${availabilityValue}</span>
+      ${rateLimited ? `<span>阶段性限速 ${rateLimited} 条</span>` : ''}
       <span>${groupHistory ? '每条真实请求标注实际经由账户' : '真实请求为首字，主动探测为首字节近似值'}</span>`;
     $('#historyBody').innerHTML = items.length
       ? items.map((item) => renderHistoryRow(item, groupHistory)).join('')
@@ -84,8 +86,10 @@ function renderHistoryRow(item, groupHistory) {
   const errorDetail = status === 'failed'
     ? `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>`
     : '';
+  const reason = historyReasonLabel(item?.health_reason);
+  const reasonDetail = reason ? `<small class="history-reason">${escapeHTML(reason)}</small>` : '';
   return `<tr>
-    <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small>${errorDetail}</td>
+    <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small>${reasonDetail}${errorDetail}</td>
     ${groupHistory ? `<td class="history-account">${escapeHTML(account)}</td>` : ''}
     <td class="latency-value${firstByteTone ? ` ${firstByteTone}` : ''}">${formatMs(item.first_byte_ms)}</td>
     <td class="latency-value${latencyTone ? ` ${latencyTone}` : ''}">${formatMs(item.latency_ms)}</td>
@@ -107,11 +111,19 @@ function displayHistoryStatus(item) {
   const normalized = normalizeStatus(item?.status);
   if (normalized === 'failed' || normalized === 'error' || normalized === 'disabled') return 'failed';
   if (normalized === 'unknown') return 'unknown';
+  if (item?.health_reason === 'rate_limited') return 'degraded';
   if (item?.kind === 'group') return normalized === 'degraded' ? 'degraded' : 'operational';
   const latency = Number(item?.latency_ms);
   if (Number.isFinite(latency) && latency > 0) {
     return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
   }
-  if (normalized === 'degraded') return 'degraded';
+	if (normalized === 'degraded') return 'degraded';
 	return 'operational';
+}
+
+function historyReasonLabel(reason) {
+  if (reason === 'rate_limited') return '阶段性限速';
+  if (reason === 'slow') return '延迟偏高';
+  if (reason === 'upstream_error') return '上游错误';
+  return '';
 }

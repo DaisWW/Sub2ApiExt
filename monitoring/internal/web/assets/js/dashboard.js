@@ -172,6 +172,11 @@ export class DashboardPanel {
     return (this.dashboard.targets || [])
       .filter((target) => target.kind === this.filter)
       .sort((left, right) => {
+        if (this.filter === 'account') {
+          const leftPriority = parsePriority(left.priority);
+          const rightPriority = parsePriority(right.priority);
+          if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+        }
         return String(left.name || '').trim().localeCompare(String(right.name || '').trim(), 'zh-CN')
           || String(left.key).localeCompare(String(right.key), 'zh-CN');
       });
@@ -182,7 +187,8 @@ export class DashboardPanel {
     const firstByte = stats.first_byte || {};
     const latency = stats.latency || {};
     const status = normalizeStatus(item.status);
-    const displayStatus = displayHealthStatus(item, status);
+    const currentHealth = item.current_health || {};
+    const displayStatus = displayHealthStatus(item, status, null, null, item.health_reason);
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
     const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
@@ -191,12 +197,13 @@ export class DashboardPanel {
     const recentSamples = Array.isArray(item.recent_samples) ? item.recent_samples : [];
     const currentSample = recentSamples[recentSamples.length - 1];
     const currentGridStatus = currentSample
-      ? displayHealthStatus(item, normalizeStatus(currentSample.status), currentSample.latency_ms, currentSample.checked_at)
+      ? displayHealthStatus(item, normalizeStatus(currentSample.status), currentSample.latency_ms, currentSample.checked_at, currentSample.health_reason)
       : displayStatus;
     const availabilityTone = availabilityToneForStatus(currentGridStatus);
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
+    const priority = item.kind === 'account' ? parsePriority(item.priority, null) : null;
     const activeUsers = this.#activityLoaded ? (this.#activeUsers.get(item.key) || 0) : null;
     const activeUsersValue = activeUsers === null ? '—' : `${formatCount(activeUsers)} 人`;
     const activeRequests = this.#activityLoaded ? (this.#activeRequests.get(item.key) || 0) : null;
@@ -224,6 +231,8 @@ export class DashboardPanel {
     const note = targetNote
       ? `<div class="target-note">${escapeHTML(targetNote)}</div>`
       : '';
+    const currentHealthNote = renderCurrentHealth(currentHealth, item);
+    const routeNote = renderRouteState(item);
     const evidenceAgeLabel = item.stale && item.latest_source
       ? `沿用最近${staleLabel(item, status)}`
       : '';
@@ -239,16 +248,19 @@ export class DashboardPanel {
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
             <div class="target-platform">${escapeHTML(item.platform || 'mixed')}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
             ${note}
+            ${routeNote}
           </div>
           <div class="target-head-meta">
+            ${priority !== null ? `<span class="account-priority" title="数值越小，路由优先级越高">优先级 ${priority}</span>` : ''}
             ${currentRate ? `<span class="current-rate" title="${currentRateTitle}">${currentRateLabel} ${currentRate}</span>` : ''}
-            <span class="status-badge ${statusClass(displayStatus)}" title="${escapeHTML(statusTitle)}">${targetStatusLabel(displayStatus)}</span>
+            <span class="status-badge ${statusClass(displayStatus)}" title="${escapeHTML(statusTitle)}">${targetStatusLabel(displayStatus, item.health_reason)}</span>
           </div>
         </div>
         <div class="availability">
           <span class="availability-label">${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
         </div>
+        ${currentHealthNote}
         <div class="target-live${item.kind === 'group' ? ' target-live-group' : ''}">
           <div class="target-live-metric" title="${escapeHTML(activeUsersTitle)}">
             <span class="target-live-label">${formatActivityWindow(this.#activityWindowSeconds)}活跃用户</span>
@@ -298,6 +310,14 @@ function normalizeCount(value) {
   return Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0;
 }
 
+function parsePriority(value, fallback = Number.MAX_SAFE_INTEGER) {
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) {
+    return fallback;
+  }
+  const priority = Number(value);
+  return Number.isFinite(priority) && priority >= 0 ? Math.trunc(priority) : fallback;
+}
+
 function normalizeWindowSeconds(value) {
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? seconds : 300;
@@ -313,7 +333,7 @@ function formatCurrentRate(value) {
   return Number.isFinite(rate) ? rate.toFixed(4) : '';
 }
 
-function displayHealthStatus(item, status, sampleLatencyMs = null, sampleCheckedAt = null) {
+function displayHealthStatus(item, status, sampleLatencyMs = null, sampleCheckedAt = null, reason = '') {
   if (status === 'failed' || status === 'error') return 'failed';
   if (status === 'disabled') return 'failed';
   if (status === 'unknown') {
@@ -331,6 +351,7 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
       ? 'failed'
       : 'unknown';
   }
+  if (reason === 'rate_limited' && (status === 'operational' || status === 'degraded')) return 'degraded';
   // Group status is already the account aggregate. Its latency is diagnostic;
   // deriving the color again could turn an operational mixed group yellow.
   if (item?.kind === 'group') return status === 'degraded' ? 'degraded' : 'operational';
@@ -368,8 +389,9 @@ function isSuccessfulStatus(status) {
   return normalized === 'operational' || normalized === 'degraded';
 }
 
-function healthLabel(status) {
+function healthLabel(status, reason = '') {
   if (status === 'failed' || status === 'error') return '错误/不可用';
+  if (reason === 'rate_limited') return '可用但阶段性限速';
   if (status === 'degraded') return '可用但延迟高';
   if (status === 'unknown') return '待确认';
   return '可用';
@@ -402,14 +424,14 @@ function renderStatusHistory(samples, item) {
     const successful = sampleStatus === 'operational' || sampleStatus === 'degraded';
     const failed = sampleStatus === 'failed' || sampleStatus === 'error';
     const displaySampleStatus = sample?.source === 'source_change' && sampleStatus === 'unknown'
-      ? displayHealthStatus(item, normalizeStatus(item?.status), sample?.latency_ms, sample?.checked_at)
-      : displayHealthStatus(item, sampleStatus, sample?.latency_ms, sample?.checked_at);
+      ? displayHealthStatus(item, normalizeStatus(item?.status), sample?.latency_ms, sample?.checked_at, sample?.health_reason)
+      : displayHealthStatus(item, sampleStatus, sample?.latency_ms, sample?.checked_at, sample?.health_reason);
     const carried = Boolean(sample?.carried_from) && (failed || successful);
     const label = carried
-      ? `截至 ${formatTime(sample?.checked_at)} · 无新请求，沿用 ${formatTime(sample?.carried_from)} 的${healthLabel(displaySampleStatus)}状态 · ${sourceLabel(sample?.source)}`
+      ? `截至 ${formatTime(sample?.checked_at)} · 无新请求，沿用 ${formatTime(sample?.carried_from)} 的${healthLabel(displaySampleStatus, sample?.health_reason)}状态 · ${sourceLabel(sample?.source)}`
       : failed || successful
-      ? `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus)} · ${sourceLabel(sample?.source)}`
-      : `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus)}`;
+      ? `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus, sample?.health_reason)} · ${sourceLabel(sample?.source)}`
+      : `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus, sample?.health_reason)}`;
     const tone = statusTone(displaySampleStatus);
     const classes = [tone, carried ? 'carried' : ''].filter(Boolean).join(' ');
     return `<i class="${classes}" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
@@ -426,7 +448,7 @@ function statusHistoryLegend(includeNeutral = false) {
   const neutral = includeNeutral ? '<span><i class="neutral"></i>待确认</span>' : '';
   return `<div class="status-history-legend" aria-label="状态图例">
     <span><i class="ok"></i>可用</span>
-    <span><i class="warn"></i>可用但延迟高</span>
+    <span><i class="warn"></i>可用但需关注（限速/延迟）</span>
     <span><i class="bad"></i>错误/不可用</span>
     ${neutral}
   </div>`;
@@ -462,6 +484,40 @@ function renderMetric(label, value, help = '', tone = '') {
   return `<div><div class="metric-label"${title}>${label}</div><div class="metric-value${toneClass}">${value}</div></div>`;
 }
 
+function renderCurrentHealth(health, item) {
+  const samples = normalizeCount(health?.samples);
+  if (!samples) {
+    return '<div class="current-health current-health-empty">当前窗口无新证据，状态沿用最近历史证据</div>';
+  }
+  const status = normalizeStatus(health?.status);
+  const reason = String(health?.reason || '').trim();
+  const label = healthLabel(status, reason);
+  const successful = normalizeCount(health?.successful);
+  const attempts = normalizeCount(health?.attempts) || samples;
+  const rateLimited = normalizeCount(health?.rate_limited);
+  const hardFailures = normalizeCount(health?.hard_failures);
+  const confidence = health?.confidence === 'low' ? ' · 低置信度' : '';
+  const details = [`成功 ${successful}/${samples}`];
+  if (rateLimited) details.push(`429 尝试 ${rateLimited}（${formatPct(health?.rate_limit_rate)}）`);
+  if (hardFailures) details.push(`硬失败 ${hardFailures}`);
+  if (attempts > samples && !rateLimited) details.push(`上游尝试 ${attempts}`);
+  if (item?.kind === 'group' && normalizeCount(health?.affected_accounts)) {
+    details.push(`受影响账户 ${normalizeCount(health.affected_accounts)}/${normalizeCount(health.member_accounts)}`);
+  }
+  const latency = health?.latency?.p95_ms;
+  if (latency != null) details.push(`成功 P95 ${formatMs(latency)}`);
+  return `<div class="current-health current-health-${status}" title="当前窗口按最终请求结果统计；429 单独按上游尝试统计">
+    <span>当前 5 分钟：<strong>${escapeHTML(label)}</strong>${confidence}</span>
+    <span class="current-health-detail">${escapeHTML(details.join(' · '))}</span>
+  </div>`;
+}
+
+function renderRouteState(item) {
+  if (item?.route_configured !== false) return '';
+  const message = String(item?.route_message || '').trim() || '当前没有可调度路由';
+  return `<div class="route-note">路由状态：${escapeHTML(message)}</div>`;
+}
+
 function staleLabel(item, status) {
   if ((status === 'failed' || status === 'error') && item?.latest_source === 'request_error') return '请求错误状态';
   if (status === 'degraded') return '延迟状态';
@@ -477,8 +533,9 @@ function displayEvidenceMessage(item, value) {
   return message;
 }
 
-function targetStatusLabel(displayStatus) {
+function targetStatusLabel(displayStatus, reason = '') {
   if (displayStatus === 'failed') return '当前错误/不可用';
+  if (reason === 'rate_limited') return '当前可用但阶段性限速';
   if (displayStatus === 'degraded') return '当前可用但延迟高';
   if (displayStatus === 'unknown') return '当前待确认';
   return '当前可用';

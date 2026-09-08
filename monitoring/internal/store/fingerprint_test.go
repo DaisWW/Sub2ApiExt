@@ -29,6 +29,10 @@ func TestAccountSourceFingerprintIgnoresActivityAndTokenRefresh(t *testing.T) {
 	if got := accountSourceFingerprint(account); got != first {
 		t.Fatalf("bookkeeping changed source fingerprint: %s != %s", got, first)
 	}
+	account.Priority = 100
+	if got := accountSourceFingerprint(account); got != first {
+		t.Fatalf("priority change changed source fingerprint: %s != %s", got, first)
+	}
 
 	account.Credentials["model"] = "gpt-other"
 	if got := accountSourceFingerprint(account); got == first {
@@ -47,5 +51,15 @@ func TestGroupSourceFingerprintIgnoresRequestCount(t *testing.T) {
 	group.Members[0].RequestCount = 999
 	if got := groupSourceFingerprint(group, accounts); got != first {
 		t.Fatalf("request count changed group fingerprint: %s != %s", got, first)
+	}
+	group.Members[0].GroupPriority = 99
+	account.Priority = 100
+	if got := groupSourceFingerprint(group, accounts); got != first {
+		t.Fatalf("routing priority change changed group fingerprint: %s != %s", got, first)
+	}
+	group.HasActiveChannel = false
+	group.ProbeEnabled = false
+	if got := groupSourceFingerprint(group, accounts); got != first {
+		t.Fatalf("route metadata changed group health fingerprint: %s != %s", got, first)
 	}
 }

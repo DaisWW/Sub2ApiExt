@@ -52,7 +52,7 @@ func TestApplyLatestTargetStateSanitizesGroupMessage(t *testing.T) {
 	}
 }
 
-func TestApplyLatestTargetStateMarksUnroutableGroupFailed(t *testing.T) {
+func TestApplyLatestTargetStateKeepsHealthSeparateFromRoute(t *testing.T) {
 	now := time.Now().UTC()
 	group := model.DashboardTarget{Target: model.Target{
 		Kind: model.KindGroup, SourceStatus: "active", ProbeEnabled: false,
@@ -62,14 +62,16 @@ func TestApplyLatestTargetStateMarksUnroutableGroupFailed(t *testing.T) {
 		sql.NullString{String: "history", Valid: true}, sql.NullString{},
 		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{Time: now.Add(-time.Minute), Valid: true},
 		now, time.Hour)
-	if group.Status != model.StatusFailed {
-		t.Fatalf("unroutable active group status = %q, want failed", group.Status)
+	if group.Status != model.StatusOperational || group.Available != true {
+		t.Fatalf("group health = %+v, want operational and available", group.Target)
 	}
-	if group.LatestMessage != "无启用渠道或可调度候选" {
-		t.Fatalf("unroutable group message = %q", group.LatestMessage)
+	group.RouteConfigured = false
+	group.RouteMessage = "无启用渠道"
+	if group.RouteConfigured || group.RouteMessage != "无启用渠道" {
+		t.Fatalf("route state = %+v", group.Target)
 	}
-	if group.LastCheckedAt != nil || group.LatestSource != "" {
-		t.Fatalf("old evidence must not override current routing state: %+v", group.Target)
+	if group.LastCheckedAt == nil || group.LatestSource != "history" {
+		t.Fatalf("health evidence must remain visible: %+v", group.Target)
 	}
 
 	account := model.DashboardTarget{Target: model.Target{Kind: model.KindAccount, ProbeEnabled: false}}
@@ -133,31 +135,31 @@ func TestApplyLatestTargetStateExplainsErrorAccountRecovery(t *testing.T) {
 	}
 }
 
-func TestUnroutableActiveGroupContributesZeroAvailability(t *testing.T) {
+func TestGroupRouteStateDoesNotOverrideHealthAvailability(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{
 		Kind: model.KindGroup, SourceStatus: "active", ProbeEnabled: false, Status: model.StatusFailed,
-	}, Stats: model.TargetStats{Availability: 100}}
+	}, Stats: model.TargetStats{Samples: 2, Successful: 2, Availability: 100}}
 	if !targetContributesAvailability(target) {
-		t.Fatal("unroutable active group must be included in availability denominator")
+		t.Fatal("group health evidence must contribute independently of route configuration")
 	}
 	var summary model.Summary
 	addDashboardSummary(&summary, target)
-	if summary.Failed != 1 || summary.Availability != 0 {
-		t.Fatalf("unroutable group summary = %+v, want failed with zero availability contribution", summary)
+	if summary.Failed != 1 || summary.Availability != 100 {
+		t.Fatalf("group summary = %+v, want observed health availability", summary)
 	}
 }
 
-func TestErrorAccountDoesNotContributeAvailability(t *testing.T) {
+func TestErrorAccountWithHealthEvidenceContributesAvailability(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{
 		Kind: model.KindAccount, SourceStatus: "error", ProbeEnabled: true,
 	}, Stats: model.TargetStats{Samples: 2, Successful: 2, Availability: 100}}
-	if targetContributesAvailability(target) {
-		t.Fatal("error account must not contribute to business availability")
+	if !targetContributesAvailability(target) {
+		t.Fatal("health evidence from an error account should contribute to availability")
 	}
 	var summary model.Summary
 	addDashboardSummary(&summary, target)
-	if summary.Availability != 0 || summary.Targets != 1 {
-		t.Fatalf("error account summary = %+v, want no availability contribution", summary)
+	if summary.Availability != 100 || summary.Targets != 1 {
+		t.Fatalf("error account summary = %+v, want health availability contribution", summary)
 	}
 }
 
@@ -172,12 +174,12 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"JOIN visible_targets visible",
 		"schedulable = TRUE",
 		"LOWER(TRIM(status)) IN ('active', 'error')",
+		"LOWER(TRIM(accounts.status)) = 'active'",
 		"percentile_cont(0.95)",
 		"samples.status IN ('operational','degraded') AND samples.first_byte_ms IS NOT NULL",
 		"samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL",
 		"CASE WHEN usage.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
 		"period_usage AS MATERIALIZED",
-		"eligible_usage AS MATERIALIZED",
 		"latest_account_usage AS MATERIALIZED",
 		"account_error_events AS MATERIALIZED",
 		"targets.kind = 'account' AND mc.source IN ('probe', 'request_error')",
@@ -219,8 +221,15 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"latest_evidence_inputs",
 		"WHEN t.kind = 'group' THEN g.rate_multiplier::double precision",
 		"WHEN t.kind = 'account' THEN a.rate_multiplier::double precision",
+		"CASE WHEN t.kind = 'account' THEN COALESCE(a.priority, 50) END",
+		"CASE WHEN t.kind = 'account' THEN COALESCE(a.priority, 50) ELSE 0 END",
 		"LEFT JOIN accounts a ON t.kind = 'account' AND a.id = t.entity_id AND a.deleted_at IS NULL",
 		"LEFT JOIN groups g ON t.kind = 'group' AND g.id = t.entity_id AND g.deleted_at IS NULL",
+		"NULLIF(BTRIM(errors.client_request_id), '')",
+		"NULLIF(BTRIM(errors.request_id), '')",
+		"REGEXP_REPLACE",
+		"LOWER(REGEXP_REPLACE",
+		"success.created_at >= errors.error_at",
 	} {
 		if !strings.Contains(dashboardQuery, fragment) {
 			t.Fatalf("dashboard query missing %q", fragment)
@@ -228,6 +237,20 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	}
 	if strings.Contains(dashboardQuery, "MAX(latency_ms)") {
 		t.Fatal("dashboard query must not expose a single latency outlier as P95")
+	}
+	if strings.Contains(dashboardQuery, "WHEN NULLIF(BTRIM(errors.request_id), '') IS NULL") {
+		t.Fatal("dashboard query must prefer client_request_id before request_id")
+	}
+	if !strings.Contains(dashboardQuery, "WHEN errors.upstream_status_code = 429") ||
+		!strings.Contains(dashboardQuery, "OR errors.status_code = 429") {
+		t.Fatal("dashboard query must classify 429 from either status column")
+	}
+	if !strings.Contains(dashboardQuery, "THEN 'usage:' || ul.id::text") ||
+		!strings.Contains(dashboardQuery, "THEN 'error:' || errors.id::text") {
+		t.Fatal("empty request IDs must use table-local keys and never match across tables")
+	}
+	if count := strings.Count(dashboardQuery, "ELSE 'request:' || LOWER(REGEXP_REPLACE"); count != 2 {
+		t.Fatalf("non-empty request IDs must use one cross-table key format, found %d sides", count)
 	}
 	if strings.Contains(dashboardQuery, "prior_samples AS MATERIALIZED") {
 		t.Fatal("dashboard query must not scan checks before the fixed 24-hour window")

@@ -56,12 +56,15 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 	}
 	var allLatency, allFirstByte []int
 	var healthyLatency, healthyFirstByte []int
-	operational, degraded, healthy, failed, unknown := 0, 0, 0, 0, 0
+	operational, degraded, healthy, failed, unknown, rateLimited := 0, 0, 0, 0, 0, 0
 	for _, member := range members {
 		result, exists := resultByAccount[member.AccountID]
 		status := model.StatusUnknown
 		if exists {
-			status = result.Status
+			status = memberStatus(result)
+			if result.HealthReason == model.HealthReasonRateLimited {
+				rateLimited++
+			}
 			// 保留失败样本耗时供全失败分组诊断；混合分组最终只使用健康路径。
 			if result.LatencyMs != nil {
 				allLatency = append(allLatency, *result.LatencyMs)
@@ -101,13 +104,14 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 	}
 	status := groupStatus(operational, degraded, failed, unknown)
 	result := model.ProbeResult{
-		TargetKey: key,
-		Kind:      model.KindGroup,
-		EntityID:  group.ID,
-		Status:    status,
-		CheckedAt: now,
-		Message:   routingGroupMessage(group, status, len(members), healthy, failed, unknown),
-		Source:    "aggregate",
+		TargetKey:    key,
+		Kind:         model.KindGroup,
+		EntityID:     group.ID,
+		Status:       status,
+		CheckedAt:    now,
+		HealthReason: groupHealthReason(status, rateLimited, failed),
+		Message:      routingGroupMessage(group, status, len(members), healthy, failed, unknown, rateLimited),
+		Source:       "aggregate",
 	}
 	latencySamples := allLatency
 	firstByteSamples := allFirstByte
@@ -127,6 +131,20 @@ func AggregateGroup(key string, group model.Group, results []model.ProbeResult, 
 		result.FirstByteMs = &value
 	}
 	return result
+}
+
+func memberStatus(result model.ProbeResult) string {
+	if result.HealthReason == model.HealthReasonRateLimited && result.Status == model.StatusOperational {
+		return model.StatusDegraded
+	}
+	return result.Status
+}
+
+func groupHealthReason(status string, rateLimited, failed int) string {
+	if rateLimited > 0 && (status != model.StatusFailed || failed == rateLimited) {
+		return model.HealthReasonRateLimited
+	}
+	return ""
 }
 
 func normalizeMembers(group model.Group, results []model.ProbeResult) []model.GroupMember {
@@ -172,9 +190,9 @@ func groupStatus(operational, degraded, failed, unknown int) string {
 	}
 }
 
-func routingGroupMessage(group model.Group, status string, total, healthy, failed, unknown int) string {
+func routingGroupMessage(group model.Group, status string, total, healthy, failed, unknown, rateLimited int) string {
 	if len(group.Members) == 0 {
-		return groupMessage(total, healthy)
+		return groupMessage(total, healthy, rateLimited)
 	}
 	if status == model.StatusFailed {
 		return fmt.Sprintf("当前无可用候选：%d/%d", healthy, total)
@@ -182,20 +200,28 @@ func routingGroupMessage(group model.Group, status string, total, healthy, faile
 	if status == model.StatusUnknown {
 		return fmt.Sprintf("无法确认可用路由：%d/%d 个候选可用；%d 个账户待验证", healthy, total, unknown)
 	}
-	if failed == 0 && unknown == 0 {
+	if failed == 0 && unknown == 0 && rateLimited == 0 {
 		return "全部账户正常"
 	}
-	return fmt.Sprintf("当前仍可用：%d/%d 个账户；异常 %d，待验证 %d",
+	message := fmt.Sprintf("当前仍可用：%d/%d 个账户；异常 %d，待验证 %d",
 		healthy, total, failed, unknown)
+	if rateLimited > 0 {
+		message += fmt.Sprintf("；阶段性限速 %d", rateLimited)
+	}
+	return message
 }
 
 // groupMessage retains the historical helper used by callers without routing
 // metadata. New snapshots use routingGroupMessage above.
-func groupMessage(total, healthy int) string {
-	if total == healthy {
+func groupMessage(total, healthy, rateLimited int) string {
+	if total == healthy && rateLimited == 0 {
 		return "全部账户正常"
 	}
-	return formatCount(healthy) + "/" + formatCount(total) + " 个账户正常"
+	message := formatCount(healthy) + "/" + formatCount(total) + " 个账户正常"
+	if rateLimited > 0 {
+		message += "；阶段性限速"
+	}
+	return message
 }
 
 func formatCount(n int) string {

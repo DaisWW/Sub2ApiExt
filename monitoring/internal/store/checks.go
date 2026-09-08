@@ -32,7 +32,7 @@ WITH authorized_target AS (
 ), combined AS (
 SELECT monitoring_checks.target_key, monitoring_checks.kind, monitoring_checks.entity_id, monitoring_checks.group_id,
        NULL::bigint AS account_id, '' AS account_name,
-       monitoring_checks.status, monitoring_checks.latency_ms, monitoring_checks.first_byte_ms,
+       monitoring_checks.status, monitoring_checks.health_reason, monitoring_checks.latency_ms, monitoring_checks.first_byte_ms,
        monitoring_checks.status_code, monitoring_checks.error_class, monitoring_checks.message,
        monitoring_checks.checked_at, monitoring_checks.source
 FROM monitoring_checks
@@ -48,6 +48,7 @@ SELECT 'account:' || usage_logs.account_id::text, 'account', usage_logs.account_
            ELSE '账户 #' || usage_logs.account_id::text
        END),
        CASE WHEN usage_logs.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
+       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'slow' ELSE '' END,
        usage_logs.duration_ms, usage_logs.first_token_ms, NULL::integer, '', '真实请求历史', usage_logs.created_at, 'history'
 FROM usage_logs
 LEFT JOIN accounts a ON a.id = usage_logs.account_id
@@ -64,6 +65,7 @@ SELECT 'group:' || usage_logs.group_id::text, 'group', usage_logs.group_id, usag
            ELSE '账户 #' || usage_logs.account_id::text
        END),
        CASE WHEN usage_logs.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
+       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'slow' ELSE '' END,
        usage_logs.duration_ms, usage_logs.first_token_ms, NULL::integer, '', '真实请求历史', usage_logs.created_at, 'history'
 FROM usage_logs
 LEFT JOIN accounts a ON a.id = usage_logs.account_id
@@ -80,7 +82,7 @@ SELECT errors.target_key, 'account', errors.account_id, NULL::bigint,
            WHEN errors.account_id IS NULL THEN '未知账户'
            ELSE '账户 #' || errors.account_id::text
        END),
-       'failed',
+       'failed', 'upstream_error',
        NULL::integer, NULL::integer, errors.status_code, COALESCE(errors.error_class, ''),
        '真实请求报错', errors.created_at, 'request_error'
 FROM account_error_events errors
@@ -93,7 +95,7 @@ WHERE NOT EXISTS (
       AND consumed.checked_at = errors.created_at
 )
 )
-SELECT target_key, kind, entity_id, group_id, account_id, account_name, status, latency_ms, first_byte_ms,
+SELECT target_key, kind, entity_id, group_id, account_id, account_name, status, health_reason, latency_ms, first_byte_ms,
        status_code, error_class, message, checked_at, source
 FROM combined
 ORDER BY checked_at DESC,
@@ -110,12 +112,12 @@ func (s *Store) InsertResults(ctx context.Context, results []model.ProbeResult) 
 	}
 	defer tx.Rollback()
 	const query = `INSERT INTO monitoring_checks
-    (target_key, kind, entity_id, group_id, status, latency_ms, first_byte_ms, status_code, error_class, message, checked_at, source)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`
+    (target_key, kind, entity_id, group_id, status, health_reason, latency_ms, first_byte_ms, status_code, error_class, message, checked_at, source)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
 	for _, result := range results {
 		if _, err := tx.ExecContext(
 			ctx, query, result.TargetKey, result.Kind, result.EntityID, result.GroupID,
-			result.Status, result.LatencyMs, result.FirstByteMs, result.StatusCode,
+			result.Status, result.HealthReason, result.LatencyMs, result.FirstByteMs, result.StatusCode,
 			result.ErrorClass, result.Message, result.CheckedAt, result.Source,
 		); err != nil {
 			return fmt.Errorf("insert monitoring result: %w", err)
@@ -250,14 +252,16 @@ func scanProbeResults(rows *sql.Rows) ([]model.ProbeResult, error) {
 func scanProbeResult(rows *sql.Rows) (model.ProbeResult, error) {
 	var result model.ProbeResult
 	var groupID, accountID, latency, firstByte, statusCode sql.NullInt64
+	var healthReason sql.NullString
 	err := rows.Scan(
-		&result.TargetKey, &result.Kind, &result.EntityID, &groupID, &accountID, &result.AccountName, &result.Status,
+		&result.TargetKey, &result.Kind, &result.EntityID, &groupID, &accountID, &result.AccountName, &result.Status, &healthReason,
 		&latency, &firstByte, &statusCode, &result.ErrorClass, &result.Message,
 		&result.CheckedAt, &result.Source,
 	)
 	if err != nil {
 		return model.ProbeResult{}, err
 	}
+	result.HealthReason = healthReason.String
 	result.Message = sanitizeUpstreamMessage(result.Message)
 	if groupID.Valid {
 		value := groupID.Int64

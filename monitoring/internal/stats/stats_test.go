@@ -89,6 +89,34 @@ func TestAggregateGroupUsesAnyOperationalAccount(t *testing.T) {
 	}
 }
 
+func TestAggregateGroupKeepsHealthyFallbackOperationalWithRateLimitedPeer(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{ID: 40, Members: []model.GroupMember{
+		{AccountID: 1}, {AccountID: 2},
+	}}
+	got := AggregateGroup("group:40", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusDegraded, HealthReason: model.HealthReasonRateLimited},
+		{EntityID: 2, Status: model.StatusOperational},
+	}, now)
+	if got.Status != model.StatusOperational || got.HealthReason != model.HealthReasonRateLimited {
+		t.Fatalf("healthy fallback with throttled peer = %+v", got)
+	}
+	if !strings.Contains(got.Message, "阶段性限速") {
+		t.Fatalf("group message omitted rate-limit warning: %q", got.Message)
+	}
+}
+
+func TestAggregateGroupMarksOnlyRateLimitedRouteDegraded(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{ID: 41, AccountIDs: []int64{1}}
+	got := AggregateGroup("group:41", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusOperational, HealthReason: model.HealthReasonRateLimited},
+	}, now)
+	if got.Status != model.StatusDegraded || got.HealthReason != model.HealthReasonRateLimited {
+		t.Fatalf("rate-limited route = %+v, want degraded rate_limited", got)
+	}
+}
+
 func TestAggregateGroupMarksHealthyFallbackOperational(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	group := model.Group{
@@ -167,6 +195,48 @@ func TestAggregateGroupUsesDegradedWhenOnlySlowAccountWorks(t *testing.T) {
 	}, now)
 	if got.Status != model.StatusDegraded || got.LatencyMs == nil || *got.LatencyMs != 25_000 {
 		t.Fatalf("only slow usable account should make group degraded: %+v", got)
+	}
+}
+
+func TestWindowFromOutcomesMarksIntermittentRateLimitAsDegraded(t *testing.T) {
+	got := WindowFromOutcomes(8, 2, 0, []int{900, 1100, 1200, 1300, 1000, 1050, 1150, 1250}, DefaultHealthPolicy)
+	if got.Status != model.StatusDegraded || !got.Available || got.Reason != model.HealthReasonRateLimited {
+		t.Fatalf("rate-limited window = %+v, want available degraded rate_limited", got)
+	}
+	if got.SuccessRate != 100 || got.RateLimitRate != 20 || got.HardFailureRate != 0 || got.Attempts != 10 {
+		t.Fatalf("rate-limited ratios = %+v", got)
+	}
+	if got.Latency.P95Ms == nil || *got.Latency.P95Ms <= 0 {
+		t.Fatalf("successful latency metrics missing: %+v", got.Latency)
+	}
+}
+
+func TestWindowFromOutcomesKeepsSparseRateLimitOperationalWithLowConfidence(t *testing.T) {
+	got := WindowFromOutcomes(4, 1, 0, []int{900, 1100, 1200, 1300}, HealthPolicy{
+		MinimumSamples:        10,
+		RateLimitDegradePct:   10,
+		HardFailureDegradePct: 10,
+		SlowLatencyMs:         20_000,
+	})
+	if got.Status != model.StatusOperational || !got.Available {
+		t.Fatalf("sparse window = %+v, want available operational", got)
+	}
+	if got.Confidence != model.HealthConfidenceLow || got.RateLimitRate != 20 {
+		t.Fatalf("sparse window confidence/ratio = %+v", got)
+	}
+}
+
+func TestWindowFromOutcomesMarksAllRateLimitedAsFailed(t *testing.T) {
+	got := WindowFromOutcomes(0, 12, 0, nil, DefaultHealthPolicy)
+	if got.Status != model.StatusFailed || got.Available || got.Reason != model.HealthReasonRateLimited {
+		t.Fatalf("all rate-limited window = %+v, want unavailable failed rate_limited", got)
+	}
+}
+
+func TestWindowFromOutcomesPrefersHardFailureReason(t *testing.T) {
+	got := WindowFromOutcomes(8, 2, 2, []int{100, 200}, DefaultHealthPolicy)
+	if got.Status != model.StatusDegraded || got.Reason != model.HealthReasonUpstreamError {
+		t.Fatalf("mixed failure window = %+v, want upstream_error degradation", got)
 	}
 }
 

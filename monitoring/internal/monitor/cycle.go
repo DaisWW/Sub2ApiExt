@@ -26,13 +26,18 @@ const (
 	degradedLatencyMs         = 20_000
 )
 
+func groupIsActive(status string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "active")
+}
+
 type accountEvidence struct {
-	status      string
-	source      string
-	checkedAt   *time.Time
-	latencyMs   *int
-	firstByteMs *int
-	valid       bool
+	status       string
+	healthReason string
+	source       string
+	checkedAt    *time.Time
+	latencyMs    *int
+	firstByteMs  *int
+	valid        bool
 }
 
 func (s *Service) runCycle(ctx context.Context) error {
@@ -278,7 +283,7 @@ func latestAccountEvidence(account model.Account) accountEvidence {
 		probeEvidenceStatus(account.LastProbeStatus) &&
 		(evidence.checkedAt == nil || account.LastProbeAt.After(*evidence.checkedAt)) {
 		evidence = accountEvidence{
-			status: account.LastProbeStatus, source: "probe", checkedAt: account.LastProbeAt,
+			status: account.LastProbeStatus, healthReason: probeHealthReason(account), source: "probe", checkedAt: account.LastProbeAt,
 			latencyMs: account.LastProbeLatencyMs, firstByteMs: account.LastProbeFirstByteMs,
 			valid: probeEvidenceStatus(account.LastProbeStatus),
 		}
@@ -301,6 +306,16 @@ func accountEvidenceSourceUpdatedAt(account model.Account) *time.Time {
 		return account.SourceUpdatedAt
 	}
 	return account.UpdatedAt
+}
+
+func probeHealthReason(account model.Account) string {
+	if account.LastProbeStatusCode != nil && *account.LastProbeStatusCode == 429 {
+		return model.HealthReasonRateLimited
+	}
+	if strings.EqualFold(strings.TrimSpace(account.LastProbeErrorClass), model.HealthReasonRateLimited) {
+		return model.HealthReasonRateLimited
+	}
+	return ""
 }
 
 func evidenceTimeValid(value, changedAt *time.Time) bool {
@@ -344,15 +359,16 @@ func (b *cycleBatch) addPassiveAccount(account model.Account, evidence accountEv
 		return
 	}
 	result := model.ProbeResult{
-		TargetKey:   model.TargetKey(model.KindAccount, account.ID),
-		Kind:        model.KindAccount,
-		EntityID:    account.ID,
-		Status:      evidence.status,
-		LatencyMs:   evidence.latencyMs,
-		FirstByteMs: evidence.firstByteMs,
-		CheckedAt:   *evidence.checkedAt,
-		Message:     "近期存在真实请求",
-		Source:      "history",
+		TargetKey:    model.TargetKey(model.KindAccount, account.ID),
+		Kind:         model.KindAccount,
+		EntityID:     account.ID,
+		Status:       evidence.status,
+		HealthReason: evidence.healthReason,
+		LatencyMs:    evidence.latencyMs,
+		FirstByteMs:  evidence.firstByteMs,
+		CheckedAt:    *evidence.checkedAt,
+		Message:      "近期存在真实请求",
+		Source:       "history",
 	}
 	b.accountResults[account.ID] = result
 	b.observations = append(b.observations, result)
@@ -365,15 +381,16 @@ func (b *cycleBatch) addChannelError(account model.Account) {
 		return
 	}
 	result := model.ProbeResult{
-		TargetKey:  model.TargetKey(model.KindAccount, account.ID),
-		Kind:       model.KindAccount,
-		EntityID:   account.ID,
-		Status:     model.StatusFailed,
-		StatusCode: account.LastChannelErrorStatusCode,
-		ErrorClass: account.LastChannelErrorClass,
-		Message:    "真实请求报错，等待恢复探测",
-		CheckedAt:  *account.LastChannelErrorAt,
-		Source:     "request_error",
+		TargetKey:    model.TargetKey(model.KindAccount, account.ID),
+		Kind:         model.KindAccount,
+		EntityID:     account.ID,
+		Status:       model.StatusFailed,
+		HealthReason: model.HealthReasonUpstreamError,
+		StatusCode:   account.LastChannelErrorStatusCode,
+		ErrorClass:   account.LastChannelErrorClass,
+		Message:      "真实请求报错，等待恢复探测",
+		CheckedAt:    *account.LastChannelErrorAt,
+		Source:       "request_error",
 	}
 	b.accountResults[account.ID] = result
 	b.observations = append(b.observations, result)
@@ -385,14 +402,15 @@ func (b *cycleBatch) addCachedEvidence(accountID int64, evidence accountEvidence
 		return
 	}
 	b.accountResults[accountID] = model.ProbeResult{
-		TargetKey:   model.TargetKey(model.KindAccount, accountID),
-		Kind:        model.KindAccount,
-		EntityID:    accountID,
-		Status:      evidence.status,
-		LatencyMs:   evidence.latencyMs,
-		FirstByteMs: evidence.firstByteMs,
-		CheckedAt:   *evidence.checkedAt,
-		Source:      "cache",
+		TargetKey:    model.TargetKey(model.KindAccount, accountID),
+		Kind:         model.KindAccount,
+		EntityID:     accountID,
+		Status:       evidence.status,
+		HealthReason: evidence.healthReason,
+		LatencyMs:    evidence.latencyMs,
+		FirstByteMs:  evidence.firstByteMs,
+		CheckedAt:    *evidence.checkedAt,
+		Source:       "cache",
 	}
 }
 
@@ -406,7 +424,7 @@ func (b *cycleBatch) addProbeResults(results []model.ProbeResult) {
 
 func (b *cycleBatch) aggregateGroups(snapshot model.Snapshot, accounts map[int64]model.Account, now time.Time) {
 	for _, group := range snapshot.Groups {
-		if !group.ProbeEnabled {
+		if !groupIsActive(group.Status) {
 			continue
 		}
 		memberResults := b.groupMemberResults(group, accounts)
@@ -435,6 +453,9 @@ func groupAggregateNeeded(group model.Group) bool {
 
 func groupAggregateChanged(group model.Group, result model.ProbeResult) bool {
 	if group.LastAggregateStatus != result.Status || group.LastAggregateMessage != result.Message {
+		return true
+	}
+	if group.LastAggregateHealthReason != result.HealthReason {
 		return true
 	}
 	return !sameOptionalInt(group.LastAggregateLatencyMs, result.LatencyMs) ||

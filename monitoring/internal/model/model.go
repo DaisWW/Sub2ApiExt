@@ -20,6 +20,14 @@ const (
 	StatusError       = "error"
 	StatusUnknown     = "unknown"
 	StatusDisabled    = "disabled"
+
+	HealthReasonRateLimited   = "rate_limited"
+	HealthReasonSlow          = "slow"
+	HealthReasonUpstreamError = "upstream_error"
+	HealthReasonNoEvidence    = "no_evidence"
+
+	HealthConfidenceLow    = "low"
+	HealthConfidenceNormal = "normal"
 )
 
 // Account 是监控所需的最小账户快照。凭据不会由 HTTP 层返回，
@@ -88,13 +96,14 @@ type Group struct {
 	// SourceFingerprint and SourceUpdatedAt are monitoring-owned source
 	// identity and evidence watermark. UpdatedAt remains the upstream raw
 	// timestamp for compatibility and diagnostics.
-	SourceFingerprint        string     `json:"-"`
-	SourceUpdatedAt          *time.Time `json:"-"`
-	LastAggregateAt          *time.Time `json:"-"`
-	LastAggregateStatus      string     `json:"-"`
-	LastAggregateLatencyMs   *int       `json:"-"`
-	LastAggregateFirstByteMs *int       `json:"-"`
-	LastAggregateMessage     string     `json:"-"`
+	SourceFingerprint         string     `json:"-"`
+	SourceUpdatedAt           *time.Time `json:"-"`
+	LastAggregateAt           *time.Time `json:"-"`
+	LastAggregateStatus       string     `json:"-"`
+	LastAggregateHealthReason string     `json:"-"`
+	LastAggregateLatencyMs    *int       `json:"-"`
+	LastAggregateFirstByteMs  *int       `json:"-"`
+	LastAggregateMessage      string     `json:"-"`
 }
 
 type Snapshot struct {
@@ -103,11 +112,14 @@ type Snapshot struct {
 }
 
 type Target struct {
-	Key          string `json:"key"`
-	Kind         string `json:"kind"`
-	EntityID     int64  `json:"entity_id"`
-	Name         string `json:"name"`
-	Platform     string `json:"platform"`
+	Key      string `json:"key"`
+	Kind     string `json:"kind"`
+	EntityID int64  `json:"entity_id"`
+	Name     string `json:"name"`
+	Platform string `json:"platform"`
+	// Priority is the account's global routing priority. Groups do not have
+	// an account priority, so the field is omitted for group targets.
+	Priority     *int   `json:"priority,omitempty"`
 	SourceStatus string `json:"source_status"`
 	ProbeEnabled bool   `json:"probe_enabled"`
 	// RecoveryTriggerAt is set while a valid channel error has no later
@@ -116,6 +128,10 @@ type Target struct {
 	RecoveryTriggerAt *time.Time `json:"recovery_trigger_at,omitempty"`
 	LastCheckedAt     *time.Time `json:"last_checked_at,omitempty"`
 	Status            string     `json:"status"`
+	Available         bool       `json:"available"`
+	HealthReason      string     `json:"health_reason,omitempty"`
+	RouteConfigured   bool       `json:"route_configured"`
+	RouteMessage      string     `json:"route_message,omitempty"`
 	Stale             bool       `json:"stale"`
 	LatestSource      string     `json:"latest_source,omitempty"`
 	LatestMessage     string     `json:"latest_message,omitempty"`
@@ -124,20 +140,21 @@ type Target struct {
 }
 
 type ProbeResult struct {
-	TargetKey   string    `json:"target_key"`
-	Kind        string    `json:"kind"`
-	EntityID    int64     `json:"entity_id"`
-	GroupID     *int64    `json:"group_id,omitempty"`
-	AccountID   *int64    `json:"account_id,omitempty"`
-	AccountName string    `json:"account_name,omitempty"`
-	Status      string    `json:"status"`
-	LatencyMs   *int      `json:"latency_ms,omitempty"`
-	FirstByteMs *int      `json:"first_byte_ms,omitempty"`
-	StatusCode  *int      `json:"status_code,omitempty"`
-	ErrorClass  string    `json:"error_class,omitempty"`
-	Message     string    `json:"message,omitempty"`
-	CheckedAt   time.Time `json:"checked_at"`
-	Source      string    `json:"source"`
+	TargetKey    string    `json:"target_key"`
+	Kind         string    `json:"kind"`
+	EntityID     int64     `json:"entity_id"`
+	GroupID      *int64    `json:"group_id,omitempty"`
+	AccountID    *int64    `json:"account_id,omitempty"`
+	AccountName  string    `json:"account_name,omitempty"`
+	Status       string    `json:"status"`
+	HealthReason string    `json:"health_reason,omitempty"`
+	LatencyMs    *int      `json:"latency_ms,omitempty"`
+	FirstByteMs  *int      `json:"first_byte_ms,omitempty"`
+	StatusCode   *int      `json:"status_code,omitempty"`
+	ErrorClass   string    `json:"error_class,omitempty"`
+	Message      string    `json:"message,omitempty"`
+	CheckedAt    time.Time `json:"checked_at"`
+	Source       string    `json:"source"`
 }
 
 type MetricStats struct {
@@ -147,12 +164,44 @@ type MetricStats struct {
 }
 
 type TargetStats struct {
-	Samples      int         `json:"samples"`
-	Successful   int         `json:"successful"`
-	Errors       int         `json:"errors"`
-	Availability float64     `json:"availability"`
-	FirstByte    MetricStats `json:"first_byte"`
-	Latency      MetricStats `json:"latency"`
+	Samples         int         `json:"samples"`
+	Successful      int         `json:"successful"`
+	Errors          int         `json:"errors"`
+	Availability    float64     `json:"availability"`
+	RateLimited     int         `json:"rate_limited"`
+	HardFailures    int         `json:"hard_failures"`
+	RateLimitRate   float64     `json:"rate_limit_rate"`
+	HardFailureRate float64     `json:"hard_failure_rate"`
+	FirstByte       MetricStats `json:"first_byte"`
+	Latency         MetricStats `json:"latency"`
+}
+
+// HealthWindow 是当前窗口的请求质量摘要。它与 TargetStats 的历史/展示窗口
+// 分开，避免把“最近一小时通过率”误当成“当前是否还能服务”。
+type HealthWindow struct {
+	WindowSeconds int `json:"window_seconds"`
+	// Samples counts final user-level request outcomes. A retry that receives
+	// one or more 429 responses and then succeeds still contributes one sample.
+	Samples int `json:"samples"`
+	// Attempts includes the final outcome plus upstream retry attempts. It is
+	// the denominator used to explain the rate-limit ratio.
+	Attempts   int `json:"attempts"`
+	Successful int `json:"successful"`
+	// RateLimited counts upstream 429 attempts, including attempts recovered by
+	// a later successful request. It is intentionally separate from Samples.
+	RateLimited      int         `json:"rate_limited"`
+	HardFailures     int         `json:"hard_failures"`
+	SuccessRate      float64     `json:"success_rate"`
+	RateLimitRate    float64     `json:"rate_limit_rate"`
+	HardFailureRate  float64     `json:"hard_failure_rate"`
+	Status           string      `json:"status"`
+	Reason           string      `json:"reason,omitempty"`
+	Available        bool        `json:"available"`
+	Confidence       string      `json:"confidence"`
+	LatestAt         *time.Time  `json:"latest_at,omitempty"`
+	AffectedAccounts int         `json:"affected_accounts,omitempty"`
+	MemberAccounts   int         `json:"member_accounts,omitempty"`
+	Latency          MetricStats `json:"latency"`
 }
 
 type DashboardTarget struct {
@@ -161,17 +210,19 @@ type DashboardTarget struct {
 	// on the account or group, not an upstream sync candidate.
 	RateMultiplier *float64       `json:"rate_multiplier,omitempty"`
 	Stats          TargetStats    `json:"stats"`
+	CurrentHealth  HealthWindow   `json:"current_health"`
 	RecentSamples  []StatusSample `json:"recent_samples"`
 }
 
 // StatusSample 是目标最近一次观测的紧凑状态，用于绘制状态轨迹。
 // LatencyMs 让每个时间桶按自己的响应耗时着色，而不是套用整卡中位数。
 type StatusSample struct {
-	Status      string     `json:"status"`
-	CheckedAt   time.Time  `json:"checked_at"`
-	Source      string     `json:"source"`
-	LatencyMs   *int       `json:"latency_ms,omitempty"`
-	CarriedFrom *time.Time `json:"carried_from,omitempty"`
+	Status       string     `json:"status"`
+	HealthReason string     `json:"health_reason,omitempty"`
+	CheckedAt    time.Time  `json:"checked_at"`
+	Source       string     `json:"source"`
+	LatencyMs    *int       `json:"latency_ms,omitempty"`
+	CarriedFrom  *time.Time `json:"carried_from,omitempty"`
 }
 
 type Summary struct {

@@ -241,6 +241,30 @@ func TestDoRequestRecordsLatencyOnNetworkError(t *testing.T) {
 	}
 }
 
+func TestDoRequestClassifies429AsRateLimitedDegraded(t *testing.T) {
+	prober := New(Config{Timeout: time.Second})
+	request := httptest.NewRequest(http.MethodPost, "https://example.com/v1/chat/completions", nil)
+	request.RequestURI = ""
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Request:    req,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"too many requests"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	result := prober.doRequest(client, request, model.ProbeResult{CheckedAt: time.Now().UTC()})
+	if result.Status != model.StatusDegraded || result.HealthReason != model.HealthReasonRateLimited {
+		t.Fatalf("429 result = %+v, want degraded rate_limited", result)
+	}
+	if result.StatusCode == nil || *result.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("429 status code missing: %+v", result.StatusCode)
+	}
+}
+
 func TestClientForAcceptsConfiguredPrivateProxy(t *testing.T) {
 	prober := New(Config{Timeout: time.Second})
 	if _, err := prober.clientFor("http://127.0.0.1:8080"); err != nil {

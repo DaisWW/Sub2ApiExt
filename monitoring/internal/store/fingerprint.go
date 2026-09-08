@@ -14,10 +14,14 @@ import (
 // Prefixing the digest lets an upgrade rebaseline old watermarks once instead
 // of treating an implementation change as a real upstream source update.
 //
+// v5 also removes account and group routing priorities from health identity.
+// Priority changes affect dispatch order, not the upstream source; changing
+// them must not erase account or group health evidence.
+//
 // v3 also rebaselines the first fingerprint rollout. Its timestamp watermarks
 // were migration bookkeeping rather than a confirmed source change, and would
 // otherwise hide valid monitoring history until a new request arrived.
-const sourceFingerprintVersion = "v3"
+const sourceFingerprintVersion = "v5"
 
 // accountSourceFingerprint captures fields that can change where or how an
 // account is probed. Activity, probe results, update timestamps and billing
@@ -27,7 +31,6 @@ func accountSourceFingerprint(account model.Account) string {
 	payload := struct {
 		Platform    string         `json:"platform"`
 		Type        string         `json:"type"`
-		Priority    int            `json:"priority"`
 		Status      string         `json:"status"`
 		Schedulable bool           `json:"schedulable"`
 		Credentials map[string]any `json:"credentials"`
@@ -36,7 +39,6 @@ func accountSourceFingerprint(account model.Account) string {
 	}{
 		Platform:    normalizedFingerprintString(account.Platform),
 		Type:        normalizedFingerprintString(account.Type),
-		Priority:    account.Priority,
 		Status:      normalizedFingerprintString(account.Status),
 		Schedulable: account.Schedulable,
 		Credentials: fingerprintCredentials(account.Credentials),
@@ -52,32 +54,20 @@ func accountSourceFingerprint(account model.Account) string {
 func groupSourceFingerprint(group model.Group, accounts map[int64]*model.Account) string {
 	type memberFingerprint struct {
 		AccountID          int64  `json:"account_id"`
-		GroupPriority      int    `json:"group_priority"`
-		AccountPriority    int    `json:"account_priority"`
 		AccountStatus      string `json:"account_status"`
 		AccountSchedulable bool   `json:"account_schedulable"`
 		AccountSource      string `json:"account_source"`
 	}
 	payload := struct {
-		Platform         string              `json:"platform"`
-		Status           string              `json:"status"`
-		HasActiveChannel bool                `json:"has_active_channel"`
-		ProbeEnabled     bool                `json:"probe_enabled"`
-		Members          []memberFingerprint `json:"members"`
+		Platform string              `json:"platform"`
+		Status   string              `json:"status"`
+		Members  []memberFingerprint `json:"members"`
 	}{
-		Platform:         normalizedFingerprintString(group.Platform),
-		Status:           normalizedFingerprintString(group.Status),
-		HasActiveChannel: group.HasActiveChannel,
-		ProbeEnabled:     group.ProbeEnabled,
-		Members:          make([]memberFingerprint, 0, len(group.AccountIDs)+len(group.Members)),
+		Platform: normalizedFingerprintString(group.Platform),
+		Status:   normalizedFingerprintString(group.Status),
+		Members:  make([]memberFingerprint, 0, len(group.AccountIDs)+len(group.Members)),
 	}
 
-	memberByID := make(map[int64]model.GroupMember, len(group.Members))
-	for _, member := range group.Members {
-		if _, exists := memberByID[member.AccountID]; !exists {
-			memberByID[member.AccountID] = member
-		}
-	}
 	ids := make(map[int64]struct{}, len(group.AccountIDs)+len(group.Members))
 	for _, accountID := range group.AccountIDs {
 		if accountID > 0 {
@@ -95,15 +85,11 @@ func groupSourceFingerprint(group model.Group, accounts map[int64]*model.Account
 	}
 	sort.Slice(sortedIDs, func(i, j int) bool { return sortedIDs[i] < sortedIDs[j] })
 	for _, accountID := range sortedIDs {
-		member := memberByID[accountID]
 		account := accounts[accountID]
 		entry := memberFingerprint{
-			AccountID:       accountID,
-			GroupPriority:   member.GroupPriority,
-			AccountPriority: member.AccountPriority,
+			AccountID: accountID,
 		}
 		if account != nil {
-			entry.AccountPriority = account.Priority
 			entry.AccountStatus = normalizedFingerprintString(account.Status)
 			entry.AccountSchedulable = account.Schedulable
 			entry.AccountSource = account.SourceFingerprint

@@ -224,6 +224,28 @@ func TestDashboardHidesGroupConcurrencyMetric(t *testing.T) {
 	}
 }
 
+func TestDashboardSortsAccountsByPriorityAndShowsBadge(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	request := httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("got status %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, marker := range []string{
+		"if (this.filter === 'account')",
+		"left.priority",
+		"right.priority",
+		"class=\"account-priority\"",
+		"数值越小，路由优先级越高",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("dashboard.js is missing %q", marker)
+		}
+	}
+}
+
 func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	for path, markers := range map[string][]string{
