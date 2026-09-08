@@ -20,11 +20,12 @@ deploy-all.bat
 deploy-all.ps1
 deploy\windows\
 rate-sync\
+priority-sync\
 monitoring\
 scripts\
 ```
 
-入口会先以管理员权限运行主服务部署管理器，再部署两个扩展；主服务和扩展均来自当前 Git 工程中的脚本，不依赖已经删除的旧工程目录。
+入口会先以管理员权限运行主服务部署管理器，再部署三个扩展；主服务和扩展均来自当前 Git 工程中的脚本，不依赖已经删除的旧工程目录。
 
 首次全新部署完成后：
 
@@ -43,14 +44,14 @@ scripts\
 - 第一次运行直接部署 GitHub 最新正式版，不显示升级询问
 - 已部署时显示 Docker 版本、Sub2API 当前版本和目标版本
 - 检测到新版本时询问 `y/N`；确认后先创建完整备份，再升级 Sub2API 应用容器
-- 主服务升级不替换 PostgreSQL 或 Redis；两个扩展每次重新构建并启动
+- 主服务升级不替换 PostgreSQL 或 Redis；三个扩展每次重新构建并启动
 - 部署与升级直接使用正式版 Docker 镜像，不要求安装 Git，也不需要 `git pull`
 - Windows 部署优先使用官方镜像源；Sub2API、PostgreSQL 和 Redis 下载失败时自动使用 DaoCloud 加速地址；发现旧版目录型 Compose 部署时会保留原目录并安全接管
 - 升级前保存应用镜像以及 PostgreSQL、Redis、配置和应用数据的一致性快照
 - 升级失败时自动恢复升级前备份
 - 同一个入口支持选择历史备份进行回退；回退前会再次备份当前状态
 
-主服务管理器完成后，综合入口会继续部署 `rate-sync` 和 `monitoring`。单独运行这两个目录下的 `deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
+主服务管理器完成后，综合入口会继续部署 `rate-sync`、`priority-sync` 和 `monitoring`。单独运行各目录下的 `deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
 
 ## 数据位置
 

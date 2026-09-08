@@ -78,6 +78,7 @@ if (-not (Test-ExtensionAdministrator)) {
 
 $bootstrapPath = Join-Path $PSScriptRoot 'deploy\windows\Bootstrap.ps1'
 $rateSyncPath = Join-Path $PSScriptRoot 'rate-sync\deploy.ps1'
+$prioritySyncPath = Join-Path $PSScriptRoot 'priority-sync\deploy.ps1'
 $monitoringPath = Join-Path $PSScriptRoot 'monitoring\deploy.ps1'
 
 try {
@@ -86,6 +87,9 @@ try {
 
     Write-Host 'Deploying rate-sync extensions...' -ForegroundColor Cyan
     Invoke-DeploymentChild -ScriptPath $rateSyncPath
+
+    Write-Host 'Deploying priority-sync extension...' -ForegroundColor Cyan
+    Invoke-DeploymentChild -ScriptPath $prioritySyncPath
 
     Write-Host 'Deploying monitoring extension...' -ForegroundColor Cyan
     Invoke-DeploymentChild -ScriptPath $monitoringPath

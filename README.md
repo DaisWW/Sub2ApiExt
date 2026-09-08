@@ -1,13 +1,14 @@
 # Sub2ApiExt
 
-Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`monitoring` 以及 Windows 综合一键部署入口；主 Sub2API 仍使用官方 Docker 镜像部署，本仓库不包含也不修改其上游源码。
+Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`priority-sync`、`monitoring` 以及 Windows 综合一键部署入口；主 Sub2API 仍使用官方 Docker 镜像部署，本仓库不包含也不修改其上游源码。
 
 ## 服务
 
 - `rate-sync`：同步账号倍率，并根据成功请求维护快慢成本记忆、动态调整分组倍率。
+- `priority-sync`：直接读取原始账号、用量和错误数据，按成本、速度、可用性计算账号路由优先级；默认只生成 dry-run 建议，确认后通过 Admin API 写回。
 - `monitoring`：以真实请求和恢复探测判断账户状态，再按当前可路由账户聚合分组状态；仅在渠道报错后低频恢复探测，提供健康、延迟、历史、实时并发与 Tokens 用量面板。
 
-两个扩展在编译时不依赖 Sub2API Go 源码。综合入口会先部署或升级主 Sub2API（含 PostgreSQL、Redis），再部署扩展；扩展运行时连接主服务的 Docker 网络、PostgreSQL 和 Admin API。升级主服务后仍需验证数据库结构及 API 兼容性。
+三个扩展在编译时不依赖 Sub2API Go 源码。综合入口会先部署或升级主 Sub2API（含 PostgreSQL、Redis），再部署扩展；扩展运行时连接主服务的 Docker 网络、PostgreSQL 和 Admin API。升级主服务后仍需验证数据库结构及 API 兼容性。
 
 ## 一键部署
 
@@ -26,12 +27,13 @@ Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`monitoring`
 一键部署.bat
 ```
 
-`deploy-all.bat` 是功能相同的英文文件名入口。首次运行会部署 Sub2API、PostgreSQL、Redis；已有部署再次运行时，会显示当前/目标版本，检测到新版本后询问 `y/N`，确认后先备份再升级主服务。随后每次都会从当前 Git 工程重新构建并更新两个扩展容器。
+`deploy-all.bat` 是功能相同的英文文件名入口。首次运行会部署 Sub2API、PostgreSQL、Redis；已有部署再次运行时，会显示当前/目标版本，检测到新版本后询问 `y/N`，确认后先备份再升级主服务。随后每次都会从当前 Git 工程重新构建并更新三个扩展容器。
 
 也可以分别运行：
 
 ```bat
 rate-sync\deploy.bat
+priority-sync\deploy.bat
 monitoring\deploy.bat
 ```
 
@@ -44,6 +46,7 @@ C:\ProgramData\Sub2API\
 ├── logs\                            # 部署日志
 └── extensions\
     ├── rate-sync\
+    ├── priority-sync\
     └── monitoring\
 ```
 
@@ -51,7 +54,7 @@ C:\ProgramData\Sub2API\
 
 如果检测到旧工程目录部署的 Sub2API，综合入口会在确认数据目录和挂载安全后迁移到 `runtime`；必须在旧工程目录仍存在时完成一次迁移并验证容器健康，之后才可以删除旧工程目录。旧目录删除后，脚本无法从已停止或不完整的旧栈恢复原配置。首次迁移也会优先复制现有 rate-sync 容器使用的配置。以后重复部署会保留 ProgramData 中的真实配置和状态卷。
 
-主服务升级只替换 `sub2api` 应用镜像，不自动升级 PostgreSQL 或 Redis；升级失败会恢复升级前备份。单独运行 `rate-sync\deploy.bat` 或 `monitoring\deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
+主服务升级只替换 `sub2api` 应用镜像，不自动升级 PostgreSQL 或 Redis；升级失败会恢复升级前备份。单独运行各扩展目录下的 `deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
 
 如果检测到原工作目录部署的 `sub2api-monitoring-standalone`，安装器会先等待新监控容器健康，再移除旧容器，避免两个 Worker 并行探测。
 
@@ -96,6 +99,7 @@ Git 只保存配置模板：
 - `rate-sync/config.example.json`
 - `rate-sync/account-config.example.json`
 - `monitoring/settings.env.example`
+- `priority-sync/settings.env.example`
 
 真实数据库密码由部署脚本从现有 PostgreSQL 容器读取，并写入 ProgramData 下受限权限的运行文件，不会写入本仓库。
 
@@ -108,6 +112,9 @@ Set-Location rate-sync
 go test ./...
 
 Set-Location ..\monitoring
+go test ./...
+
+Set-Location ..\priority-sync
 go test ./...
 ```
 
