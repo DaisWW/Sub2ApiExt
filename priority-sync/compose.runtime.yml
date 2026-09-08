@@ -1,0 +1,37 @@
+name: priority-sync
+
+services:
+  priority-sync:
+    image: sub2api-ext-priority-sync:local
+    container_name: sub2api-priority-sync
+    restart: unless-stopped
+    env_file:
+      - path: .runtime.env
+        required: true
+        format: raw
+      - path: settings.env
+        required: true
+        format: raw
+    environment:
+      TZ: Asia/Shanghai
+      PRIORITY_SYNC_STATE_FILE: /data/state.json
+      PRIORITY_SYNC_REPORT_FILE: /data/priority-report.json
+      PRIORITY_SYNC_SUB2API_URL: http://sub2api:8080
+    volumes:
+      - priority_sync_data:/data
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "/app/priority-sync", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  priority_sync_data:
+
+networks:
+  sub2api-network:
+    external: true
+    name: ${SUB2API_NETWORK:?SUB2API_NETWORK is required}
