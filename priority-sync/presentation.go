@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 	"unicode"
 )
 
@@ -50,6 +51,59 @@ func tableAccountLabel(name string, id int64, maximum int) string {
 	return truncateTableLabel(namePart, nameMaximum) + suffix
 }
 
+func tableActionLabel(value string) string {
+	switch value {
+	case "", "unchanged":
+		return "保持"
+	case "updated":
+		return "已更新"
+	case "pending":
+		return "待确认"
+	case "cooldown":
+		return "冷却中"
+	case "exploring":
+		return "探索中"
+	case "exploration-started":
+		return "开始探索"
+	case "exploration-ended":
+		return "探索结束"
+	case "deferred-exploration":
+		return "等待探索"
+	case "dry-run":
+		return "试运行"
+	case "missing-key":
+		return "缺少密钥"
+	case "failed":
+		return "写入失败"
+	default:
+		return value
+	}
+}
+
+func formatTableTime(value string) string {
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return value
+	}
+	return parsed.Local().Format("2006-01-02 15:04:05")
+}
+
+func formatTableLatency(milliseconds float64, fallback bool) string {
+	if milliseconds <= 0 {
+		return "-"
+	}
+	value := ""
+	if milliseconds >= 1000 {
+		value = fmt.Sprintf("%.1fs", milliseconds/1000)
+	} else {
+		value = fmt.Sprintf("%.0fms", milliseconds)
+	}
+	if fallback {
+		value += "*"
+	}
+	return value
+}
+
 // writeRecommendationTable 输出一份适合 docker logs 直接阅读的摘要表。
 // 账户名统一使用 accountLabel，JSON 报告仍保留原始 name 字段供程序消费。
 func writeRecommendationTable(writer io.Writer, generatedAt string, recommendations []Recommendation) error {
@@ -57,10 +111,10 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 		return nil
 	}
 	table := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintf(table, "\n优先级账户表（%s）\n", generatedAt); err != nil {
+	if _, err := fmt.Fprintf(table, "优先级账户表 | %s | 共 %d 个\n", formatTableTime(generatedAt), len(recommendations)); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(table, "ACCOUNT\tSCORE\tPRIORITY\tCURRENT\tSAMPLES\tAVAIL\tCOST/M\tP90(ms)\tACTION"); err != nil {
+	if _, err := fmt.Fprintln(table, "账号\t分数\t优先级\t当前\t样本\t可用\t成本/M\t延迟P90\t状态"); err != nil {
 		return err
 	}
 	for _, recommendation := range recommendations {
@@ -71,16 +125,13 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 		}
 		p90 := "-"
 		if recommendation.LatencyP90Ms > 0 {
-			p90 = fmt.Sprintf("%.0f", recommendation.LatencyP90Ms)
+			p90 = formatTableLatency(recommendation.LatencyP90Ms, false)
 		} else if recommendation.FirstTokenP90Ms > 0 {
-			p90 = fmt.Sprintf("%.0f*", recommendation.FirstTokenP90Ms)
+			p90 = formatTableLatency(recommendation.FirstTokenP90Ms, true)
 		}
-		action := recommendation.ApplyStatus
-		if action == "" {
-			action = "unchanged"
-		}
+		action := tableActionLabel(recommendation.ApplyStatus)
 		if _, err := fmt.Fprintf(table, "%s\t%.1f\t%d\t%d\t%d\t%.1f%%\t%s\t%s\t%s\n",
-			tableAccountLabel(recommendation.Name, recommendation.ID, 36),
+			tableAccountLabel(recommendation.Name, recommendation.ID, 32),
 			recommendation.Score,
 			recommendation.RecommendedPriority,
 			recommendation.CurrentPriority,

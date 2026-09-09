@@ -40,10 +40,22 @@ func TestRecommendationTableIncludesAccountLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{"ACCOUNT", "PRIORITY", "demo #7", "updated"} {
+	for _, marker := range []string{"账号", "优先级", "demo #7", "已更新", "共 1 个"} {
 		if !strings.Contains(output.String(), marker) {
 			t.Fatalf("table missing %q: %s", marker, output.String())
 		}
+	}
+}
+
+func TestTableActionLabelAndLatency(t *testing.T) {
+	if got := tableActionLabel("deferred-exploration"); got != "等待探索" {
+		t.Fatalf("action label = %q", got)
+	}
+	if got := formatTableLatency(26298, false); got != "26.3s" {
+		t.Fatalf("latency seconds = %q", got)
+	}
+	if got := formatTableLatency(860, true); got != "860ms*" {
+		t.Fatalf("fallback latency = %q", got)
 	}
 }
 
