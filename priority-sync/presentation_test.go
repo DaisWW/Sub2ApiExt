@@ -40,7 +40,7 @@ func TestRecommendationTableIncludesAccountLabel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, marker := range []string{"账号", "优先级", "demo #7", "已更新", "共 1 个"} {
+	for _, marker := range []string{"账号", "优先级", "本轮", "demo #7", "已更新", "共 1 个"} {
 		if !strings.Contains(output.String(), marker) {
 			t.Fatalf("table missing %q: %s", marker, output.String())
 		}

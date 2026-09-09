@@ -133,15 +133,19 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 				recommendation.Reason = hardReason + "；结束探索"
 				recommendation.applyImmediately = true
 				recommendation.explorationEnd = true
-			case exploration.StartedAt != nil && !now.Before(exploration.StartedAt.Add(explorationDuration)):
-				recommendation.RecommendedPriority = normalizedPriority(exploration.OriginalPriority)
-				recommendation.Reason = "探索超时，恢复探索前优先级"
-				recommendation.applyImmediately = true
-				recommendation.explorationEnd = true
 			case evidence >= int64(r.config.MinSamples):
-				recommendation.RecommendedPriority = priorityForScore(recommendation.Score)
+				targetPriority := priorityForScore(recommendation.Score)
+				recommendation.RecommendedPriority = targetPriority
 				recommendation.Reason += "；探索样本已足够，进入正式评分确认"
-				recommendation.explorationEnd = true
+				recommendation.explorationEnd = rampPriority(recommendation.CurrentPriority, targetPriority) == targetPriority
+			case exploration.StartedAt != nil && !now.Before(exploration.StartedAt.Add(explorationDuration)):
+				restorePriority := recommendation.AnchorPriority
+				if restorePriority <= 0 {
+					restorePriority = normalizedPriority(exploration.OriginalPriority)
+				}
+				recommendation.RecommendedPriority = restorePriority
+				recommendation.Reason = fmt.Sprintf("探索超时，向默认优先级 %d 缓慢回退", restorePriority)
+				recommendation.explorationEnd = rampPriority(recommendation.CurrentPriority, restorePriority) == restorePriority
 			default:
 				recommendation.RecommendedPriority = priorityExplore
 				recommendation.Reason = "低样本账户探索中，等待更多最终结果"
@@ -253,6 +257,10 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		seen[recommendation.ID] = struct{}{}
 		state := r.state.Accounts[recommendation.ID]
 		evidence := recommendation.SuccessfulRequests + recommendation.TerminalFailures
+		recommendation.NextPriority = recommendation.RecommendedPriority
+		if !recommendation.applyImmediately {
+			recommendation.NextPriority = rampPriority(recommendation.CurrentPriority, recommendation.RecommendedPriority)
+		}
 		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately && evidence < int64(r.config.MinSamples) {
 			if recommendation.RecommendedPriority != recommendation.CurrentPriority {
 				pending++
@@ -261,7 +269,7 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			continue
 		}
 		if recommendation.explorationStart {
-			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, now, &state) {
+			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, recommendation.RecommendedPriority, now, &state) {
 				pending++
 				continue
 			}
@@ -286,6 +294,7 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			r.state.Accounts[recommendation.ID] = state
 			if isActiveExploration && recommendation.explorationEnd {
 				r.state.Exploration = nil
+				activeExplorationID = 0
 				recommendation.ApplyStatus = "exploration-ended"
 			} else if recommendation.ApplyStatus == "" {
 				recommendation.ApplyStatus = "unchanged"
@@ -293,13 +302,14 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			continue
 		}
 		if recommendation.applyImmediately {
-			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, now, &state) {
+			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, recommendation.RecommendedPriority, now, &state) {
 				pending++
 				continue
 			}
 			r.state.Accounts[recommendation.ID] = state
 			if isActiveExploration && recommendation.explorationEnd {
 				r.state.Exploration = nil
+				activeExplorationID = 0
 				recommendation.ApplyStatus = "exploration-ended"
 			} else {
 				recommendation.ApplyStatus = "updated"
@@ -307,7 +317,10 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			changed++
 			continue
 		}
-		if state.CandidatePriority == recommendation.RecommendedPriority {
+		direction := priorityChangeDirection(recommendation.CurrentPriority, recommendation.RecommendedPriority)
+		candidateDirection := priorityChangeDirection(recommendation.CurrentPriority, state.CandidatePriority)
+		if state.CandidateCount > 0 && candidateDirection == direction {
+			state.CandidatePriority = recommendation.RecommendedPriority
 			state.CandidateCount++
 		} else {
 			state.CandidatePriority = recommendation.RecommendedPriority
@@ -330,7 +343,8 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			r.logger.Info("dry-run 建议更新账户优先级",
 				"account", accountLabel(recommendation.Name, recommendation.ID),
 				"from", recommendation.CurrentPriority,
-				"to", recommendation.RecommendedPriority,
+				"to", recommendation.NextPriority,
+				"target", recommendation.RecommendedPriority,
 				"score", roundScore(recommendation.Score),
 			)
 			pending++
@@ -344,7 +358,7 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
-		if !r.applyPriorityUpdate(ctx, recommendation, apiKey, now, &state) {
+		if !r.applyPriorityUpdate(ctx, recommendation, apiKey, recommendation.NextPriority, now, &state) {
 			pending++
 			r.state.Accounts[recommendation.ID] = state
 			continue
@@ -352,6 +366,7 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		r.state.Accounts[recommendation.ID] = state
 		if isActiveExploration && recommendation.explorationEnd {
 			r.state.Exploration = nil
+			activeExplorationID = 0
 			recommendation.ApplyStatus = "exploration-ended"
 		} else {
 			recommendation.ApplyStatus = "updated"
@@ -366,13 +381,14 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 	return changed, pending
 }
 
-func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recommendation, apiKey string, now time.Time, state *accountState) bool {
+func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recommendation, apiKey string, priority int, now time.Time, state *accountState) bool {
 	if r.config.DryRun {
 		recommendation.ApplyStatus = "dry-run"
 		r.logger.Info("dry-run 建议更新账户优先级",
 			"account", accountLabel(recommendation.Name, recommendation.ID),
 			"from", recommendation.CurrentPriority,
-			"to", recommendation.RecommendedPriority,
+			"to", priority,
+			"target", recommendation.RecommendedPriority,
 			"score", roundScore(recommendation.Score),
 		)
 		return false
@@ -382,17 +398,61 @@ func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recomm
 		r.logger.Warn("缺少 Admin API Key，跳过账户优先级写入", "account", accountLabel(recommendation.Name, recommendation.ID))
 		return false
 	}
-	if err := r.admin.updatePriority(ctx, apiKey, recommendation.ID, recommendation.RecommendedPriority); err != nil {
+	if err := r.admin.updatePriority(ctx, apiKey, recommendation.ID, priority); err != nil {
 		recommendation.ApplyStatus = "failed"
 		r.logger.Error("账户优先级写入失败", "account", accountLabel(recommendation.Name, recommendation.ID), "error", err)
 		return false
 	}
 	state.LastAppliedAt = timePtr(now)
-	state.LastApplied = recommendation.RecommendedPriority
+	state.LastApplied = priority
 	state.CandidatePriority = 0
 	state.CandidateCount = 0
 	recommendation.ApplyStatus = "updated"
 	return true
+}
+
+// priorityChangeDirection identifies whether a recommendation improves or
+// degrades the current priority. Priority values are ordered ascending.
+func priorityChangeDirection(current, candidate int) int {
+	switch {
+	case candidate < current:
+		return -1
+	case candidate > current:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// rampPriority limits normal formal-band changes to one 20-point step. A
+// larger custom gap is capped to four writes; unavailable recovery starts at
+// the neutral band so an account does not jump straight back to high priority.
+func rampPriority(current, target int) int {
+	if current == target || current <= 0 || target <= 0 || target >= priorityUnavailable {
+		return target
+	}
+	if current >= priorityUnavailable {
+		return priorityNeutral
+	}
+	distance := target - current
+	if distance < 0 {
+		distance = -distance
+	}
+	step := priorityRampStep
+	maxDistance := priorityRampStep * priorityRampMaxSteps
+	if distance > maxDistance {
+		step = (distance + priorityRampMaxSteps - 1) / priorityRampMaxSteps
+	}
+	if target > current {
+		if current+step > target {
+			return target
+		}
+		return current + step
+	}
+	if current-step < target {
+		return target
+	}
+	return current - step
 }
 
 func roundScore(value float64) float64 {

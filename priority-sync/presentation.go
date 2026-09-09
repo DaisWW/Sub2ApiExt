@@ -194,7 +194,7 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 	if writer == nil {
 		return nil
 	}
-	rows := [][]string{{"账号", "分数", "优先级", "当前", "样本", "可用", "成本/M", "延迟P90", "状态"}}
+	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "成本/M", "延迟P90", "状态"}}
 	for _, recommendation := range recommendations {
 		samples := recommendation.SuccessfulRequests + recommendation.TerminalFailures
 		cost := "-"
@@ -207,11 +207,16 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 		} else if recommendation.FirstTokenP90Ms > 0 {
 			p90 = formatTableLatency(recommendation.FirstTokenP90Ms, true)
 		}
+		nextPriority := recommendation.NextPriority
+		if nextPriority <= 0 {
+			nextPriority = recommendation.RecommendedPriority
+		}
 		action := tableActionLabel(recommendation.ApplyStatus)
 		rows = append(rows, []string{
 			tableAccountLabel(recommendation.Name, recommendation.ID, 32),
 			fmt.Sprintf("%.1f", recommendation.Score),
 			strconv.Itoa(recommendation.RecommendedPriority),
+			strconv.Itoa(nextPriority),
 			strconv.Itoa(recommendation.CurrentPriority),
 			strconv.FormatInt(samples, 10),
 			fmt.Sprintf("%.1f%%", recommendation.Availability*100),

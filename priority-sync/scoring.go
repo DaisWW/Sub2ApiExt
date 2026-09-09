@@ -8,17 +8,20 @@ import (
 	"time"
 )
 
-// scoreAccounts 将三个维度统一到 0..100，分数越高越值得优先路由。
-// 成本占 70%，速度占 20%，可用性占 10%。
+// scoreAccounts 将请求实测的成本、速度和可用性统一到 0..100，分数越高越值得优先路由。
+// 实际成本占 70%，速度占 20%，可用性占 10%；倍率只用于证据不足时的默认锚点。
 func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []Recommendation {
 	if minSamples < 1 {
 		minSamples = defaultMinSamples
 	}
 	costValues := make([]float64, len(accounts))
+	multiplierValues := make([]float64, len(accounts))
 	speedValues := make([]float64, len(accounts))
 	costValid := make([]bool, len(accounts))
+	multiplierValid := make([]bool, len(accounts))
 	speedValid := make([]bool, len(accounts))
 	peerCostValid := make([]bool, len(accounts))
+	multiplierEligible := make([]bool, len(accounts))
 	peerSpeedValid := make([]bool, len(accounts))
 	for index, account := range accounts {
 		evidence := account.SuccessfulRequests + account.TerminalFailures
@@ -33,6 +36,9 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			costValid[index] = validScore(costValues[index]) && costValues[index] > 0
 			peerCostValid[index] = costValid[index] && peerEligible
 		}
+		multiplierValues[index] = account.RateMultiplier
+		multiplierValid[index] = multiplierValues[index] > 0 && validScore(multiplierValues[index])
+		multiplierEligible[index] = multiplierValid[index] && !hardExcluded
 		speedValues[index] = account.LatencyP90Ms
 		if speedValues[index] <= 0 || !validScore(speedValues[index]) {
 			speedValues[index] = account.FirstTokenP90Ms
@@ -41,6 +47,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		peerSpeedValid[index] = speedValid[index] && peerEligible
 	}
 	costScores := normalizeLowerBetter(costValues, peerCostValid)
+	multiplierScores := normalizeLowerBetter(multiplierValues, multiplierEligible)
 	speedScores := normalizeLowerBetter(speedValues, peerSpeedValid)
 
 	result := make([]Recommendation, 0, len(accounts))
@@ -64,12 +71,16 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		currentPriority := normalizedPriority(account.CurrentPriority)
 		recommended := currentPriority
 		reason := "证据不足，保持当前优先级"
+		anchorPriority := coldAnchorPriority(multiplierScores[index])
 		if hardExcluded {
 			recommended = priorityUnavailable
 			reason = hardReason
 		} else if evidence >= int64(minSamples) {
 			recommended = priorityForScore(score)
 			reason = fmt.Sprintf("成本 %.1f%%、速度 %.1f%%、可用性 %.1f%%", costScores[index], speedScores[index], availabilityScore)
+		} else if anchorPriority < currentPriority {
+			recommended = anchorPriority
+			reason = fmt.Sprintf("证据不足，向倍率锚点优先级 %d 缓慢靠近", anchorPriority)
 		}
 		if account.RecoveredRateLimited > 0 && !hardExcluded {
 			reason += fmt.Sprintf("；恢复性 429 %d 次按软惩罚计入", account.RecoveredRateLimited)
@@ -92,10 +103,12 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			Availability:             availability,
 			Confidence:               confidence,
 			CostScore:                costScores[index],
+			MultiplierScore:          multiplierScores[index],
 			SpeedScore:               speedScores[index],
 			AvailabilityScore:        availabilityScore,
 			Score:                    score,
 			HardExcluded:             hardExcluded,
+			AnchorPriority:           anchorPriority,
 			Reason:                   reason,
 			applyImmediately:         hardExcluded,
 		}
@@ -170,9 +183,16 @@ func priorityForScore(score float64) int {
 	}
 }
 
-// normalizedPriority keeps an existing positive priority intact so accounts
-// that are still waiting for enough evidence are not moved unexpectedly. A
-// missing or invalid database value falls back to the neutral band.
+func coldAnchorPriority(multiplierScore float64) int {
+	anchor := priorityForScore(multiplierScore)
+	if anchor < coldAnchorFloor {
+		return coldAnchorFloor
+	}
+	return anchor
+}
+
+// normalizedPriority preserves positive database values. A missing or invalid
+// value falls back to the neutral band.
 func normalizedPriority(value int) int {
 	if value <= 0 {
 		return priorityNeutral

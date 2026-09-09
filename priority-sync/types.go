@@ -46,9 +46,12 @@ type Recommendation struct {
 	Availability             float64 `json:"availability"`
 	Confidence               float64 `json:"confidence"`
 	CostScore                float64 `json:"cost_score"`
+	MultiplierScore          float64 `json:"multiplier_score"`
 	SpeedScore               float64 `json:"speed_score"`
 	AvailabilityScore        float64 `json:"availability_score"`
 	Score                    float64 `json:"score"`
+	AnchorPriority           int     `json:"anchor_priority,omitempty"`
+	NextPriority             int     `json:"next_priority,omitempty"`
 	HardExcluded             bool    `json:"hard_excluded"`
 	Exploration              bool    `json:"exploration,omitempty"`
 	ApplyStatus              string  `json:"apply_status,omitempty"`

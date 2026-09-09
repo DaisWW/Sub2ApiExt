@@ -31,13 +31,16 @@ const (
 // 优先级数值越小越优先。自动档位之间保留空档，探索档位用于给低样本账号
 // 一个有限的观测机会，不与正式评分档位混用。
 const (
-	priorityBest        = 10
-	priorityExplore     = 20
-	priorityGood        = 30
-	priorityNeutral     = 50
-	priorityDegraded    = 70
-	priorityPoor        = 90
-	priorityUnavailable = 1000
+	priorityBest         = 10
+	priorityExplore      = 20
+	priorityGood         = 30
+	priorityNeutral      = 50
+	priorityDegraded     = 70
+	priorityPoor         = 90
+	priorityUnavailable  = 1000
+	priorityRampStep     = 20
+	priorityRampMaxSteps = 4
+	coldAnchorFloor      = priorityGood
 
 	explorationDuration = 30 * time.Minute
 )

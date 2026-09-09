@@ -76,7 +76,7 @@ func TestRunnerAppliesScoredPriorityThroughAdminAPI(t *testing.T) {
 		t.Fatalf("got %d updates", len(updates))
 	}
 	got := <-updates
-	if got.id != "1" || got.priority != priorityBest {
+	if got.id != "1" || got.priority != priorityDegraded {
 		t.Fatalf("update = %+v", got)
 	}
 }
@@ -102,7 +102,7 @@ func TestRunnerDryRunDoesNotPersistExplorationOrCallAdminAPI(t *testing.T) {
 	}
 }
 
-func TestRunnerExplorationExpiresAndRestoresOriginalPriority(t *testing.T) {
+func TestRunnerExplorationExpiresAndRestoresDefaultAnchor(t *testing.T) {
 	updates := make(chan int, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -135,11 +135,21 @@ func TestRunnerExplorationExpiresAndRestoresOriginalPriority(t *testing.T) {
 	if err := runner.RunOnce(context.Background(), start.Add(explorationDuration)); err != nil {
 		t.Fatal(err)
 	}
-	if runner.state.Exploration != nil {
-		t.Fatalf("exploration was not cleared: %+v", runner.state)
+	if runner.state.Exploration == nil {
+		t.Fatalf("exploration cleared before anchor restoration: %+v", runner.state)
 	}
-	if got := <-updates; got != 90 {
-		t.Fatalf("restore priority = %d", got)
+	if got := <-updates; got != 40 {
+		t.Fatalf("first restoration priority = %d", got)
+	}
+	source.accounts[0].CurrentPriority = 40
+	if err := runner.RunOnce(context.Background(), start.Add(2*explorationDuration)); err != nil {
+		t.Fatal(err)
+	}
+	if runner.state.Exploration != nil {
+		t.Fatalf("exploration was not cleared after anchor restoration: %+v", runner.state)
+	}
+	if got := <-updates; got != priorityNeutral {
+		t.Fatalf("final restoration priority = %d", got)
 	}
 }
 
@@ -187,8 +197,55 @@ func TestRunnerExplorationWithEnoughEvidenceUsesNormalConfirmation(t *testing.T)
 	if err := runner.RunOnce(context.Background(), start.Add(20*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
+	if runner.state.Exploration == nil || len(updates) != 1 {
+		t.Fatalf("exploration did not take the first confirmed step: state=%+v updates=%d", runner.state, len(updates))
+	}
+	if got := <-updates; got != 40 {
+		t.Fatalf("first scored step = %d", got)
+	}
+	source.accounts[0].CurrentPriority = 40
+	if err := runner.RunOnce(context.Background(), start.Add(30*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if runner.state.Exploration == nil || len(updates) != 0 {
+		t.Fatalf("second scored step bypassed confirmation: state=%+v updates=%d", runner.state, len(updates))
+	}
+	if err := runner.RunOnce(context.Background(), start.Add(40*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
 	if runner.state.Exploration != nil || len(updates) != 1 {
-		t.Fatalf("exploration did not transition after confirmation: state=%+v updates=%d", runner.state, len(updates))
+		t.Fatalf("exploration did not finish after second confirmation: state=%+v updates=%d", runner.state, len(updates))
+	}
+	if got := <-updates; got != priorityNeutral {
+		t.Fatalf("final scored priority = %d", got)
+	}
+}
+
+func TestRunnerExplorationExpiryUsesMeasuredTargetWhenEvidenceIsReady(t *testing.T) {
+	start := nowForTest()
+	accounts := []AccountMetrics{
+		{ID: 9, Name: "measured", Status: "active", CurrentPriority: priorityExplore, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
+		{ID: 10, Name: "peer", Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 2, LatencyP90Ms: 100},
+	}
+	recommendations := scoreAccounts(accounts, start.Add(explorationDuration), 5)
+	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, &syncState{
+		Accounts: map[int64]accountState{},
+		Exploration: &explorationState{
+			AccountID:        9,
+			OriginalPriority: priorityPoor,
+			StartedAt:        timePtr(start),
+		},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.prepareExploration(accounts, recommendations, start.Add(explorationDuration))
+	var measured Recommendation
+	for _, item := range recommendations {
+		if item.ID == 9 {
+			measured = item
+			break
+		}
+	}
+	if measured.RecommendedPriority != priorityBest || !measured.explorationEnd {
+		t.Fatalf("expiry ignored measured target: %+v", measured)
 	}
 }
 
@@ -229,8 +286,80 @@ func TestRunnerExplorationDoesNotBlockMatureAccount(t *testing.T) {
 	if got["1"] != priorityExplore {
 		t.Fatalf("exploration update = %d, want %d", got["1"], priorityExplore)
 	}
-	if got["2"] != priorityNeutral {
-		t.Fatalf("mature account update = %d, want %d", got["2"], priorityNeutral)
+	if got["2"] != priorityDegraded {
+		t.Fatalf("mature account update = %d, want %d", got["2"], priorityDegraded)
+	}
+}
+
+func TestRunnerConfirmsPriorityChangeAcrossBandsInSameDirection(t *testing.T) {
+	updates := make(chan int, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Priority int `json:"priority"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updates <- payload.Priority
+		_, _ = io.WriteString(w, `{"code":0}`)
+	}))
+	defer server.Close()
+	config := testRunnerConfig(t, server.URL, false)
+	config.Confirmations = 2
+	runner := NewRunner(config, &fakeMetricsSource{}, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.tableWriter = io.Discard
+	current := 90
+	for index, want := range []int{70, 50, 30, 10} {
+		first := Recommendation{ID: 21, Name: "oscillating", CurrentPriority: current, RecommendedPriority: 20, SuccessfulRequests: 5}
+		if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{first}, "secret", nowForTest().Add(time.Duration(index*20)*time.Minute)); changed != 0 || pending != 1 {
+			t.Fatalf("step %d first confirmation changed=%d pending=%d", index, changed, pending)
+		}
+		second := first
+		second.RecommendedPriority = 10
+		if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{second}, "secret", nowForTest().Add(time.Duration(index*20+10)*time.Minute)); changed != 1 || pending != 0 {
+			t.Fatalf("step %d second confirmation changed=%d pending=%d", index, changed, pending)
+		}
+		if got := <-updates; got != want {
+			t.Fatalf("step %d updated priority=%d, want %d", index, got, want)
+		}
+		current = want
+	}
+	if state := runner.state.Accounts[21]; state.CandidatePriority != 0 || state.CandidateCount != 0 {
+		t.Fatalf("applied candidate state=%+v", state)
+	}
+}
+
+func TestRunnerConfirmationResetsWhenPriorityDirectionChanges(t *testing.T) {
+	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.tableWriter = io.Discard
+	first := Recommendation{ID: 22, Name: "direction-change", CurrentPriority: 90, RecommendedPriority: 20, SuccessfulRequests: 5}
+	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{first}, "", nowForTest()); changed != 0 || pending != 1 {
+		t.Fatalf("first confirmation changed=%d pending=%d", changed, pending)
+	}
+	second := first
+	second.RecommendedPriority = 100
+	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{second}, "", nowForTest().Add(10*time.Minute)); changed != 0 || pending != 1 {
+		t.Fatalf("direction reversal changed=%d pending=%d", changed, pending)
+	}
+	state := runner.state.Accounts[22]
+	if state.CandidatePriority != 100 || state.CandidateCount != 1 {
+		t.Fatalf("reversed candidate state=%+v", state)
+	}
+}
+
+func TestRampPriorityConvergesAcrossFormalBands(t *testing.T) {
+	current := 90
+	for _, want := range []int{70, 50, 30, 10} {
+		current = rampPriority(current, 10)
+		if current != want {
+			t.Fatalf("ramp priority = %d, want %d", current, want)
+		}
+	}
+}
+
+func TestRampPriorityReentersFromUnavailableAtNeutral(t *testing.T) {
+	if got := rampPriority(priorityUnavailable, priorityBest); got != priorityNeutral {
+		t.Fatalf("re-entry priority = %d, want %d", got, priorityNeutral)
 	}
 }
 

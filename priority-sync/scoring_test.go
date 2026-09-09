@@ -92,6 +92,43 @@ func TestScoreAccountsInsufficientEvidencePreservesPriority(t *testing.T) {
 	}
 }
 
+func TestScoreAccountsMovesColdAccountTowardMultiplierAnchor(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "cold-cheap", Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 0.1},
+		{ID: 2, Name: "mature-expensive", Status: "active", CurrentPriority: priorityNeutral, RateMultiplier: 1, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
+		{ID: 3, Name: "mature-mid", Status: "active", CurrentPriority: priorityNeutral, RateMultiplier: 0.5, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
+	}, now, 5)
+	var cold Recommendation
+	for _, item := range result {
+		if item.ID == 1 {
+			cold = item
+			break
+		}
+	}
+	if cold.AnchorPriority != coldAnchorFloor || cold.RecommendedPriority != coldAnchorFloor {
+		t.Fatalf("cold account anchor = %+v, want priority %d", cold, coldAnchorFloor)
+	}
+	if cold.Confidence != 0 {
+		t.Fatalf("cold account confidence = %v", cold.Confidence)
+	}
+}
+
+func TestScoreAccountsUsesMeasuredCostOverMultiplierAnchor(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "cheap-high-multiplier", Status: "active", CurrentPriority: priorityNeutral, RateMultiplier: 1, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
+		{ID: 2, Name: "expensive-low-multiplier", Status: "active", CurrentPriority: priorityNeutral, RateMultiplier: 0.1, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 10, LatencyP90Ms: 100},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	if byID[1].Score <= byID[2].Score || byID[1].RecommendedPriority >= byID[2].RecommendedPriority {
+		t.Fatalf("measured cost did not dominate multiplier anchor: cheap=%+v expensive=%+v", byID[1], byID[2])
+	}
+}
+
 func TestScoreAccountsExcludesLowEvidenceFromPeerNormalization(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	result := scoreAccounts([]AccountMetrics{
