@@ -115,7 +115,7 @@ func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
 		},
 		"/js/usage.js": {
 			"'priority'",
-			"platformFilter = 'all'",
+			"platformFilter = 'openai'",
 			"setPlatformFilter(platform)",
 			"platformMatches(item?.platform, platformFilter)",
 			"renderPlatformFilters(",
@@ -314,13 +314,16 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	usageBody := body[usageStart:]
 	for _, marker := range []string{
 		"id=\"usagePlatformFilters\"",
-		"data-platform-filter=\"all\"",
+		"class=\"platform-filter platform-filter-openai active\"",
 		"data-platform-filter=\"openai\"",
 		"data-platform-filter=\"anthropic\"",
 	} {
 		if !strings.Contains(usageBody, marker) {
 			t.Errorf("usage section is missing %q", marker)
 		}
+	}
+	if strings.Contains(usageBody, `data-platform-filter="all"`) {
+		t.Error("usage section still exposes the all-platform filter")
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)

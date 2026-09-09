@@ -35,7 +35,7 @@ export class UsagePanel {
   usage = null;
   period = 'today';
   entityKind = 'group';
-  platformFilter = 'all';
+  platformFilter = 'openai';
   entitySortMetric = 'unit_cost';
   entitySortDirection = 'asc';
   trendMetric = 'tokens';
@@ -67,10 +67,7 @@ export class UsagePanel {
 
   setPlatformFilter(platform) {
     const normalized = normalizePlatform(platform);
-    if (normalized !== 'all') {
-      const values = this.#platformValues();
-      if (!values.includes(normalized)) return;
-    }
+    if (normalized === 'all') return;
     this.platformFilter = normalized;
     this.#renderEntityCards();
   }
@@ -180,8 +177,7 @@ export class UsagePanel {
     const selected = renderPlatformFilters(
       $('#usagePlatformFilters'),
       this.#platformValues(),
-      this.platformFilter,
-      { includeAll: true }
+      this.platformFilter
     );
     if (selected) this.platformFilter = selected;
   }
@@ -254,7 +250,7 @@ function renderUsageKPI([label, value, note, color]) {
   </article>`;
 }
 
-function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'unit_cost', sortDirection = 'asc', platformFilter = 'all') {
+function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'unit_cost', sortDirection = 'asc', platformFilter = 'openai') {
   const container = $('#usageEntityCardList');
   const items = (Array.isArray(sourceItems) ? sourceItems : [])
     .slice()
