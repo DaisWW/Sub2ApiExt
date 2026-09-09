@@ -200,6 +200,7 @@ type HealthWindow struct {
 	Confidence       string      `json:"confidence"`
 	LatestAt         *time.Time  `json:"latest_at,omitempty"`
 	AffectedAccounts int         `json:"affected_accounts,omitempty"`
+	ObservedAccounts int         `json:"observed_accounts,omitempty"`
 	MemberAccounts   int         `json:"member_accounts,omitempty"`
 	Latency          MetricStats `json:"latency"`
 }

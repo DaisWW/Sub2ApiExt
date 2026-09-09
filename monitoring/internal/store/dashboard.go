@@ -312,6 +312,7 @@ const dashboardQueryCurrentHealth = `
 	       COALESCE(SUM(health.attempts), 0)::integer AS attempts,
 	       MAX(health.latest_at) AS latest_at,
 	       COUNT(DISTINCT members.account_id) FILTER (WHERE health.rate_limited > 0)::integer AS affected_accounts,
+	       COUNT(DISTINCT members.account_id) FILTER (WHERE health.samples > 0)::integer AS observed_accounts,
 	       COUNT(DISTINCT members.account_id)::integer AS member_accounts
 	FROM active_group_members members
 	LEFT JOIN current_account_health health ON health.account_id = members.account_id
@@ -330,7 +331,7 @@ const dashboardQueryCurrentHealth = `
 	SELECT counts.group_id, counts.samples, counts.successful, counts.rate_limited,
 	       counts.hard_failures, counts.attempts, counts.latest_at,
 	       latency.latency_fastest, latency.latency_median, latency.latency_p95,
-	       counts.affected_accounts, counts.member_accounts
+	       counts.affected_accounts, counts.observed_accounts, counts.member_accounts
 	FROM current_group_counts counts
 	LEFT JOIN current_group_latency latency ON latency.group_id = counts.group_id
 ), current_health AS MATERIALIZED (
@@ -338,14 +339,14 @@ const dashboardQueryCurrentHealth = `
 	       300::integer AS window_seconds, health.samples, health.successful,
 	       health.rate_limited, health.hard_failures, health.attempts, health.latest_at,
 	       health.latency_fastest, health.latency_median, health.latency_p95,
-	       0::integer AS affected_accounts, 1::integer AS member_accounts
+	       0::integer AS affected_accounts, 1::integer AS observed_accounts, 1::integer AS member_accounts
 	FROM current_account_health health
 	UNION ALL
 	SELECT 'group:' || health.group_id::text AS target_key,
 	       300::integer AS window_seconds, health.samples, health.successful,
 	       health.rate_limited, health.hard_failures, health.attempts, health.latest_at,
 	       health.latency_fastest, health.latency_median, health.latency_p95,
-	       health.affected_accounts, health.member_accounts
+	       health.affected_accounts, health.observed_accounts, health.member_accounts
 	FROM current_group_health health
 `
 
@@ -626,7 +627,8 @@ SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t
        COALESCE(current_health.rate_limited, 0), COALESCE(current_health.hard_failures, 0),
        COALESCE(current_health.attempts, 0), current_health.latest_at,
        current_health.latency_fastest, current_health.latency_median, current_health.latency_p95,
-       COALESCE(current_health.affected_accounts, 0), COALESCE(current_health.member_accounts, 0),
+	       COALESCE(current_health.affected_accounts, 0), COALESCE(current_health.observed_accounts, 0),
+	       COALESCE(current_health.member_accounts, 0),
        COALESCE(r.samples, '[]'::jsonb)
 FROM monitoring_targets t
 JOIN visible_targets visible
@@ -662,7 +664,7 @@ func targetStats(
 	}
 	if samples > 0 {
 		stats.Availability = float64(successful) * 100 / float64(samples)
-		stats.RateLimitRate = float64(rateLimited) * 100 / float64(samples+rateLimited)
+		stats.RateLimitRate = float64(rateLimited) * 100 / float64(samples)
 		stats.HardFailureRate = float64(hardFailures) * 100 / float64(samples)
 	}
 	stats.FirstByte = metricStats(firstFastest, firstMedian, firstP95)
@@ -673,13 +675,13 @@ func targetStats(
 func evaluateCurrentHealth(
 	windowSeconds, samples, successful, rateLimited, hardFailures, attempts int,
 	latestAt sql.NullTime, fastest sql.NullInt64, median, p95 sql.NullFloat64,
-	affectedAccounts, memberAccounts int,
+	affectedAccounts, observedAccounts, memberAccounts int,
 ) model.HealthWindow {
 	window := model.HealthWindow{
 		WindowSeconds: windowSeconds,
 		Samples:       samples, Attempts: attempts, Successful: successful,
 		RateLimited: rateLimited, HardFailures: hardFailures,
-		AffectedAccounts: affectedAccounts, MemberAccounts: memberAccounts,
+		AffectedAccounts: affectedAccounts, ObservedAccounts: observedAccounts, MemberAccounts: memberAccounts,
 		Latency: metricStats(fastest, median, p95),
 	}
 	if latestAt.Valid {
@@ -697,13 +699,14 @@ func applyCurrentHealth(target *model.DashboardTarget) {
 		return
 	}
 	health := target.CurrentHealth
-	if health.Samples == 0 {
+	if !currentHealthOverridesTarget(*target, health) {
 		return
 	}
 	target.Status = health.Status
 	target.Available = health.Available
-	if health.Reason != "" {
-		target.HealthReason = health.Reason
+	target.HealthReason = health.Reason
+	if health.Reason != model.HealthReasonRateLimited && isCurrentRateLimitMessage(target.LatestMessage) {
+		target.LatestMessage = ""
 	}
 	if health.LatestAt != nil {
 		target.LastCheckedAt = health.LatestAt
@@ -718,6 +721,21 @@ func applyCurrentHealth(target *model.DashboardTarget) {
 				health.WindowSeconds/60, health.RateLimitRate)
 		}
 	}
+}
+
+func currentHealthOverridesTarget(target model.DashboardTarget, health model.HealthWindow) bool {
+	if health.Samples == 0 {
+		return false
+	}
+	if target.Kind != model.KindGroup || health.Available || !target.Available {
+		return true
+	}
+	return health.MemberAccounts > 0 && health.ObservedAccounts >= health.MemberAccounts
+}
+
+func isCurrentRateLimitMessage(message string) bool {
+	return strings.HasPrefix(message, "当前仍可用；近 ") && strings.Contains(message, "分钟阶段性限速 ") ||
+		strings.HasPrefix(message, "当前可用，但近 ") && strings.Contains(message, "上游尝试被限速")
 }
 
 func addDashboardSummary(summary *model.Summary, target model.DashboardTarget) {
@@ -784,7 +802,7 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	var currentLatestAt sql.NullTime
 	var currentFastest sql.NullInt64
 	var currentMedian, currentP95 sql.NullFloat64
-	var affectedAccounts, memberAccounts int
+	var affectedAccounts, observedAccounts, memberAccounts int
 	if err := rows.Scan(
 		&target.Key, &target.Kind, &target.EntityID, &target.Name, &target.Platform,
 		&target.SourceStatus, &target.ProbeEnabled, &recoveryTrigger,
@@ -796,7 +814,7 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 		&latencyMedian, &latencyP95,
 		&currentWindowSeconds, &currentSamples, &currentSuccessful,
 		&currentRateLimited, &currentHardFailures, &currentAttempts, &currentLatestAt,
-		&currentFastest, &currentMedian, &currentP95, &affectedAccounts, &memberAccounts,
+		&currentFastest, &currentMedian, &currentP95, &affectedAccounts, &observedAccounts, &memberAccounts,
 		&recentJSON,
 	); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("scan dashboard: %w", err)
@@ -820,7 +838,7 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	target.Stats = targetStats(samples, successful, rateLimited, hardFailures, firstFastest, firstMedian, firstP95, latencyFastest, latencyMedian, latencyP95)
 	target.CurrentHealth = evaluateCurrentHealth(currentWindowSeconds, currentSamples, currentSuccessful,
 		currentRateLimited, currentHardFailures, currentAttempts, currentLatestAt,
-		currentFastest, currentMedian, currentP95, affectedAccounts, memberAccounts)
+		currentFastest, currentMedian, currentP95, affectedAccounts, observedAccounts, memberAccounts)
 	applyCurrentHealth(&target)
 	if err := json.Unmarshal(recentJSON, &target.RecentSamples); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("decode recent samples: %w", err)

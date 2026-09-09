@@ -163,6 +163,85 @@ func TestErrorAccountWithHealthEvidenceContributesAvailability(t *testing.T) {
 	}
 }
 
+func TestApplyCurrentHealthClearsHistoricalRateLimitState(t *testing.T) {
+	target := model.DashboardTarget{Target: model.Target{
+		Kind:          model.KindAccount,
+		Status:        model.StatusDegraded,
+		Available:     true,
+		HealthReason:  model.HealthReasonRateLimited,
+		LatestMessage: "当前可用，但近 5 分钟有 10.0% 上游尝试被限速",
+	}, CurrentHealth: model.HealthWindow{
+		WindowSeconds: 300,
+		Samples:       2,
+		Successful:    2,
+		Status:        model.StatusOperational,
+		Available:     true,
+	}}
+
+	applyCurrentHealth(&target)
+
+	if target.Status != model.StatusOperational || !target.Available || target.HealthReason != "" {
+		t.Fatalf("recovered health = %+v", target.Target)
+	}
+	if target.LatestMessage != "" {
+		t.Fatalf("historical rate-limit message remained after recovery: %q", target.LatestMessage)
+	}
+}
+
+func TestApplyCurrentHealthKeepsPartialGroupFailureFromErasingAvailableHistory(t *testing.T) {
+	target := model.DashboardTarget{Target: model.Target{
+		Kind:      model.KindGroup,
+		Status:    model.StatusOperational,
+		Available: true,
+	}, CurrentHealth: model.HealthWindow{
+		WindowSeconds:    300,
+		Samples:          1,
+		HardFailures:     1,
+		Status:           model.StatusFailed,
+		Available:        false,
+		MemberAccounts:   2,
+		ObservedAccounts: 1,
+		Reason:           model.HealthReasonUpstreamError,
+	}}
+
+	applyCurrentHealth(&target)
+
+	if target.Status != model.StatusOperational || !target.Available {
+		t.Fatalf("partial group failure erased historical availability: %+v", target.Target)
+	}
+}
+
+func TestApplyCurrentHealthOverridesGroupWhenAllMembersObserved(t *testing.T) {
+	target := model.DashboardTarget{Target: model.Target{
+		Kind:      model.KindGroup,
+		Status:    model.StatusOperational,
+		Available: true,
+	}, CurrentHealth: model.HealthWindow{
+		WindowSeconds:    300,
+		Samples:          2,
+		HardFailures:     2,
+		Status:           model.StatusFailed,
+		Available:        false,
+		MemberAccounts:   2,
+		ObservedAccounts: 2,
+		Reason:           model.HealthReasonUpstreamError,
+	}}
+
+	applyCurrentHealth(&target)
+
+	if target.Status != model.StatusFailed || target.Available {
+		t.Fatalf("fully observed group failure was not applied: %+v", target.Target)
+	}
+}
+
+func TestTargetStatsUsesSampleDenominatorForRateLimitRate(t *testing.T) {
+	got := targetStats(1, 1, 1, 0, sql.NullInt64{}, sql.NullFloat64{}, sql.NullFloat64{},
+		sql.NullInt64{}, sql.NullFloat64{}, sql.NullFloat64{})
+	if got.RateLimitRate != 100 {
+		t.Fatalf("rate-limit rate = %.1f, want 100%% of observed samples", got.RateLimitRate)
+	}
+}
+
 func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T) {
 	for _, fragment := range []string{
 		"visible_targets AS MATERIALIZED",
