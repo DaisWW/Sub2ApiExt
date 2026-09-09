@@ -303,6 +303,9 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 		t.Fatalf("got status %d", response.Code)
 	}
 	body := response.Body.String()
+	if strings.Contains(body, "renderCurrentHealth") || strings.Contains(body, "current-health") {
+		t.Fatal("dashboard.js must not render the middle current-health card block")
+	}
 	for _, marker := range []string{
 		"const availabilityLabel = `近 1 小时通过率${availabilityDetail}`",
 		"const currentSample = recentSamples[recentSamples.length - 1]",

@@ -187,7 +187,6 @@ export class DashboardPanel {
     const firstByte = stats.first_byte || {};
     const latency = stats.latency || {};
     const status = normalizeStatus(item.status);
-    const currentHealth = item.current_health || {};
     const displayStatus = displayHealthStatus(item, status, null, null, item.health_reason);
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
@@ -231,7 +230,6 @@ export class DashboardPanel {
     const note = targetNote
       ? `<div class="target-note">${escapeHTML(targetNote)}</div>`
       : '';
-    const currentHealthNote = renderCurrentHealth(currentHealth, item);
     const routeNote = renderRouteState(item);
     const evidenceAgeLabel = item.stale && item.latest_source
       ? `沿用最近${staleLabel(item, status)}`
@@ -260,7 +258,6 @@ export class DashboardPanel {
           <span class="availability-label">${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
         </div>
-        ${currentHealthNote}
         <div class="target-live${item.kind === 'group' ? ' target-live-group' : ''}">
           <div class="target-live-metric" title="${escapeHTML(activeUsersTitle)}">
             <span class="target-live-label">${formatActivityWindow(this.#activityWindowSeconds)}活跃用户</span>
@@ -481,34 +478,6 @@ function renderMetric(label, value, help = '', tone = '') {
   const title = help ? ` title="${escapeHTML(help)}"` : '';
   const toneClass = tone ? ` ${tone}` : '';
   return `<div><div class="metric-label"${title}>${label}</div><div class="metric-value${toneClass}">${value}</div></div>`;
-}
-
-function renderCurrentHealth(health, item) {
-  const samples = normalizeCount(health?.samples);
-  if (!samples) {
-    return '<div class="current-health current-health-empty">当前窗口无新证据，状态沿用最近历史证据</div>';
-  }
-  const status = normalizeStatus(health?.status);
-  const reason = String(health?.reason || '').trim();
-  const label = healthLabel(status, reason);
-  const successful = normalizeCount(health?.successful);
-  const attempts = normalizeCount(health?.attempts) || samples;
-  const rateLimited = normalizeCount(health?.rate_limited);
-  const hardFailures = normalizeCount(health?.hard_failures);
-  const confidence = health?.confidence === 'low' ? ' · 低置信度' : '';
-  const details = [`成功 ${successful}/${samples}`];
-  if (rateLimited) details.push(`429 尝试 ${rateLimited}（${formatPct(health?.rate_limit_rate)}）`);
-  if (hardFailures) details.push(`硬失败 ${hardFailures}`);
-  if (attempts > samples && !rateLimited) details.push(`上游尝试 ${attempts}`);
-  if (item?.kind === 'group' && normalizeCount(health?.affected_accounts)) {
-    details.push(`受影响账户 ${normalizeCount(health.affected_accounts)}/${normalizeCount(health.member_accounts)}`);
-  }
-  const latency = health?.latency?.p95_ms;
-  if (latency != null) details.push(`成功 P95 ${formatMs(latency)}`);
-  return `<div class="current-health current-health-${status}" title="当前窗口按最终请求结果统计；429 单独按上游尝试统计">
-    <span>当前 5 分钟：<strong>${escapeHTML(label)}</strong>${confidence}</span>
-    <span class="current-health-detail">${escapeHTML(details.join(' · '))}</span>
-  </div>`;
 }
 
 function renderRouteState(item) {

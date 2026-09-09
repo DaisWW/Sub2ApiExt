@@ -234,12 +234,6 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .target-platform { margin-top: 5px; color: var(--muted); font-size: 12px; }
 .target-note { margin-top: 8px; color: var(--soft); font-size: 11px; line-height: 1.45; }
 .route-note { margin-top: 6px; color: var(--amber); font-size: 11px; line-height: 1.4; }
-.current-health { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0 0 16px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--soft); font-size: 11px; line-height: 1.4; }
-.current-health strong { color: var(--mint); }
-.current-health-degraded strong { color: var(--amber); }
-.current-health-failed strong { color: var(--red); }
-.current-health-unknown strong, .current-health-empty { color: var(--muted); }
-.current-health-detail { color: var(--muted); font-variant-numeric: tabular-nums; }
 .target-live { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
 .target-live-group { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .target-live-metric { min-width: 0; display: grid; gap: 4px; }
