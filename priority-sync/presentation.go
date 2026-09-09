@@ -5,7 +5,6 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 	"unicode"
 )
@@ -30,25 +29,110 @@ func truncateTableLabel(value string, maximum int) string {
 	if maximum < 2 {
 		return ""
 	}
-	runes := []rune(value)
-	if len(runes) <= maximum {
+	if displayWidth(value) <= maximum {
 		return value
 	}
-	return string(runes[:maximum-1]) + "…"
+	remaining := maximum - displayWidth("…")
+	var result strings.Builder
+	width := 0
+	for _, character := range value {
+		runeWidth := runeDisplayWidth(character)
+		if width+runeWidth > remaining {
+			break
+		}
+		result.WriteRune(character)
+		width += runeWidth
+	}
+	return result.String() + "…"
 }
 
 func tableAccountLabel(name string, id int64, maximum int) string {
 	label := accountLabel(name, id)
-	if len([]rune(label)) <= maximum {
+	if displayWidth(label) <= maximum {
 		return label
 	}
 	suffix := fmt.Sprintf(" #%d", id)
 	namePart := strings.TrimSuffix(label, suffix)
-	nameMaximum := maximum - len([]rune(suffix))
+	nameMaximum := maximum - displayWidth(suffix)
 	if nameMaximum < 2 {
 		return suffix
 	}
 	return truncateTableLabel(namePart, nameMaximum) + suffix
+}
+
+func runeDisplayWidth(value rune) int {
+	if unicode.IsControl(value) || unicode.Is(unicode.Mn, value) || unicode.Is(unicode.Me, value) {
+		return 0
+	}
+	if (value >= 0x1100 && value <= 0x115f) ||
+		(value >= 0x2329 && value <= 0x232a) ||
+		(value >= 0x2e80 && value <= 0xa4cf) ||
+		(value >= 0xac00 && value <= 0xd7a3) ||
+		(value >= 0xf900 && value <= 0xfaff) ||
+		(value >= 0xfe10 && value <= 0xfe6f) ||
+		(value >= 0xff00 && value <= 0xff60) ||
+		(value >= 0xffe0 && value <= 0xffe6) ||
+		(value >= 0x1f300 && value <= 0x1faff) {
+		return 2
+	}
+	return 1
+}
+
+func displayWidth(value string) int {
+	width := 0
+	for _, character := range value {
+		width += runeDisplayWidth(character)
+	}
+	return width
+}
+
+func tableColumnWidths(rows [][]string) []int {
+	if len(rows) == 0 {
+		return nil
+	}
+	widths := make([]int, len(rows[0]))
+	for _, row := range rows {
+		for index, value := range row {
+			if index < len(widths) && displayWidth(value) > widths[index] {
+				widths[index] = displayWidth(value)
+			}
+		}
+	}
+	return widths
+}
+
+func formatTableRow(cells []string, widths []int) string {
+	parts := make([]string, len(cells))
+	for index, cell := range cells {
+		padding := widths[index] - displayWidth(cell)
+		parts[index] = cell + strings.Repeat(" ", padding)
+	}
+	return strings.TrimRight(strings.Join(parts, "  "), " ")
+}
+
+func formatTableSeparator(widths []int) string {
+	parts := make([]string, len(widths))
+	for index, width := range widths {
+		parts[index] = strings.Repeat("-", width)
+	}
+	return strings.Join(parts, "  ")
+}
+
+func formatTableRows(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	widths := tableColumnWidths(rows)
+	var output strings.Builder
+	output.WriteString(formatTableRow(rows[0], widths))
+	output.WriteByte('\n')
+	output.WriteString(formatTableSeparator(widths))
+	output.WriteByte('\n')
+	for _, row := range rows[1:] {
+		output.WriteString(formatTableRow(row, widths))
+		output.WriteByte('\n')
+	}
+	return output.String()
 }
 
 func tableActionLabel(value string) string {
@@ -110,13 +194,7 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 	if writer == nil {
 		return nil
 	}
-	table := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintf(table, "优先级账户表 | %s | 共 %d 个\n", formatTableTime(generatedAt), len(recommendations)); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintln(table, "账号\t分数\t优先级\t当前\t样本\t可用\t成本/M\t延迟P90\t状态"); err != nil {
-		return err
-	}
+	rows := [][]string{{"账号", "分数", "优先级", "当前", "样本", "可用", "成本/M", "延迟P90", "状态"}}
 	for _, recommendation := range recommendations {
 		samples := recommendation.SuccessfulRequests + recommendation.TerminalFailures
 		cost := "-"
@@ -130,22 +208,22 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 			p90 = formatTableLatency(recommendation.FirstTokenP90Ms, true)
 		}
 		action := tableActionLabel(recommendation.ApplyStatus)
-		if _, err := fmt.Fprintf(table, "%s\t%.1f\t%d\t%d\t%d\t%.1f%%\t%s\t%s\t%s\n",
+		rows = append(rows, []string{
 			tableAccountLabel(recommendation.Name, recommendation.ID, 32),
-			recommendation.Score,
-			recommendation.RecommendedPriority,
-			recommendation.CurrentPriority,
-			samples,
-			recommendation.Availability*100,
+			fmt.Sprintf("%.1f", recommendation.Score),
+			strconv.Itoa(recommendation.RecommendedPriority),
+			strconv.Itoa(recommendation.CurrentPriority),
+			strconv.FormatInt(samples, 10),
+			fmt.Sprintf("%.1f%%", recommendation.Availability*100),
 			cost,
 			p90,
 			action,
-		); err != nil {
-			return err
-		}
+		})
 	}
-	if _, err := fmt.Fprintln(table); err != nil {
-		return err
-	}
-	return table.Flush()
+	var output strings.Builder
+	fmt.Fprintf(&output, "优先级账户表（%s；共 %d 个）\n", formatTableTime(generatedAt), len(recommendations))
+	output.WriteString(formatTableRows(rows))
+	output.WriteByte('\n')
+	_, err := io.WriteString(writer, output.String())
+	return err
 }
