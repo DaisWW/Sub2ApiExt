@@ -61,8 +61,8 @@ func TestScoreAccountsDoesNotDoubleCountRecovered429Evidence(t *testing.T) {
 	if result[0].Confidence != 0.2 {
 		t.Fatalf("recovered 429 inflated confidence to %v", result[0].Confidence)
 	}
-	if result[0].RecommendedPriority != 37 {
-		t.Fatalf("insufficient final outcomes changed priority to %d", result[0].RecommendedPriority)
+	if result[0].RecommendedPriority != priorityNeutral {
+		t.Fatalf("insufficient final outcomes did not return to default anchor: %d", result[0].RecommendedPriority)
 	}
 }
 
@@ -78,17 +78,27 @@ func TestScoreAccountsHardExcludesActiveCooldown(t *testing.T) {
 	}
 }
 
-func TestScoreAccountsInsufficientEvidencePreservesPriority(t *testing.T) {
+func TestScoreAccountsInsufficientEvidenceMovesToDefaultAnchor(t *testing.T) {
 	now := time.Now().UTC()
 	result := scoreAccounts([]AccountMetrics{{
 		ID: 1, Name: "new", Status: "active", CurrentPriority: 37,
 		SuccessfulRequests: 1, TotalTokens: 1000, ActualCost: 0.01,
 	}}, now, 5)
-	if result[0].RecommendedPriority != 37 {
-		t.Fatalf("insufficient evidence changed priority to %d", result[0].RecommendedPriority)
+	if result[0].RecommendedPriority != priorityNeutral {
+		t.Fatalf("insufficient evidence did not move to default anchor: %d", result[0].RecommendedPriority)
 	}
 	if result[0].Confidence <= 0 || result[0].Confidence >= 1 {
 		t.Fatalf("unexpected confidence %v", result[0].Confidence)
+	}
+}
+
+func TestScoreAccountsMovesHighPriorityColdAccountBackToAnchor(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Name: "stale-high-priority", Status: "active", CurrentPriority: priorityBest,
+	}}, now, 5)
+	if result[0].AnchorPriority != priorityNeutral || result[0].RecommendedPriority != priorityNeutral {
+		t.Fatalf("cold account did not return to default anchor: %+v", result[0])
 	}
 }
 

@@ -78,7 +78,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		} else if evidence >= int64(minSamples) {
 			recommended = priorityForScore(score)
 			reason = fmt.Sprintf("成本 %.1f%%、速度 %.1f%%、可用性 %.1f%%", costScores[index], speedScores[index], availabilityScore)
-		} else if anchorPriority < currentPriority {
+		} else if anchorPriority != currentPriority {
 			recommended = anchorPriority
 			reason = fmt.Sprintf("证据不足，向倍率锚点优先级 %d 缓慢靠近", anchorPriority)
 		}
