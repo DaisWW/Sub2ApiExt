@@ -139,7 +139,11 @@ catch {
     throw "监控访问配置修复失败：$($_.Exception.Message)"
 }
 
-Grant-ExtensionRuntimeAccess -Path $runtimeRoot
+Grant-ExtensionRuntimeAccess -Path $runtimeRoot -SensitiveFiles @(
+    (Join-Path $runtimeRoot 'database.runtime.env'),
+    (Join-Path $runtimeRoot 'redis.runtime.env'),
+    (Join-Path $runtimeRoot 'settings.env')
+)
 
 # Replace the pre-Compose verification container from the original workspace.
 Remove-ExtensionContainer -Name 'sub2api-monitor-check'

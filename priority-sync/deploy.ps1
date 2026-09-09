@@ -47,7 +47,10 @@ Write-ExtensionEnvFile -Path (Join-Path $runtimeRoot '.runtime.env') -Values ([o
     PGCONNECT_TIMEOUT = '10'
     PGOPTIONS = '-c default_transaction_read_only=on'
 })
-Grant-ExtensionRuntimeAccess -Path $runtimeRoot
+Grant-ExtensionRuntimeAccess -Path $runtimeRoot -SensitiveFiles @(
+    (Join-Path $runtimeRoot '.runtime.env'),
+    (Join-Path $runtimeRoot 'settings.env')
+)
 
 Start-ExtensionCompose -RuntimeRoot $runtimeRoot
 Wait-ExtensionContainer -Name 'sub2api-priority-sync'

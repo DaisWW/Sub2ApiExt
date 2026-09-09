@@ -273,8 +273,52 @@ function Read-ExtensionEnvFile {
     return $values
 }
 
+function Protect-ExtensionRuntimeFiles {
+    param([Parameter(Mandatory = $true)][string[]]$Paths)
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $currentUser = New-Object Security.Principal.SecurityIdentifier($identity.User.Value)
+    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
+    $administrators = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            continue
+        }
+        try {
+            $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+            foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+                $acl.PurgeAccessRules($rule.IdentityReference)
+            }
+            $acl.SetAccessRuleProtection($true, $false)
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    $system, [Security.AccessControl.FileSystemRights]::FullControl,
+                    [Security.AccessControl.AccessControlType]::Allow))
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    $administrators, [Security.AccessControl.FileSystemRights]::FullControl,
+                    [Security.AccessControl.AccessControlType]::Allow))
+            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    $currentUser, [Security.AccessControl.FileSystemRights]::Modify,
+                    [Security.AccessControl.AccessControlType]::Allow))
+            Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
+        }
+        catch {
+            throw "Could not restrict access to ${path}: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Grant-ExtensionRuntimeAccess {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$SensitiveFiles = @()
+    )
+
+    # Protect credentials before changing the parent ACL, and again after
+    # restoring inheritance for ordinary runtime files. Existing explicit or
+    # inherited broad ACEs must never survive on credential-bearing files.
+    if ($SensitiveFiles.Count -gt 0) {
+        Protect-ExtensionRuntimeFiles -Paths $SensitiveFiles
+    }
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $currentUser = "*$($identity.User.Value)"
@@ -292,6 +336,10 @@ function Grant-ExtensionRuntimeAccess {
         if ($LASTEXITCODE -ne 0) {
             throw "Could not restore inherited access below $Path."
         }
+    }
+
+    if ($SensitiveFiles.Count -gt 0) {
+        Protect-ExtensionRuntimeFiles -Paths $SensitiveFiles
     }
 }
 
