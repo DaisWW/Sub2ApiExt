@@ -9,17 +9,33 @@ import {
   formatPct,
   formatTime,
   latencyMetricClass,
+  normalizePlatform,
   normalizeStatus,
+  nullableNonNegativeNumber,
+  platformLabel,
+  platformMatches,
+  platformTone,
+  priorityValue,
+  renderPlatformFilters,
   slowLatencyThresholdMs,
   sourceLabel,
   statusClass,
   toast
 } from './shared.js';
 
+const dashboardSortMetrics = new Set(['priority', 'name', 'first_byte_median']);
+const dashboardSortLabels = {
+  priority: '优先级',
+  name: '名称',
+  first_byte_median: '首字中位数'
+};
+
 export class DashboardPanel {
   dashboard = null;
   filter = 'group';
   platformFilter = 'openai';
+  sortMetricByKind = { group: 'name', account: 'priority' };
+  sortDirection = 'asc';
   #requests = new LatestRequest();
   #activityRequests = new LatestRequest();
   #openHistory;
@@ -38,17 +54,40 @@ export class DashboardPanel {
 
   constructor(openHistory) {
     this.#openHistory = openHistory;
+    $('#dashboardSortSelect')?.addEventListener('change', (event) => this.setSortMetric(event.target.value));
+    $('#dashboardSortDirection')?.addEventListener('click', () => {
+      this.setSortDirection(this.sortDirection === 'asc' ? 'desc' : 'asc');
+    });
+    this.#updateSortControls();
     this.#scheduleCountdownFrame();
   }
 
   setFilter(filter) {
+    if (filter !== 'group' && filter !== 'account') return;
     this.filter = filter;
+    this.#updateSortControls();
     this.render();
   }
 
   setPlatformFilter(platform) {
-    if (platform !== 'openai' && platform !== 'anthropic') return;
-    this.platformFilter = platform;
+    const normalized = normalizePlatform(platform);
+    if (!normalized || normalized === 'all') return;
+    this.platformFilter = normalized;
+    this.render();
+  }
+
+  setSortMetric(metric) {
+    if (!dashboardSortMetrics.has(metric)) return;
+    if (metric === 'priority' && this.filter !== 'account') return;
+    this.sortMetricByKind[this.filter] = metric;
+    this.#updateSortControls();
+    this.render();
+  }
+
+  setSortDirection(direction) {
+    if (direction !== 'asc' && direction !== 'desc') return;
+    this.sortDirection = direction;
+    this.#updateSortControls();
     this.render();
   }
 
@@ -101,6 +140,8 @@ export class DashboardPanel {
   render() {
     if (!this.dashboard) return;
     this.#renderOverview();
+    this.#renderPlatformFilters();
+    this.#updateSortControls();
     const targets = this.#visibleTargets();
     $('#sectionMeta').textContent = `${targets.length} / ${(this.dashboard.targets || []).length} 个对象`;
     $('#targetGrid').innerHTML = targets.length
@@ -175,19 +216,47 @@ export class DashboardPanel {
     });
   }
 
+  #renderPlatformFilters() {
+    const values = (this.dashboard.targets || []).map((target) => target.platform);
+    const selected = renderPlatformFilters($('#dashboardPlatformFilters'), values, this.platformFilter);
+    if (selected) this.platformFilter = selected;
+  }
+
+  #updateSortControls() {
+    const metric = this.sortMetricByKind[this.filter] || 'name';
+    const select = $('#dashboardSortSelect');
+    if (select) {
+      const priorityOption = select.querySelector('option[value="priority"]');
+      if (priorityOption) {
+        const accountOnly = this.filter !== 'account';
+        priorityOption.hidden = accountOnly;
+        priorityOption.disabled = accountOnly;
+      }
+      select.value = metric;
+    }
+    const button = $('#dashboardSortDirection');
+    if (!button) return;
+    const descending = this.sortDirection === 'desc';
+    const currentOrder = descending ? '高到低' : '低到高';
+    const nextOrder = descending ? '低到高' : '高到低';
+    const hint = metric === 'priority' ? '（数值越小，路由优先级越高）' : '';
+    const description = `当前按${dashboardSortLabels[metric]}${hint}${currentOrder}，点击切换为${nextOrder}`;
+    button.textContent = descending ? '↓' : '↑';
+    button.title = description;
+    button.setAttribute('aria-label', description);
+    button.setAttribute('aria-pressed', String(descending));
+  }
+
   #visibleTargets() {
     return (this.dashboard.targets || [])
       .filter((target) => target.kind === this.filter
-        && normalizePlatform(target.platform) === this.platformFilter)
-      .sort((left, right) => {
-        if (this.filter === 'account') {
-          const leftPriority = parsePriority(left.priority);
-          const rightPriority = parsePriority(right.priority);
-          if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-        }
-        return String(left.name || '').trim().localeCompare(String(right.name || '').trim(), 'zh-CN')
-          || String(left.key).localeCompare(String(right.key), 'zh-CN');
-      });
+        && platformMatches(target.platform, this.platformFilter))
+      .sort((left, right) => compareDashboardTargets(
+        left,
+        right,
+        this.sortMetricByKind[this.filter],
+        this.sortDirection
+      ));
   }
 
   #renderTarget(item) {
@@ -211,7 +280,7 @@ export class DashboardPanel {
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
-    const priority = item.kind === 'account' ? parsePriority(item.priority, null) : null;
+    const priority = item.kind === 'account' ? priorityValue(item.priority) : null;
     const activeUsers = this.#activityLoaded ? (this.#activeUsers.get(item.key) || 0) : null;
     const activeUsersValue = activeUsers === null ? '—' : `${formatCount(activeUsers)} 人`;
     const activeRequests = this.#activityLoaded ? (this.#activeRequests.get(item.key) || 0) : null;
@@ -246,9 +315,7 @@ export class DashboardPanel {
     const statusTitle = evidenceAgeLabel
       ? `当前状态：${evidenceAgeLabel}`
       : '当前状态：最新证据';
-    const platformClass = platform === 'openai' || platform === 'anthropic'
-      ? ` target-platform-${platform}`
-      : '';
+    const platformClass = ` target-platform-${platformTone(platform)}`;
     return `
       <article class="target-card target-${displayStatus}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
         role="button" tabindex="0" aria-label="查看 ${escapeHTML(item.name)} 的历史记录">
@@ -256,7 +323,7 @@ export class DashboardPanel {
           <div class="target-copy">
             <div class="target-kind">${item.kind === 'group' ? 'GROUP' : 'ACCOUNT'}</div>
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
-            <div class="target-platform${platformClass}">${escapeHTML(item.platform || 'mixed')}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
+            <div class="target-platform${platformClass}">${escapeHTML(platformLabel(item.platform))}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
             ${note}
             ${routeNote}
           </div>
@@ -317,33 +384,32 @@ function normalizeCount(value) {
   return Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0;
 }
 
-function parsePriority(value, fallback = Number.MAX_SAFE_INTEGER) {
-  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) {
-    return fallback;
-  }
-  const priority = Number(value);
-  return Number.isFinite(priority) && priority >= 0 ? Math.trunc(priority) : fallback;
-}
-
 function normalizeWindowSeconds(value) {
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? seconds : 300;
 }
 
-function normalizePlatform(value) {
-  switch (String(value || '').trim().toLowerCase()) {
-    case 'openai':
-    case 'openai_compatible':
-    case 'codex':
-    case 'grok':
-    case 'xai':
-      return 'openai';
-    case 'anthropic':
-    case 'claude':
-      return 'anthropic';
-    default:
-      return '';
+function compareDashboardTargets(left, right, metric, direction) {
+  if (metric === 'name') {
+    return compareDashboardNames(left, right) * (direction === 'desc' ? -1 : 1);
   }
+  const leftValue = metric === 'priority'
+    ? priorityValue(left?.priority)
+    : nullableNonNegativeNumber(left?.stats?.first_byte?.median_ms);
+  const rightValue = metric === 'priority'
+    ? priorityValue(right?.priority)
+    : nullableNonNegativeNumber(right?.stats?.first_byte?.median_ms);
+  if (leftValue === null || rightValue === null) {
+    if (leftValue !== rightValue) return leftValue === null ? 1 : -1;
+  } else if (leftValue !== rightValue) {
+    return (direction === 'desc' ? -1 : 1) * (leftValue - rightValue);
+  }
+  return compareDashboardNames(left, right);
+}
+
+function compareDashboardNames(left, right) {
+  return String(left?.name || '').trim().localeCompare(String(right?.name || '').trim(), 'zh-CN')
+    || String(left?.key || '').localeCompare(String(right?.key || ''), 'zh-CN');
 }
 
 function formatActivityWindow(seconds) {

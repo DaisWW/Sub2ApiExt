@@ -43,10 +43,19 @@
               <button class="active" data-filter="group" aria-pressed="true">分组</button>
               <button data-filter="account" aria-pressed="false">账户</button>
             </div>
-            <div class="segmented" role="group" aria-label="平台类型">
-              <button class="active platform-filter-openai" data-platform-filter="openai" aria-pressed="true">OpenAI</button>
-              <button class="platform-filter-anthropic" data-platform-filter="anthropic" aria-pressed="false">Anthropic</button>
+            <div class="segmented platform-filters" id="dashboardPlatformFilters" role="group" aria-label="平台类型">
+              <button type="button" class="platform-filter platform-filter-openai active" data-platform-filter="openai" aria-pressed="true">OpenAI</button>
+              <button type="button" class="platform-filter platform-filter-anthropic" data-platform-filter="anthropic" aria-pressed="false">Anthropic</button>
             </div>
+            <label class="select-wrap dashboard-sort-select">
+              <span class="sr-only">实时卡片排序指标</span>
+              <select id="dashboardSortSelect" aria-label="实时卡片排序指标">
+                <option value="name" selected>名称</option>
+                <option value="first_byte_median">首字中位数</option>
+                <option value="priority" hidden disabled>账户优先级</option>
+              </select>
+            </label>
+            <button class="icon-button" id="dashboardSortDirection" type="button" title="当前按名称低到高，点击切换为高到低" aria-label="当前按名称低到高，点击切换为高到低" aria-pressed="false">↑</button>
           </div>
         </section>
 
@@ -140,6 +149,11 @@
             <div class="usage-entity-heading">
               <div><p class="eyebrow" id="usageEntityEyebrow">GROUP USAGE</p><h3 id="usageEntityTitle">分组缓存与成本</h3></div>
               <div class="usage-entity-actions">
+                <div class="segmented platform-filters usage-platform-filters" id="usagePlatformFilters" role="group" aria-label="用量平台类型">
+                  <button type="button" class="platform-filter platform-filter-all active" data-platform-filter="all" aria-pressed="true">全部</button>
+                  <button type="button" class="platform-filter platform-filter-openai" data-platform-filter="openai" aria-pressed="false">OpenAI</button>
+                  <button type="button" class="platform-filter platform-filter-anthropic" data-platform-filter="anthropic" aria-pressed="false">Anthropic</button>
+                </div>
                 <span class="usage-sort-label">排序</span>
                 <label class="select-wrap usage-sort-select">
                   <span class="sr-only">卡片排序指标</span>

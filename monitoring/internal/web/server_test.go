@@ -111,9 +111,14 @@ func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
 	for path, markers := range map[string][]string{
 		"/": {
 			`<option value="priority" hidden disabled>账户优先级</option>`,
+			`id="usagePlatformFilters"`,
 		},
 		"/js/usage.js": {
 			"'priority'",
+			"platformFilter = 'all'",
+			"setPlatformFilter(platform)",
+			"platformMatches(item?.platform, platformFilter)",
+			"renderPlatformFilters(",
 			"账户优先级",
 			"priorityOption.hidden = accountOnly",
 			"usagePriorityValue(item?.priority)",
@@ -270,9 +275,10 @@ func TestDashboardSortsAccountsByPriorityAndShowsBadge(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, marker := range []string{
-		"if (this.filter === 'account')",
-		"left.priority",
-		"right.priority",
+		"sortMetricByKind = { group: 'name', account: 'priority' }",
+		"priorityValue(left?.priority)",
+		"priorityValue(right?.priority)",
+		"dashboardSortSelect",
 		"class=\"account-priority\"",
 		"数值越小，路由优先级越高",
 	} {
@@ -293,7 +299,7 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	body := response.Body.String()
 	for _, marker := range []string{
 		"aria-label=\"平台类型\"",
-		"class=\"active platform-filter-openai\"",
+		"class=\"platform-filter platform-filter-openai active\"",
 		"data-platform-filter=\"openai\"",
 		"data-platform-filter=\"anthropic\"",
 	} {
@@ -305,8 +311,16 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	if usageStart < 0 {
 		t.Fatal("usage section is missing")
 	}
-	if strings.Contains(body[usageStart:], "data-platform-filter=") {
-		t.Fatal("usage section must not expose platform filters")
+	usageBody := body[usageStart:]
+	for _, marker := range []string{
+		"id=\"usagePlatformFilters\"",
+		"data-platform-filter=\"all\"",
+		"data-platform-filter=\"openai\"",
+		"data-platform-filter=\"anthropic\"",
+	} {
+		if !strings.Contains(usageBody, marker) {
+			t.Errorf("usage section is missing %q", marker)
+		}
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
@@ -319,17 +333,29 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	for _, marker := range []string{
 		"platformFilter = 'openai'",
 		"setPlatformFilter(platform)",
-		"normalizePlatform(target.platform) === this.platformFilter",
-		"function normalizePlatform(value)",
-		"case 'openai_compatible':",
-		"case 'codex':",
-		"case 'grok':",
-		"case 'xai':",
-		"case 'claude':",
-		"target-platform-${platform}",
+		"platformMatches(target.platform, this.platformFilter)",
+		"renderPlatformFilters($('#dashboardPlatformFilters'",
+		"target-platform-${platformTone(platform)}",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("dashboard.js is missing %q", marker)
+		}
+	}
+	request = httptest.NewRequest(http.MethodGet, "/js/shared.js", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("shared.js returned status %d", response.Code)
+	}
+	body = response.Body.String()
+	for _, marker := range []string{
+		"const platformAliases = new Map",
+		"openai_compatible",
+		"['claude', 'anthropic']",
+		"function renderPlatformFilters",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("shared.js is missing %q", marker)
 		}
 	}
 	request = httptest.NewRequest(http.MethodGet, "/app.js", nil)
@@ -338,8 +364,15 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("app.js returned status %d", response.Code)
 	}
-	if !strings.Contains(response.Body.String(), "#dashboardPanel [data-platform-filter]") {
-		t.Fatal("platform filter handlers must be scoped to the realtime dashboard")
+	for _, marker := range []string{
+		"document.addEventListener('click'",
+		"#dashboardPanel [data-platform-filter]",
+		"#usagePlatformFilters [data-platform-filter]",
+		"usage.setPlatformFilter(button.dataset.platformFilter)",
+	} {
+		if !strings.Contains(response.Body.String(), marker) {
+			t.Errorf("app.js is missing %q", marker)
+		}
 	}
 }
 

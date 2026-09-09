@@ -8,6 +8,11 @@ import {
   formatTime,
   formatTokens,
   formatUSD,
+  normalizePlatform,
+  platformLabel,
+  platformMatches,
+  platformTone,
+  renderPlatformFilters,
   toast
 } from './shared.js';
 
@@ -28,6 +33,7 @@ export class UsagePanel {
   usage = null;
   period = 'today';
   entityKind = 'group';
+  platformFilter = 'all';
   entitySortMetric = 'unit_cost';
   entitySortDirection = 'asc';
   trendMetric = 'tokens';
@@ -55,6 +61,16 @@ export class UsagePanel {
 
   setPeriod(period) {
     this.period = period;
+  }
+
+  setPlatformFilter(platform) {
+    const normalized = normalizePlatform(platform);
+    if (normalized !== 'all') {
+      const values = this.#platformValues();
+      if (!values.includes(normalized)) return;
+    }
+    this.platformFilter = normalized;
+    this.#renderEntityCards();
   }
 
   setTrendMetric(metric, button) {
@@ -122,6 +138,7 @@ export class UsagePanel {
     $('#usageMeta').textContent = `${this.usage.period_label || '用量窗口'} · ${formatTime(this.usage.generated_at)} 更新`;
     $('#usageKpiGrid').innerHTML = usageKPIs(summary).map(renderUsageKPI).join('');
     $('#usageDetailStrip').innerHTML = usageDetailStrip(summary);
+    this.#renderPlatformFilters();
     this.#renderEntityCards();
     this.#renderShares();
     this.#renderTrend();
@@ -146,8 +163,25 @@ export class UsagePanel {
       group ? '暂无分组用量数据' : '暂无账户用量数据',
       this.entityKind,
       this.entitySortMetric,
-      this.entitySortDirection
+      this.entitySortDirection,
+      this.platformFilter
     );
+  }
+
+  #platformValues() {
+    if (!this.usage) return [];
+    return [...(this.usage.accounts || []), ...(this.usage.groups || [])]
+      .map((item) => normalizePlatform(item?.platform));
+  }
+
+  #renderPlatformFilters() {
+    const selected = renderPlatformFilters(
+      $('#usagePlatformFilters'),
+      this.#platformValues(),
+      this.platformFilter,
+      { includeAll: true }
+    );
+    if (selected) this.platformFilter = selected;
   }
 
   #renderTrend() {
@@ -218,10 +252,11 @@ function renderUsageKPI([label, value, note, color]) {
   </article>`;
 }
 
-function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'unit_cost', sortDirection = 'asc') {
+function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'unit_cost', sortDirection = 'asc', platformFilter = 'all') {
   const container = $('#usageEntityCardList');
   const items = (Array.isArray(sourceItems) ? sourceItems : [])
     .slice()
+    .filter((item) => platformMatches(item?.platform, platformFilter))
     .sort((left, right) => compareUsageCards(left, right, sortMetric, sortDirection));
   if (!items.length) {
     container.innerHTML = '<div class="empty-state usage-entity-empty">' + emptyText + '</div>';
@@ -296,7 +331,8 @@ function renderUsageCard(item, kind) {
   const hitRate = Math.min(100, nonNegativeNumber(item?.cache_hit_rate));
   const unitCost = unitCostValue(item);
   const name = item?.name || '未命名';
-  const platform = item?.platform && item.platform !== 'unknown' ? item.platform : '未知平台';
+  const platform = normalizePlatform(item?.platform);
+  const platformClass = ` usage-platform-${platformTone(platform)}`;
   const totalTokens = nonNegativeNumber(item?.total_tokens);
   const requests = nonNegativeNumber(item?.requests);
   const baseCost = nonNegativeNumber(item?.base_cost);
@@ -315,7 +351,7 @@ function renderUsageCard(item, kind) {
       </div>
       <div class="usage-card-head-meta">
         ${priority !== null ? `<span class="usage-account-priority" title="数值越小，路由优先级越高">优先级 ${priority}</span>` : ''}
-        <span class="usage-platform">${escapeHTML(platform)}</span>
+        <span class="usage-platform${platformClass}">${escapeHTML(platformLabel(platform))}</span>
       </div>
     </div>
     <div class="usage-card-primary">

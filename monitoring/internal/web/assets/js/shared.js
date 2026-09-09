@@ -34,6 +34,78 @@ export function escapeHTML(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (character) => entities[character]);
 }
 
+const platformAliases = new Map([
+  ['openai', 'openai'],
+  ['openai_compatible', 'openai'],
+  ['codex', 'openai'],
+  ['grok', 'openai'],
+  ['xai', 'openai'],
+  ['anthropic', 'anthropic'],
+  ['claude', 'anthropic'],
+  ['arthropic', 'anthropic'],
+  ['airthropic', 'anthropic']
+]);
+
+const platformNames = {
+  all: '全部',
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  mixed: '混合平台',
+  unknown: '未知平台'
+};
+
+export function normalizePlatform(value) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  return platformAliases.get(raw) || raw || 'unknown';
+}
+
+export function platformLabel(value) {
+  const key = normalizePlatform(value);
+  return platformNames[key] || String(value ?? '').trim() || platformNames.unknown;
+}
+
+export function platformTone(value) {
+  const key = normalizePlatform(value);
+  return key === 'openai' || key === 'anthropic' ? key : 'other';
+}
+
+export function platformMatches(value, filter) {
+  return filter === 'all' || normalizePlatform(value) === filter;
+}
+
+export function renderPlatformFilters(container, values, activeKey, { includeAll = false } = {}) {
+  if (!container) return activeKey;
+  const options = new Map();
+  if (includeAll) options.set('all', platformNames.all);
+  options.set('openai', platformNames.openai);
+  options.set('anthropic', platformNames.anthropic);
+  for (const value of values || []) {
+    const key = normalizePlatform(value);
+    if (!options.has(key)) options.set(key, platformLabel(value));
+  }
+  const selected = options.has(activeKey)
+    ? activeKey
+    : includeAll ? 'all' : options.has('openai') ? 'openai' : options.keys().next().value;
+  container.innerHTML = [...options.entries()].map(([key, label]) => {
+    const tone = platformTone(key);
+    const active = key === selected;
+    return `<button type="button" class="platform-filter platform-filter-${tone}${active ? ' active' : ''}"
+      data-platform-filter="${escapeHTML(key)}" aria-pressed="${String(active)}">${escapeHTML(label)}</button>`;
+  }).join('');
+  return selected;
+}
+
+export function nullableNonNegativeNumber(value) {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+export function priorityValue(value, fallback = null) {
+  const priority = nullableNonNegativeNumber(value);
+  return priority === null ? fallback : Math.trunc(priority);
+}
+
 const knownStatuses = new Set(['operational', 'degraded', 'failed', 'error', 'unknown', 'disabled']);
 
 export function normalizeStatus(status) {
