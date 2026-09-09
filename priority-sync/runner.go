@@ -261,7 +261,8 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		if !recommendation.applyImmediately {
 			recommendation.NextPriority = rampPriority(recommendation.CurrentPriority, recommendation.RecommendedPriority)
 		}
-		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately && evidence < int64(r.config.MinSamples) {
+		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately &&
+			evidence < int64(r.config.MinSamples) && recommendation.RecommendedPriority < recommendation.CurrentPriority {
 			if recommendation.RecommendedPriority != recommendation.CurrentPriority {
 				pending++
 			}
@@ -425,13 +426,17 @@ func priorityChangeDirection(current, candidate int) int {
 }
 
 // rampPriority limits normal formal-band changes to one 20-point step. A
-// larger custom gap is capped to four writes; unavailable recovery starts at
-// the neutral band so an account does not jump straight back to high priority.
+// larger custom gap is capped to four writes; unavailable recovery re-enters
+// at neutral for good-or-better targets, but keeps degraded/poor targets so a
+// bad account is never promoted straight back into the front of the queue.
 func rampPriority(current, target int) int {
 	if current == target || current <= 0 || target <= 0 || target >= priorityUnavailable {
 		return target
 	}
 	if current >= priorityUnavailable {
+		if target > priorityNeutral {
+			return target
+		}
 		return priorityNeutral
 	}
 	distance := target - current

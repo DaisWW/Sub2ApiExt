@@ -363,6 +363,56 @@ func TestRampPriorityReentersFromUnavailableAtNeutral(t *testing.T) {
 	}
 }
 
+func TestRampPriorityDoesNotOvershootPoorRecoveryTarget(t *testing.T) {
+	if got := rampPriority(priorityUnavailable, priorityPoor); got != priorityPoor {
+		t.Fatalf("poor recovery priority = %d, want %d", got, priorityPoor)
+	}
+}
+
+func TestRunnerExplorationOnlyDefersOtherColdAccountPromotions(t *testing.T) {
+	type update struct {
+		id       string
+		priority int
+	}
+	updates := make(chan update, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Priority int `json:"priority"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updates <- update{id: filepath.Base(r.URL.Path), priority: payload.Priority}
+		_, _ = io.WriteString(w, `{"code":0}`)
+	}))
+	defer server.Close()
+
+	config := testRunnerConfig(t, server.URL, false)
+	config.Confirmations = 1
+	runner := NewRunner(config, &fakeMetricsSource{}, server.Client(), &syncState{
+		Accounts:    map[int64]accountState{},
+		Exploration: &explorationState{AccountID: 1, StartedAt: timePtr(nowForTest())},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.tableWriter = io.Discard
+	recommendations := []Recommendation{
+		{ID: 1, CurrentPriority: priorityExplore, RecommendedPriority: priorityExplore, Exploration: true},
+		{ID: 2, CurrentPriority: priorityBest, RecommendedPriority: priorityGood},
+		{ID: 3, CurrentPriority: priorityPoor, RecommendedPriority: priorityGood},
+	}
+
+	changed, pending := runner.applyRecommendations(context.Background(), recommendations, "secret", nowForTest())
+	if changed != 1 || pending != 1 {
+		t.Fatalf("changed=%d pending=%d", changed, pending)
+	}
+	got := <-updates
+	if got.id != "2" || got.priority != priorityGood {
+		t.Fatalf("update = %+v", got)
+	}
+	if recommendations[2].ApplyStatus != "deferred-exploration" {
+		t.Fatalf("cold promotion status = %q", recommendations[2].ApplyStatus)
+	}
+}
+
 func TestRunnerExplorationFailureDoesNotPersistState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
