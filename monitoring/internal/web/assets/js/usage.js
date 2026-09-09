@@ -16,12 +16,18 @@ const minimumDonutPercent = 0.5;
 const usageMetrics = new Set(['tokens', 'cost', 'unit_cost']);
 const shareMetricSet = new Set(['tokens', 'cost']);
 const usageEntitySortMetrics = new Set(['cost', 'unit_cost', 'multiplier', 'tokens']);
+const usageEntitySortMetricLabels = {
+  cost: '使用成本',
+  unit_cost: '每百万 Tokens 成本',
+  multiplier: '有效倍率',
+  tokens: '总 Tokens'
+};
 
 export class UsagePanel {
   usage = null;
   period = 'today';
   entityKind = 'group';
-  entitySortMetric = 'cost';
+  entitySortMetric = 'unit_cost';
   entitySortDirection = 'asc';
   trendMetric = 'tokens';
   shareMetrics = { model: 'tokens', group: 'tokens' };
@@ -39,9 +45,10 @@ export class UsagePanel {
       button.addEventListener('click', () => this.setEntityKind(button.dataset.usageEntity, button));
     });
     $('#usageEntitySortSelect').addEventListener('change', (event) => this.setEntitySortMetric(event.target.value));
-    document.querySelectorAll('[data-usage-sort-direction]').forEach((button) => {
-      button.addEventListener('click', () => this.setEntitySortDirection(button.dataset.usageSortDirection, button));
+    $('#usageEntitySortDirection').addEventListener('click', () => {
+      this.setEntitySortDirection(this.entitySortDirection === 'asc' ? 'desc' : 'asc');
     });
+    updateUsageSortDirectionControl(this.entitySortMetric, this.entitySortDirection);
   }
 
   setPeriod(period) {
@@ -65,13 +72,14 @@ export class UsagePanel {
   setEntitySortMetric(metric) {
     if (!usageEntitySortMetrics.has(metric)) return;
     this.entitySortMetric = metric;
+    updateUsageSortDirectionControl(this.entitySortMetric, this.entitySortDirection);
     this.#renderEntityCards();
   }
 
-  setEntitySortDirection(direction, button) {
+  setEntitySortDirection(direction) {
     if (direction !== 'asc' && direction !== 'desc') return;
     this.entitySortDirection = direction;
-    activateToggle('[data-usage-sort-direction]', button);
+    updateUsageSortDirectionControl(this.entitySortMetric, this.entitySortDirection);
     this.#renderEntityCards();
   }
 
@@ -202,7 +210,7 @@ function renderUsageKPI([label, value, note, color]) {
   </article>`;
 }
 
-function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'cost', sortDirection = 'asc') {
+function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'unit_cost', sortDirection = 'asc') {
   const container = $('#usageEntityCardList');
   const items = (Array.isArray(sourceItems) ? sourceItems : [])
     .slice()
@@ -225,6 +233,20 @@ function compareUsageCards(left, right, sortMetric, sortDirection) {
   }
   return String(left.name || '').trim().localeCompare(String(right.name || '').trim(), 'zh-CN')
     || String(left.key).localeCompare(String(right.key), 'zh-CN');
+}
+
+function updateUsageSortDirectionControl(metric, direction) {
+  const button = $('#usageEntitySortDirection');
+  if (!button) return;
+  const descending = direction === 'desc';
+  const currentOrder = descending ? '高到低' : '低到高';
+  const nextOrder = descending ? '低到高' : '高到低';
+  const metricLabel = usageEntitySortMetricLabels[metric] || usageEntitySortMetricLabels.unit_cost;
+  const description = `当前按${metricLabel}${currentOrder}，点击切换为${nextOrder}`;
+  button.textContent = descending ? '↓' : '↑';
+  button.title = description;
+  button.setAttribute('aria-label', description);
+  button.setAttribute('aria-pressed', String(descending));
 }
 
 function usageEntitySortValue(item, metric) {

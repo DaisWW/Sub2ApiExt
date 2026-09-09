@@ -112,7 +112,7 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .usage-entity-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .usage-sort-label { color: var(--muted); font-size: 11px; }
 .usage-sort-select select { min-height: 33px; }
-.usage-sort-direction button { padding: 6px 9px; font-size: 12px; }
+.usage-sort-direction { flex: 0 0 34px; }
 .usage-entity-toggle { flex: 0 0 auto; }
 .usage-entity-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .usage-entity-card { --entity-accent: var(--blue); min-width: 0; border: 1px solid var(--line); border-top: 2px solid var(--entity-accent); border-radius: 8px; background: var(--surface); padding: 16px; }
