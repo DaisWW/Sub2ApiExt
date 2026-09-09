@@ -152,7 +152,7 @@ func tableActionLabel(value string) string {
 	case "exploration-ended":
 		return "探索结束"
 	case "deferred-exploration":
-		return "等待探索"
+		return "等待当前探索完成"
 	case "dry-run":
 		return "试运行"
 	case "missing-key":

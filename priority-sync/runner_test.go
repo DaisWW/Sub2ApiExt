@@ -192,6 +192,48 @@ func TestRunnerExplorationWithEnoughEvidenceUsesNormalConfirmation(t *testing.T)
 	}
 }
 
+func TestRunnerExplorationDoesNotBlockMatureAccount(t *testing.T) {
+	type update struct {
+		id       string
+		priority int
+	}
+	updates := make(chan update, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Priority int `json:"priority"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updates <- update{id: filepath.Base(r.URL.Path), priority: payload.Priority}
+		_, _ = io.WriteString(w, `{"code":0}`)
+	}))
+	defer server.Close()
+	source := &fakeMetricsSource{accounts: []AccountMetrics{
+		{ID: 1, Name: "cold", Status: "active", CurrentPriority: 90},
+		{ID: 2, Name: "mature", Status: "active", CurrentPriority: 90, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
+	}}
+	runner := NewRunner(testRunnerConfig(t, server.URL, false), source, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.tableWriter = io.Discard
+	if err := runner.RunOnce(context.Background(), nowForTest()); err != nil {
+		t.Fatal(err)
+	}
+	if runner.state.Exploration == nil || runner.state.Exploration.AccountID != 1 {
+		t.Fatalf("exploration did not start: %+v", runner.state)
+	}
+	got := make(map[string]int, 2)
+	for range 2 {
+		update := <-updates
+		got[update.id] = update.priority
+	}
+	if got["1"] != priorityExplore {
+		t.Fatalf("exploration update = %d, want %d", got["1"], priorityExplore)
+	}
+	if got["2"] != priorityNeutral {
+		t.Fatalf("mature account update = %d, want %d", got["2"], priorityNeutral)
+	}
+}
+
 func TestRunnerExplorationFailureDoesNotPersistState(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)

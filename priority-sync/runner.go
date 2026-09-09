@@ -252,7 +252,8 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		recommendation := &recommendations[index]
 		seen[recommendation.ID] = struct{}{}
 		state := r.state.Accounts[recommendation.ID]
-		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately {
+		evidence := recommendation.SuccessfulRequests + recommendation.TerminalFailures
+		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately && evidence < int64(r.config.MinSamples) {
 			if recommendation.RecommendedPriority != recommendation.CurrentPriority {
 				pending++
 			}

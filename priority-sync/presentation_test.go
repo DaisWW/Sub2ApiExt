@@ -51,7 +51,7 @@ func TestRecommendationTableIncludesAccountLabel(t *testing.T) {
 }
 
 func TestTableActionLabelAndLatency(t *testing.T) {
-	if got := tableActionLabel("deferred-exploration"); got != "等待探索" {
+	if got := tableActionLabel("deferred-exploration"); got != "等待当前探索完成" {
 		t.Fatalf("action label = %q", got)
 	}
 	if got := formatTableLatency(26298, false); got != "26.3s" {
@@ -87,7 +87,7 @@ func TestRecommendationTableAlignsWideCharacters(t *testing.T) {
 		t.Fatalf("table rows missing: %s", output.String())
 	}
 	if displayColumn(header, "状态") != displayColumn(asciiRow, "已更新") ||
-		displayColumn(header, "状态") != displayColumn(wideRow, "等待探索") {
+		displayColumn(header, "状态") != displayColumn(wideRow, "等待当前探索完成") {
 		t.Fatalf("status columns are not aligned:\n%s", output.String())
 	}
 }
