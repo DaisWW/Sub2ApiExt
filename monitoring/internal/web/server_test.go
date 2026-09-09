@@ -110,11 +110,12 @@ func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	for path, markers := range map[string][]string{
 		"/": {
-			`<option value="priority" disabled>账户优先级（仅账户）</option>`,
+			`<option value="priority" hidden disabled>账户优先级</option>`,
 		},
 		"/js/usage.js": {
 			"'priority'",
 			"账户优先级",
+			"priorityOption.hidden = accountOnly",
 			"usagePriorityValue(item?.priority)",
 			"usage-account-priority",
 			"数值越小，路由优先级越高",

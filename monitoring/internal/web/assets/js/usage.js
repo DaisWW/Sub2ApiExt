@@ -247,7 +247,11 @@ function updateUsageSortMetricAvailability(kind, metric) {
   const select = $('#usageEntitySortSelect');
   if (!select) return;
   const priorityOption = select.querySelector('option[value="priority"]');
-  if (priorityOption) priorityOption.disabled = kind !== 'account';
+  if (priorityOption) {
+    const accountOnly = kind !== 'account';
+    priorityOption.hidden = accountOnly;
+    priorityOption.disabled = accountOnly;
+  }
   select.value = metric;
 }
 
