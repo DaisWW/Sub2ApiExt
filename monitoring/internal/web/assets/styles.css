@@ -122,7 +122,9 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .usage-card-title > span { color: var(--muted); font-size: 9px; font-weight: 750; text-transform: uppercase; }
 .usage-card-title h4 { margin: 5px 0 0; overflow: hidden; color: var(--text); font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
 .usage-card-title small { display: block; margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.usage-platform { flex: 0 0 auto; max-width: 42%; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; padding: 3px 7px; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.usage-card-head-meta { min-width: 0; max-width: 42%; display: flex; align-items: flex-end; gap: 6px; flex-direction: column; }
+.usage-account-priority { max-width: 100%; overflow: hidden; color: var(--blue); font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.usage-platform { max-width: 100%; overflow: hidden; border: 1px solid var(--line); border-radius: 999px; padding: 3px 7px; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .usage-card-primary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 16px; padding: 13px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .usage-card-primary-metric { min-width: 0; display: grid; gap: 5px; }
 .usage-card-primary-metric + .usage-card-primary-metric { border-left: 1px solid var(--line); padding-left: 14px; }

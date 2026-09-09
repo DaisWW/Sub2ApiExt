@@ -14,6 +14,7 @@ WITH aggregated AS (
                     CASE WHEN ul.account_id IS NULL THEN '未知账户' ELSE '账户 #' || ul.account_id::text END) AS name,
            ''::text AS context,
            COALESCE(a.platform, 'unknown') AS platform,
+           CASE WHEN a.id IS NOT NULL THEN COALESCE(a.priority, 50) END AS priority,
            COUNT(*)::bigint AS requests,
            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
                         COALESCE(ul.output_tokens, 0)::bigint +
@@ -32,7 +33,7 @@ WITH aggregated AS (
       FROM usage_logs ul
       LEFT JOIN accounts a ON a.id = ul.account_id
      WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
-     GROUP BY ul.account_id, a.name, a.platform
+     GROUP BY ul.account_id, a.id, a.name, a.platform, a.priority
 ), ranked AS (
     SELECT aggregated.*,
            COUNT(*) OVER () AS total_items,
@@ -47,17 +48,20 @@ WITH aggregated AS (
            ) AS unit_cost_rank,
            ROW_NUMBER() OVER (
                ORDER BY input_tokens + cache_read_tokens DESC, cache_read_tokens DESC, entity_id
-           ) AS cache_context_rank
+           ) AS cache_context_rank,
+           ROW_NUMBER() OVER (
+               ORDER BY CASE WHEN priority IS NULL THEN 1 ELSE 0 END, priority, entity_id
+           ) AS priority_rank
       FROM aggregated
 )
-SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'account:unknown' END AS entity_key, name, context, platform,
+SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'account:unknown' END AS entity_key, name, context, platform, priority,
        requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
        base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
        total_items, total_requests, all_tokens, all_actual_cost
   FROM ranked
- WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3 OR cache_context_rank <= $3
- ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
-          token_rank, cost_rank, unit_cost_rank, cache_context_rank`
+ WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3 OR cache_context_rank <= $3 OR priority_rank <= $3
+ ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank, priority_rank),
+          token_rank, cost_rank, unit_cost_rank, cache_context_rank, priority_rank`
 
 func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	return s.loadDimensionRanks(ctx, accountUsageRankQuery, model.KindAccount, bounds, limit, totalTokens, totalCost)
@@ -70,6 +74,7 @@ WITH aggregated AS (
                     CASE WHEN ul.group_id IS NULL THEN '未分组' ELSE '分组 #' || ul.group_id::text END) AS name,
            ''::text AS context,
            COALESCE(g.platform, 'unknown') AS platform,
+           NULL::int AS priority,
            COUNT(*)::bigint AS requests,
            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
                         COALESCE(ul.output_tokens, 0)::bigint +
@@ -106,7 +111,7 @@ WITH aggregated AS (
            ) AS cache_context_rank
       FROM aggregated
 )
-SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'group:unassigned' END AS entity_key, name, context, platform,
+SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'group:unassigned' END AS entity_key, name, context, platform, priority,
        requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
        base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
        total_items, total_requests, all_tokens, all_actual_cost
@@ -126,6 +131,7 @@ WITH aggregated AS (
            COALESCE(NULLIF(ul.model, ''), 'unknown') AS name,
            ''::text AS context,
            ''::text AS platform,
+           NULL::int AS priority,
            COUNT(*)::bigint AS requests,
            COALESCE(SUM(COALESCE(ul.input_tokens, 0)::bigint +
                         COALESCE(ul.output_tokens, 0)::bigint +
@@ -158,7 +164,7 @@ WITH aggregated AS (
            ) AS unit_cost_rank
       FROM aggregated
 )
-SELECT entity_id, entity_key, name, context, platform,
+SELECT entity_id, entity_key, name, context, platform, priority,
        requests, total_tokens, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
        base_cost, input_cost, output_cost, cache_creation_cost, cache_read_cost, actual_cost,
        total_items, total_requests, all_tokens, all_actual_cost
@@ -181,12 +187,13 @@ func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, boun
 	for rows.Next() {
 		var id sql.NullInt64
 		var entityKey sql.NullString
+		var priority sql.NullInt64
 		var baseCost, actualCost float64
 		var totalItems, totalRequests, allTokens int64
 		var allActualCost float64
 		var item model.UsageRankItem
 		if err := rows.Scan(
-			&id, &entityKey, &item.Name, &item.Context, &item.Platform,
+			&id, &entityKey, &item.Name, &item.Context, &item.Platform, &priority,
 			&item.Requests, &item.TotalTokens, &item.InputTokens, &item.OutputTokens,
 			&item.CacheCreationTokens, &item.CacheRead, &baseCost, &item.InputCost,
 			&item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost, &actualCost,
@@ -195,6 +202,10 @@ func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, boun
 			return nil, model.UsageDimensionMeta{}, err
 		}
 		item.Kind = kind
+		if priority.Valid {
+			value := int(priority.Int64)
+			item.Priority = &value
+		}
 		item.BaseCost = baseCost
 		item.TotalCost = actualCost
 		item.TokenCost, item.NonTokenCost, item.EffectiveRateMultiplier = usageCostBreakdown(

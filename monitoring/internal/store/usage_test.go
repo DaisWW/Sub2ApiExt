@@ -118,6 +118,23 @@ func TestUsageRankingExposesAccountCacheRates(t *testing.T) {
 	}
 }
 
+func TestUsageRankingExposesAccountPriority(t *testing.T) {
+	priority := 25
+	encoded, err := json.Marshal(model.UsageRankItem{
+		Kind: model.KindAccount, Name: "账户甲", Priority: &priority,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["priority"] != float64(priority) {
+		t.Fatalf("priority = %v, want %d", payload["priority"], priority)
+	}
+}
+
 func TestUsageSummaryExposesCostPerMillionTokens(t *testing.T) {
 	encoded, err := json.Marshal(model.UsageSummary{CostPerMillionTokens: 12.5})
 	if err != nil {
@@ -287,6 +304,30 @@ func TestUsageRankQueriesUseCurrentTargetsOnlyForLabels(t *testing.T) {
 	} {
 		if strings.Contains(query, "JOIN accounts ") || strings.Contains(query, "JOIN groups ") {
 			t.Errorf("%s usage query must use usage_logs as its only account/group fact source", name)
+		}
+	}
+}
+
+func TestAccountUsageRankQueryIncludesPriorityRanking(t *testing.T) {
+	for _, fragment := range []string{
+		"CASE WHEN a.id IS NOT NULL THEN COALESCE(a.priority, 50) END AS priority",
+		"AS priority_rank",
+		"priority_rank <= $3",
+		"LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank, priority_rank)",
+	} {
+		if !strings.Contains(accountUsageRankQuery, fragment) {
+			t.Errorf("account usage query missing priority ranking fragment %q", fragment)
+		}
+	}
+}
+
+func TestNonAccountUsageRankQueriesExposeNullPriority(t *testing.T) {
+	for name, query := range map[string]string{
+		"group": groupUsageRankQuery,
+		"model": modelUsageRankQuery,
+	} {
+		if !strings.Contains(query, "NULL::int AS priority") {
+			t.Errorf("%s usage query must expose a null priority column", name)
 		}
 	}
 }

@@ -106,6 +106,41 @@ func TestUsageShareControlsExcludeUnitCost(t *testing.T) {
 	}
 }
 
+func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	for path, markers := range map[string][]string{
+		"/": {
+			`<option value="priority" disabled>账户优先级（仅账户）</option>`,
+		},
+		"/js/usage.js": {
+			"'priority'",
+			"账户优先级",
+			"usagePriorityValue(item?.priority)",
+			"usage-account-priority",
+			"数值越小，路由优先级越高",
+			"metric === 'priority'",
+			"kind === 'group' && this.entitySortMetric === 'priority'",
+		},
+		"/styles.css": {
+			".usage-account-priority",
+			".usage-card-head-meta",
+		},
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("GET %s returned %d", path, response.Code)
+		}
+		body := response.Body.String()
+		for _, marker := range markers {
+			if !strings.Contains(body, marker) {
+				t.Errorf("%s is missing %q", path, marker)
+			}
+		}
+	}
+}
+
 func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/usage.js", nil)

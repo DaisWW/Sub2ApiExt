@@ -365,6 +365,7 @@ type UsageRankItem struct {
 	Name                    string  `json:"name"`
 	Context                 string  `json:"context,omitempty"`
 	Platform                string  `json:"platform,omitempty"`
+	Priority                *int    `json:"priority,omitempty"`
 	Requests                int64   `json:"requests"`
 	TotalTokens             int64   `json:"total_tokens"`
 	InputTokens             int64   `json:"input_tokens"`

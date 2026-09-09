@@ -15,12 +15,13 @@ const donutColors = ['#77a9ef', '#54d6ae', '#e8b85f', '#c18df0', '#f27a82', '#8f
 const minimumDonutPercent = 0.5;
 const usageMetrics = new Set(['tokens', 'cost', 'unit_cost']);
 const shareMetricSet = new Set(['tokens', 'cost']);
-const usageEntitySortMetrics = new Set(['cost', 'unit_cost', 'multiplier', 'tokens']);
+const usageEntitySortMetrics = new Set(['cost', 'unit_cost', 'multiplier', 'tokens', 'priority']);
 const usageEntitySortMetricLabels = {
   cost: '使用成本',
   unit_cost: '每百万 Tokens 成本',
   multiplier: '有效倍率',
-  tokens: '总 Tokens'
+  tokens: '总 Tokens',
+  priority: '账户优先级'
 };
 
 export class UsagePanel {
@@ -48,6 +49,7 @@ export class UsagePanel {
     $('#usageEntitySortDirection').addEventListener('click', () => {
       this.setEntitySortDirection(this.entitySortDirection === 'asc' ? 'desc' : 'asc');
     });
+    updateUsageSortMetricAvailability(this.entityKind, this.entitySortMetric);
     updateUsageSortDirectionControl(this.entitySortMetric, this.entitySortDirection);
   }
 
@@ -65,13 +67,19 @@ export class UsagePanel {
   setEntityKind(kind, button) {
     if (kind !== 'group' && kind !== 'account') return;
     this.entityKind = kind;
+    if (kind === 'group' && this.entitySortMetric === 'priority') {
+      this.entitySortMetric = 'unit_cost';
+    }
+    updateUsageSortMetricAvailability(this.entityKind, this.entitySortMetric);
     activateToggle('[data-usage-entity]', button);
+    updateUsageSortDirectionControl(this.entitySortMetric, this.entitySortDirection);
     this.#renderEntityCards();
   }
 
   setEntitySortMetric(metric) {
-    if (!usageEntitySortMetrics.has(metric)) return;
+    if (!usageEntitySortMetrics.has(metric) || (metric === 'priority' && this.entityKind !== 'account')) return;
     this.entitySortMetric = metric;
+    updateUsageSortMetricAvailability(this.entityKind, this.entitySortMetric);
     updateUsageSortDirectionControl(this.entitySortMetric, this.entitySortDirection);
     this.#renderEntityCards();
   }
@@ -235,6 +243,14 @@ function compareUsageCards(left, right, sortMetric, sortDirection) {
     || String(left.key).localeCompare(String(right.key), 'zh-CN');
 }
 
+function updateUsageSortMetricAvailability(kind, metric) {
+  const select = $('#usageEntitySortSelect');
+  if (!select) return;
+  const priorityOption = select.querySelector('option[value="priority"]');
+  if (priorityOption) priorityOption.disabled = kind !== 'account';
+  select.value = metric;
+}
+
 function updateUsageSortDirectionControl(metric, direction) {
   const button = $('#usageEntitySortDirection');
   if (!button) return;
@@ -242,7 +258,8 @@ function updateUsageSortDirectionControl(metric, direction) {
   const currentOrder = descending ? '高到低' : '低到高';
   const nextOrder = descending ? '低到高' : '高到低';
   const metricLabel = usageEntitySortMetricLabels[metric] || usageEntitySortMetricLabels.unit_cost;
-  const description = `当前按${metricLabel}${currentOrder}，点击切换为${nextOrder}`;
+  const metricHint = metric === 'priority' ? '（数值越小，路由优先级越高）' : '';
+  const description = `当前按${metricLabel}${metricHint}${currentOrder}，点击切换为${nextOrder}`;
   button.textContent = descending ? '↓' : '↑';
   button.title = description;
   button.setAttribute('aria-label', description);
@@ -262,6 +279,7 @@ function usageEntitySortValue(item, metric) {
   }
   if (metric === 'multiplier') return nullableNonNegativeNumber(item?.effective_rate_multiplier);
   if (metric === 'tokens') return nullableNonNegativeNumber(item?.total_tokens);
+  if (metric === 'priority') return usagePriorityValue(item?.priority);
   return nullableNonNegativeNumber(item?.total_cost);
 }
 
@@ -283,6 +301,7 @@ function renderUsageCard(item, kind) {
   const kindLabel = kind === 'group' ? '分组' : '账户';
   const kindClass = kind === 'group' ? ' group-usage-card' : '';
   const context = item?.context || '';
+  const priority = kind === 'account' ? usagePriorityValue(item?.priority) : null;
   return `<article class="usage-entity-card${kindClass}">
     <div class="usage-card-head">
       <div class="usage-card-title">
@@ -290,7 +309,10 @@ function renderUsageCard(item, kind) {
         <h4 title="${escapeHTML(name)}">${escapeHTML(name)}</h4>
         ${context ? `<small>${escapeHTML(context)}</small>` : ''}
       </div>
-      <span class="usage-platform">${escapeHTML(platform)}</span>
+      <div class="usage-card-head-meta">
+        ${priority !== null ? `<span class="usage-account-priority" title="数值越小，路由优先级越高">优先级 ${priority}</span>` : ''}
+        <span class="usage-platform">${escapeHTML(platform)}</span>
+      </div>
     </div>
     <div class="usage-card-primary">
       <div class="usage-card-primary-metric cache-metric"><span>缓存命中率</span><strong>${hitRate.toFixed(2)}%</strong></div>
@@ -701,6 +723,11 @@ function nullableNonNegativeNumber(value) {
   if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function usagePriorityValue(value) {
+  const priority = nullableNonNegativeNumber(value);
+  return priority === null ? null : Math.trunc(priority);
 }
 
 function isolateChartWheel(event) {
