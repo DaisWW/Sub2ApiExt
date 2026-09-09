@@ -330,7 +330,19 @@ function normalizeWindowSeconds(value) {
 }
 
 function normalizePlatform(value) {
-  return String(value || '').trim().toLowerCase();
+  switch (String(value || '').trim().toLowerCase()) {
+    case 'openai':
+    case 'openai_compatible':
+    case 'codex':
+    case 'grok':
+    case 'xai':
+      return 'openai';
+    case 'anthropic':
+    case 'claude':
+      return 'anthropic';
+    default:
+      return '';
+  }
 }
 
 function formatActivityWindow(seconds) {

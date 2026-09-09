@@ -320,6 +320,11 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 		"setPlatformFilter(platform)",
 		"normalizePlatform(target.platform) === this.platformFilter",
 		"function normalizePlatform(value)",
+		"case 'openai_compatible':",
+		"case 'codex':",
+		"case 'grok':",
+		"case 'xai':",
+		"case 'claude':",
 		"target-platform-${platform}",
 	} {
 		if !strings.Contains(body, marker) {
