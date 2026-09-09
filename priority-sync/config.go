@@ -23,9 +23,9 @@ const (
 )
 
 const (
-	costWeight         = 0.60
-	speedWeight        = 0.25
-	availabilityWeight = 0.15
+	costWeight         = 0.70
+	speedWeight        = 0.20
+	availabilityWeight = 0.10
 )
 
 // 优先级数值越小越优先。自动档位之间保留空档，探索档位用于给低样本账号

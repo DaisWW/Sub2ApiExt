@@ -9,7 +9,7 @@ import (
 )
 
 // scoreAccounts 将三个维度统一到 0..100，分数越高越值得优先路由。
-// 成本占 60%，速度占 25%，可用性占 15%。
+// 成本占 70%，速度占 20%，可用性占 10%。
 func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []Recommendation {
 	if minSamples < 1 {
 		minSamples = defaultMinSamples
