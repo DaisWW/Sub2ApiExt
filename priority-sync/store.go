@@ -23,7 +23,11 @@ WITH usage_candidates AS (
     FROM usage_logs ul
     WHERE ul.account_id IS NOT NULL
       AND ul.created_at >= $1 AND ul.created_at < $2
-      AND ul.actual_cost > 0
+      AND (
+          ul.actual_cost > 0
+          OR ul.total_cost > 0
+          OR ul.account_stats_cost > 0
+      )
 ), usage_rows AS MATERIALIZED (
     SELECT DISTINCT ON (account_id, request_key) *
     FROM usage_candidates

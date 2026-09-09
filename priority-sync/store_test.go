@@ -20,6 +20,8 @@ func TestPriorityMetricsQueryUsesRawEvidenceAndCooldowns(t *testing.T) {
 		"percentile_cont(0.90)",
 		"recovered_rate_limited",
 		"actual_cost > 0",
+		"total_cost > 0",
+		"account_stats_cost > 0",
 		"client_request_id",
 		"REGEXP_REPLACE",
 		"LOWER(REGEXP_REPLACE",
