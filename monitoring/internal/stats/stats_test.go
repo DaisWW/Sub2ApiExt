@@ -171,6 +171,37 @@ func TestAggregateGroupUsesHealthyFallbackWithUnknownPeer(t *testing.T) {
 	}
 }
 
+func TestAggregateGroupDefaultsToOperationalWhenCandidatesAreUnobserved(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{ID: 70, Members: []model.GroupMember{
+		{AccountID: 1}, {AccountID: 2}, {AccountID: 3},
+	}}
+	got := AggregateGroup("group:70", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusFailed},
+		{EntityID: 2, Status: model.StatusUnknown},
+	}, now)
+	if got.Status != model.StatusOperational {
+		t.Fatalf("unobserved candidate should keep group usable: %+v", got)
+	}
+	if !strings.Contains(got.Message, "待验证") {
+		t.Fatalf("group message should disclose insufficient evidence: %q", got.Message)
+	}
+}
+
+func TestAggregateGroupDisclosesUnobservedAccountIDsWithoutMembers(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	group := model.Group{ID: 71, AccountIDs: []int64{1, 2}}
+	got := AggregateGroup("group:71", group, []model.ProbeResult{
+		{EntityID: 1, Status: model.StatusFailed},
+	}, now)
+	if got.Status != model.StatusOperational {
+		t.Fatalf("unobserved account ID should keep group usable: %+v", got)
+	}
+	if !strings.Contains(got.Message, "数据不足") || !strings.Contains(got.Message, "待验证") {
+		t.Fatalf("group message should disclose insufficient evidence: %q", got.Message)
+	}
+}
+
 func TestAggregateGroupAllKnownFailuresIsFailed(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	group := model.Group{ID: 8, Members: []model.GroupMember{
@@ -223,6 +254,26 @@ func TestWindowFromOutcomesKeepsSparseRateLimitOperationalWithLowConfidence(t *t
 	}
 	if got.Confidence != model.HealthConfidenceLow || got.RateLimitRate != 20 {
 		t.Fatalf("sparse window confidence/ratio = %+v", got)
+	}
+}
+
+func TestWindowFromOutcomesTreatsEmptyWindowAsAvailable(t *testing.T) {
+	got := WindowFromOutcomes(0, 0, 0, nil, DefaultHealthPolicy)
+	if got.Status != model.StatusOperational || !got.Available {
+		t.Fatalf("empty window = %+v, want available operational", got)
+	}
+	if got.Confidence != model.HealthConfidenceLow || got.Reason != model.HealthReasonNoEvidence {
+		t.Fatalf("empty window confidence/reason = %+v", got)
+	}
+}
+
+func TestWindowFromOutcomesTreatsSparseAllFailuresAsAvailable(t *testing.T) {
+	got := WindowFromOutcomes(0, 0, 6, nil, DefaultHealthPolicy)
+	if got.Status != model.StatusOperational || !got.Available {
+		t.Fatalf("sparse failures = %+v, want available operational", got)
+	}
+	if got.Confidence != model.HealthConfidenceLow || got.Reason != model.HealthReasonUpstreamError {
+		t.Fatalf("sparse failures confidence/reason = %+v", got)
 	}
 }
 

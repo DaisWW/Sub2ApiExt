@@ -182,7 +182,10 @@ func groupStatus(operational, degraded, failed, unknown int) string {
 	case degraded > 0:
 		return model.StatusDegraded
 	case unknown > 0:
-		return model.StatusUnknown
+		// An unobserved member is insufficient evidence of a broken route. The
+		// group remains usable by default until all candidates have a sufficiently
+		// observed failure.
+		return model.StatusOperational
 	case failed > 0:
 		return model.StatusFailed
 	default:
@@ -191,11 +194,14 @@ func groupStatus(operational, degraded, failed, unknown int) string {
 }
 
 func routingGroupMessage(group model.Group, status string, total, healthy, failed, unknown, rateLimited int) string {
-	if len(group.Members) == 0 {
+	if len(group.Members) == 0 && unknown == 0 {
 		return groupMessage(total, healthy, rateLimited)
 	}
 	if status == model.StatusFailed {
 		return fmt.Sprintf("当前无可用候选：%d/%d", healthy, total)
+	}
+	if unknown > 0 && healthy == 0 {
+		return fmt.Sprintf("数据不足，默认按可用处理：%d/%d 个账户待验证；异常 %d", unknown, total, failed)
 	}
 	if status == model.StatusUnknown {
 		return fmt.Sprintf("无法确认可用路由：%d/%d 个候选可用；%d 个账户待验证", healthy, total, unknown)

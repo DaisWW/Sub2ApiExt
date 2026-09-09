@@ -44,9 +44,19 @@ func EvaluateHealth(window model.HealthWindow, policy HealthPolicy) model.Health
 
 	switch {
 	case window.Samples == 0:
-		window.Status = model.StatusUnknown
+		// An empty observation window is a lack of evidence, not evidence of
+		// failure. Keep the route usable while exposing the low confidence in
+		// the response for callers that need to explain the decision.
+		window.Status = model.StatusOperational
 		window.Reason = model.HealthReasonNoEvidence
-		window.Available = false
+		window.Available = true
+	case policy.MinimumSamples > 0 && window.Successful == 0 && window.Samples < policy.MinimumSamples:
+		// A short all-failure window is too little evidence to declare a route
+		// unavailable. This is especially important for idle accounts whose
+		// five-minute window may contain only a handful of retries.
+		window.Status = model.StatusOperational
+		window.Reason = warningReason(window, policy)
+		window.Available = true
 	case window.Successful == 0:
 		window.Status = model.StatusFailed
 		window.Reason = failureReason(window)

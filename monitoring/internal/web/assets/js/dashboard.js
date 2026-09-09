@@ -337,19 +337,14 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
   if (status === 'failed' || status === 'error') return 'failed';
   if (status === 'disabled') return 'failed';
   if (status === 'unknown') {
+    const sourceError = String(item?.source_status || '').trim().toLowerCase() === 'error';
+    if (!sourceError && !hasRecoveryTrigger(item)) return 'operational';
     if (sampleCheckedAt) {
       const sampleAt = Date.parse(String(sampleCheckedAt));
       const triggerAt = Date.parse(String(item?.recovery_trigger_at || ''));
-      if (Number.isFinite(sampleAt) && Number.isFinite(triggerAt)) {
-        return sampleAt >= triggerAt ? 'failed' : 'unknown';
-      }
-      return String(item?.source_status || '').trim().toLowerCase() === 'error'
-        ? 'failed'
-        : 'unknown';
+      if (Number.isFinite(sampleAt) && Number.isFinite(triggerAt)) return sampleAt >= triggerAt ? 'failed' : 'operational';
     }
-    return String(item?.source_status || '').trim().toLowerCase() === 'error' || hasRecoveryTrigger(item)
-      ? 'failed'
-      : 'unknown';
+    return 'failed';
   }
   if (reason === 'rate_limited' && (status === 'operational' || status === 'degraded')) return 'degraded';
   // Group status is already the account aggregate. Its latency is diagnostic;
@@ -393,31 +388,34 @@ function healthLabel(status, reason = '') {
   if (status === 'failed' || status === 'error') return '错误/不可用';
   if (reason === 'rate_limited') return '可用但阶段性限速';
   if (status === 'degraded') return '可用但延迟高';
-  if (status === 'unknown') return '待确认';
+  if (status === 'unknown') return '可用（数据不足）';
   return '可用';
 }
 
 function statusTone(status) {
   if (status === 'failed' || status === 'error') return 'bad';
   if (status === 'degraded') return 'warn';
-  if (status === 'unknown') return 'neutral';
+  if (status === 'unknown') return 'ok';
   return 'ok';
 }
 
 function availabilityToneForStatus(status) {
   if (status === 'failed' || status === 'error') return 'bad';
   if (status === 'degraded') return 'warn';
-  if (status === 'unknown') return 'neutral';
+  if (status === 'unknown') return 'good';
   return 'good';
 }
 
 function renderStatusHistory(samples, item) {
   const recent = Array.isArray(samples) ? samples.slice(-24) : [];
-  const hasUnknownSamples = recent.some((sample) => normalizeStatus(sample?.status) === 'unknown');
+  const hasUnknownSamples = recent.some((sample) => {
+    const sampleStatus = normalizeStatus(sample?.status);
+    return displayHealthStatus(item, sampleStatus, sample?.latency_ms, sample?.checked_at, sample?.health_reason) === 'unknown';
+  });
   const gatewayError = String(item?.source_status || '').trim().toLowerCase() === 'error';
   const recoveryPending = hasRecoveryTrigger(item);
-  const emptyTone = 'neutral';
-  const emptyLabel = '待确认 · 无历史桶数据';
+  const emptyTone = 'ok';
+  const emptyLabel = '可用 · 数据不足，默认可用';
   const empty = Array.from({ length: Math.max(0, 24 - recent.length) }, () => `<i class="${emptyTone}" role="img" aria-label="${escapeHTML(emptyLabel)}" title="${escapeHTML(emptyLabel)}"></i>`);
   const items = recent.map((sample) => {
     const sampleStatus = normalizeStatus(sample?.status);
@@ -473,8 +471,9 @@ function statusHistoryCaption(samples, item, gatewayError, recoveryPending) {
   if (item?.latest_source === 'probe') return '主动探测证据';
   if (item?.latest_source === 'aggregate') return '账户聚合证据';
   if (displayHealthStatus(item, normalizeStatus(item?.status)) === 'unknown') {
-    return item?.kind === 'group' ? '待确认 · 等待账户健康证据' : '待确认 · 等待真实请求证据';
+    return '数据不足 · 默认可用';
   }
+  if (!item?.latest_source && !gatewayError) return '数据不足 · 默认可用';
   return '当前状态';
 }
 
@@ -537,7 +536,7 @@ function targetStatusLabel(displayStatus, reason = '') {
   if (displayStatus === 'failed') return '当前错误/不可用';
   if (reason === 'rate_limited') return '当前可用但阶段性限速';
   if (displayStatus === 'degraded') return '当前可用但延迟高';
-  if (displayStatus === 'unknown') return '当前待确认';
+  if (displayStatus === 'unknown') return '当前可用（数据不足）';
   return '当前可用';
 }
 
@@ -565,10 +564,10 @@ function evidenceNote(item, status) {
 
 function evidenceFooter(item, status) {
   if (!item.latest_source) {
-    if (item.kind === 'group') return '等待账户健康证据';
+    if (item.kind === 'group') return '数据不足 · 默认按可用处理';
     return String(item.source_status || '').trim().toLowerCase() === 'error'
       ? (hasRecoveryTrigger(item) ? '等待恢复探测' : '等待新的渠道错误')
-      : '错误后才主动探测';
+      : '数据不足 · 默认按可用处理';
   }
   if (recoveryProbeFailed(item, status)) {
     return `恢复失败 · 主动探测 · ${formatTime(item.last_checked_at)}`;

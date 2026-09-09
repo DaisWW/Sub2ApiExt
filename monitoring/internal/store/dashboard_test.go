@@ -38,7 +38,7 @@ func TestApplyLatestTargetStateSanitizesGroupMessage(t *testing.T) {
 	account := model.DashboardTarget{Target: model.Target{Kind: model.KindAccount, ProbeEnabled: true}}
 	applyLatestTargetStateWithMessage(&account, sql.NullString{}, sql.NullString{},
 		sql.NullString{String: "secret", Valid: true}, sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
-	if account.LatestMessage != "暂无真实请求；仅在渠道报错后主动探测" {
+	if account.Status != model.StatusOperational || !account.Available || account.LatestMessage != "" {
 		t.Fatalf("account missing-evidence message = %q", account.LatestMessage)
 	}
 
@@ -87,7 +87,7 @@ func TestApplyLatestTargetStateExplainsMissingTrafficEvidence(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{Kind: model.KindAccount, ProbeEnabled: true}}
 	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
 		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
-	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无真实请求；仅在渠道报错后主动探测" {
+	if target.Status != model.StatusOperational || !target.Available || target.LatestMessage != "" {
 		t.Fatalf("missing evidence state = %+v", target.Target)
 	}
 }
@@ -97,8 +97,24 @@ func TestApplyLatestTargetStateExplainsMissingGroupEvidence(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{Kind: model.KindGroup, ProbeEnabled: true}}
 	applyLatestTargetStateWithMessage(&target, sql.NullString{}, sql.NullString{}, sql.NullString{},
 		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{}, now, time.Minute)
-	if target.Status != model.StatusUnknown || target.LatestMessage != "暂无账户健康证据，等待真实请求或恢复探测" {
+	if target.Status != model.StatusOperational || !target.Available || target.LatestMessage != "" {
 		t.Fatalf("missing group evidence = %+v", target.Target)
+	}
+}
+
+func TestApplyLatestTargetStateReplacesUnknownGroupMessageWithUsableDefault(t *testing.T) {
+	now := time.Now().UTC()
+	target := model.DashboardTarget{Target: model.Target{Kind: model.KindGroup, ProbeEnabled: true}}
+	applyLatestTargetStateWithMessage(&target,
+		sql.NullString{String: model.StatusUnknown, Valid: true},
+		sql.NullString{String: "aggregate", Valid: true},
+		sql.NullString{String: "无法确认可用路由：0/6 个候选可用；4 个账户待验证", Valid: true},
+		sql.NullInt64{}, sql.NullInt64{}, sql.NullTime{Time: now, Valid: true}, now, time.Minute)
+	if target.Status != model.StatusOperational || !target.Available {
+		t.Fatalf("unknown group should remain usable: %+v", target.Target)
+	}
+	if target.LatestMessage != "数据不足，默认按可用处理" {
+		t.Fatalf("stale unknown group message = %q", target.LatestMessage)
 	}
 }
 
@@ -176,6 +192,7 @@ func TestApplyCurrentHealthClearsHistoricalRateLimitState(t *testing.T) {
 		Successful:    2,
 		Status:        model.StatusOperational,
 		Available:     true,
+		Confidence:    model.HealthConfidenceLow,
 	}}
 
 	applyCurrentHealth(&target)
@@ -185,6 +202,29 @@ func TestApplyCurrentHealthClearsHistoricalRateLimitState(t *testing.T) {
 	}
 	if target.LatestMessage != "" {
 		t.Fatalf("historical rate-limit message remained after recovery: %q", target.LatestMessage)
+	}
+}
+
+func TestApplyCurrentHealthDoesNotDismissLowConfidenceChannelError(t *testing.T) {
+	target := model.DashboardTarget{Target: model.Target{
+		Kind:         model.KindAccount,
+		Status:       model.StatusFailed,
+		LatestSource: "request_error",
+		Available:    false,
+	}, CurrentHealth: model.HealthWindow{
+		WindowSeconds: 300,
+		Samples:       2,
+		Successful:    1,
+		HardFailures:  1,
+		Status:        model.StatusOperational,
+		Available:     true,
+		Confidence:    model.HealthConfidenceLow,
+	}}
+
+	applyCurrentHealth(&target)
+
+	if target.Status != model.StatusFailed || target.Available {
+		t.Fatalf("low-confidence window dismissed channel error: %+v", target.Target)
 	}
 }
 

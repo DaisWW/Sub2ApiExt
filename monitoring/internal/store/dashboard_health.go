@@ -86,6 +86,19 @@ func currentHealthOverridesTarget(target model.DashboardTarget, health model.Hea
 	if health.Samples == 0 {
 		return false
 	}
+	if health.Confidence == model.HealthConfidenceLow &&
+		(target.LatestSource == "request_error" || target.RecoveryTriggerAt != nil) {
+		// A low-confidence window cannot dismiss an explicit incident that is
+		// still waiting for recovery evidence.
+		return false
+	}
+	if health.Confidence == model.HealthConfidenceLow && health.Successful == 0 &&
+		(health.HardFailures > 0 || health.RateLimited > 0) {
+		// Sparse current-window results are diagnostic context only. They must
+		// not replace an established route state, especially with a red status
+		// based on a separate, explicit channel error.
+		return false
+	}
 	if target.Kind != model.KindGroup || health.Available || !target.Available {
 		return true
 	}
