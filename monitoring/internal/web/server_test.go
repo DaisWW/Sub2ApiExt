@@ -345,12 +345,27 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 		"const availabilityLabel = `近 1 小时通过率${availabilityDetail}`",
 		"const currentSample = recentSamples[recentSamples.length - 1]",
 		"const availabilityTone = availabilityToneForStatus(currentGridStatus)",
-		"renderMetric('首字最快', formatMs(firstByte.fastest_ms)",
+		"renderMetric('首字中位数', formatMedianMs(firstByte)",
+		"renderMetric('总耗时中位数', formatMedianMs(latency)",
+		"renderMetric('P95', formatMs(latency.p95_ms)",
 		"function availabilityToneForStatus(status)",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("dashboard.js is missing %q", marker)
 		}
+	}
+	for _, marker := range []string{
+		"renderMetric('首字最快'",
+		"renderMetric('最快'",
+		"renderMetric('中位数'",
+		"真实请求错误证据",
+	} {
+		if strings.Contains(body, marker) {
+			t.Errorf("dashboard.js still renders removed latency metric %q", marker)
+		}
+	}
+	if strings.Contains(body, "function evidenceFooter") || strings.Contains(body, "evidenceFooter(item") {
+		t.Fatal("dashboard.js still renders a duplicate evidence footer")
 	}
 }
 
