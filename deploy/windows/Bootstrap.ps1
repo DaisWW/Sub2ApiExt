@@ -1,6 +1,7 @@
 param(
     [switch]$Elevated,
-    [switch]$NoPause
+    [switch]$NoPause,
+    [switch]$AutoStart
 )
 
 Set-StrictMode -Version Latest
@@ -10,6 +11,20 @@ function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-BootstrapPowerShell {
+    $currentProcess = Get-Process -Id $PID -ErrorAction SilentlyContinue
+    if ($null -ne $currentProcess -and
+            -not [string]::IsNullOrWhiteSpace($currentProcess.Path) -and
+            (Test-Path -LiteralPath $currentProcess.Path -PathType Leaf)) {
+        return $currentProcess.Path
+    }
+    $command = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        $command = Get-Command powershell.exe -ErrorAction Stop
+    }
+    return $command.Source
 }
 
 function Write-BootstrapLog {
@@ -30,7 +45,10 @@ if (-not (Test-Administrator)) {
         if ($NoPause) {
             $arguments += ' -NoPause'
         }
-        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+        if ($AutoStart) {
+            $arguments += ' -AutoStart'
+        }
+        $process = Start-Process -FilePath (Get-BootstrapPowerShell) -ArgumentList $arguments -Verb RunAs -Wait -PassThru
         if ($process.ExitCode -ne 0) {
             Write-Host "Elevated deployment window exited with code $($process.ExitCode). See C:\ProgramData\Sub2API\logs\bootstrap.log" -ForegroundColor Red
         }
@@ -50,7 +68,10 @@ try {
     }
 
     $managerArguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $manager
-    $managerProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $managerArguments -NoNewWindow -Wait -PassThru
+    if ($AutoStart) {
+        $managerArguments += ' -AutoStart'
+    }
+    $managerProcess = Start-Process -FilePath (Get-BootstrapPowerShell) -ArgumentList $managerArguments -NoNewWindow -Wait -PassThru
     $result = $managerProcess.ExitCode
 } catch {
     $result = 1

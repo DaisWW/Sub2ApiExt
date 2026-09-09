@@ -1,4 +1,6 @@
-param()
+param(
+    [switch]$AutoStart
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -65,15 +67,26 @@ try {
     Write-Host "Current version: $currentVersion"
     Write-Host "Target version:  $(if ($null -eq $targetVersion) { 'unavailable' } else { $targetVersion })"
 
+    $upgradeDeclined = $false
     if ($null -ne $targetVersion -and (Test-Sub2ApiUpgradeAvailable -Current $currentVersion -Target $targetVersion)) {
         if (Read-Sub2ApiConfirmation -Message "Upgrade Sub2API from $currentVersion to ${targetVersion}? A full backup will be created first.") {
             Update-Sub2ApiDeployment -Context $context -CurrentVersion $currentVersion -TargetVersion $targetVersion
             exit 0
         }
+        $upgradeDeclined = $true
     } elseif ($null -ne $targetVersion -and (Test-Sub2ApiVersionEqual -Left $currentVersion -Right $targetVersion)) {
         Write-Sub2ApiMessage -Level Success -Message 'Sub2API is already at the latest release.'
     } elseif ($null -ne $targetVersion) {
         Write-Sub2ApiMessage -Level Warning -Message 'The installed Sub2API version is newer than the latest published release; no downgrade will be offered.'
+    }
+
+    if ($AutoStart) {
+        if ($upgradeDeclined) {
+            Write-Sub2ApiMessage -Level Warning -Message '主服务升级未确认，保留当前版本并继续启动现有部署。'
+        }
+        Start-Sub2ApiDeployment -Context $context
+        Write-Sub2ApiMessage -Level Success -Message "Sub2API is running at $(Get-Sub2ApiAccessUrl -Context $context)"
+        exit 0
     }
 
     Write-Host ''

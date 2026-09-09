@@ -83,7 +83,7 @@ $monitoringPath = Join-Path $PSScriptRoot 'monitoring\deploy.ps1'
 
 try {
     Write-Host 'Deploying Sub2API, PostgreSQL, Redis, and extensions...' -ForegroundColor Cyan
-    Invoke-DeploymentChild -ScriptPath $bootstrapPath -Arguments @('-NoPause')
+    Invoke-DeploymentChild -ScriptPath $bootstrapPath -Arguments @('-NoPause', '-AutoStart')
 
     Write-Host 'Deploying rate-sync extensions...' -ForegroundColor Cyan
     Invoke-DeploymentChild -ScriptPath $rateSyncPath
