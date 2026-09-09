@@ -121,7 +121,7 @@ func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
 			"renderPlatformFilters(",
 			"账户优先级",
 			"priorityOption.hidden = accountOnly",
-			"usagePriorityValue(item?.priority)",
+			"priorityValue(item?.priority)",
 			"usage-account-priority",
 			"数值越小，路由优先级越高",
 			"metric === 'priority'",

@@ -9,9 +9,11 @@ import {
   formatTokens,
   formatUSD,
   normalizePlatform,
+  nullableNonNegativeNumber,
   platformLabel,
   platformMatches,
   platformTone,
+  priorityValue,
   renderPlatformFilters,
   toast
 } from './shared.js';
@@ -318,7 +320,7 @@ function usageEntitySortValue(item, metric) {
   }
   if (metric === 'multiplier') return nullableNonNegativeNumber(item?.effective_rate_multiplier);
   if (metric === 'tokens') return nullableNonNegativeNumber(item?.total_tokens);
-  if (metric === 'priority') return usagePriorityValue(item?.priority);
+  if (metric === 'priority') return priorityValue(item?.priority);
   return nullableNonNegativeNumber(item?.total_cost);
 }
 
@@ -341,7 +343,7 @@ function renderUsageCard(item, kind) {
   const kindLabel = kind === 'group' ? '分组' : '账户';
   const kindClass = kind === 'group' ? ' group-usage-card' : '';
   const context = item?.context || '';
-  const priority = kind === 'account' ? usagePriorityValue(item?.priority) : null;
+  const priority = kind === 'account' ? priorityValue(item?.priority) : null;
   return `<article class="usage-entity-card${kindClass}">
     <div class="usage-card-head">
       <div class="usage-card-title">
@@ -757,17 +759,6 @@ function formatMultiplier(value) {
 function nonNegativeNumber(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? Math.max(number, 0) : 0;
-}
-
-function nullableNonNegativeNumber(value) {
-  if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 0 ? number : null;
-}
-
-function usagePriorityValue(value) {
-  const priority = nullableNonNegativeNumber(value);
-  return priority === null ? null : Math.trunc(priority);
 }
 
 function isolateChartWheel(event) {
