@@ -62,6 +62,13 @@ document.querySelectorAll('[data-filter]').forEach((button) => {
   });
 });
 
+document.querySelectorAll('#dashboardPanel [data-platform-filter]').forEach((button) => {
+  button.addEventListener('click', () => {
+    activateToggle('#dashboardPanel [data-platform-filter]', button);
+    dashboard.setPlatformFilter(button.dataset.platformFilter);
+  });
+});
+
 $('#usagePeriodSelect').addEventListener('change', (event) => {
   usage.setPeriod(event.target.value);
   void usage.load();

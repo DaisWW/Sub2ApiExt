@@ -281,6 +281,62 @@ func TestDashboardSortsAccountsByPriorityAndShowsBadge(t *testing.T) {
 	}
 }
 
+func TestDashboardPlatformFilterControls(t *testing.T) {
+	server := New((*monitor.Service)(nil))
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("got status %d", response.Code)
+	}
+	body := response.Body.String()
+	for _, marker := range []string{
+		"aria-label=\"平台类型\"",
+		"class=\"active platform-filter-openai\"",
+		"data-platform-filter=\"openai\"",
+		"data-platform-filter=\"anthropic\"",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("index.html is missing %q", marker)
+		}
+	}
+	usageStart := strings.Index(body, `<section class="usage-section"`)
+	if usageStart < 0 {
+		t.Fatal("usage section is missing")
+	}
+	if strings.Contains(body[usageStart:], "data-platform-filter=") {
+		t.Fatal("usage section must not expose platform filters")
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("dashboard.js returned status %d", response.Code)
+	}
+	body = response.Body.String()
+	for _, marker := range []string{
+		"platformFilter = 'openai'",
+		"setPlatformFilter(platform)",
+		"normalizePlatform(target.platform) === this.platformFilter",
+		"function normalizePlatform(value)",
+		"target-platform-${platform}",
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("dashboard.js is missing %q", marker)
+		}
+	}
+	request = httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("app.js returned status %d", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "#dashboardPanel [data-platform-filter]") {
+		t.Fatal("platform filter handlers must be scoped to the realtime dashboard")
+	}
+}
+
 func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 	server := New((*monitor.Service)(nil))
 	for path, markers := range map[string][]string{

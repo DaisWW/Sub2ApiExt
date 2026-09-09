@@ -19,6 +19,7 @@ import {
 export class DashboardPanel {
   dashboard = null;
   filter = 'group';
+  platformFilter = 'openai';
   #requests = new LatestRequest();
   #activityRequests = new LatestRequest();
   #openHistory;
@@ -42,6 +43,12 @@ export class DashboardPanel {
 
   setFilter(filter) {
     this.filter = filter;
+    this.render();
+  }
+
+  setPlatformFilter(platform) {
+    if (platform !== 'openai' && platform !== 'anthropic') return;
+    this.platformFilter = platform;
     this.render();
   }
 
@@ -170,7 +177,8 @@ export class DashboardPanel {
 
   #visibleTargets() {
     return (this.dashboard.targets || [])
-      .filter((target) => target.kind === this.filter)
+      .filter((target) => target.kind === this.filter
+        && normalizePlatform(target.platform) === this.platformFilter)
       .sort((left, right) => {
         if (this.filter === 'account') {
           const leftPriority = parsePriority(left.priority);
@@ -186,6 +194,7 @@ export class DashboardPanel {
     const stats = item.stats || {};
     const firstByte = stats.first_byte || {};
     const latency = stats.latency || {};
+    const platform = normalizePlatform(item.platform);
     const status = normalizeStatus(item.status);
     const displayStatus = displayHealthStatus(item, status, null, null, item.health_reason);
     const samples = Number(stats.samples || 0);
@@ -237,6 +246,9 @@ export class DashboardPanel {
     const statusTitle = evidenceAgeLabel
       ? `当前状态：${evidenceAgeLabel}`
       : '当前状态：最新证据';
+    const platformClass = platform === 'openai' || platform === 'anthropic'
+      ? ` target-platform-${platform}`
+      : '';
     return `
       <article class="target-card target-${displayStatus}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
         role="button" tabindex="0" aria-label="查看 ${escapeHTML(item.name)} 的历史记录">
@@ -244,7 +256,7 @@ export class DashboardPanel {
           <div class="target-copy">
             <div class="target-kind">${item.kind === 'group' ? 'GROUP' : 'ACCOUNT'}</div>
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
-            <div class="target-platform">${escapeHTML(item.platform || 'mixed')}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
+            <div class="target-platform${platformClass}">${escapeHTML(item.platform || 'mixed')}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
             ${note}
             ${routeNote}
           </div>
@@ -315,6 +327,10 @@ function parsePriority(value, fallback = Number.MAX_SAFE_INTEGER) {
 function normalizeWindowSeconds(value) {
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? seconds : 300;
+}
+
+function normalizePlatform(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 function formatActivityWindow(seconds) {
