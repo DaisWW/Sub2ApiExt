@@ -9,7 +9,15 @@ import (
 )
 
 type syncState struct {
-	Accounts map[int64]accountState `json:"accounts"`
+	Accounts          map[int64]accountState `json:"accounts"`
+	Exploration       *explorationState      `json:"exploration,omitempty"`
+	ExplorationCursor int64                  `json:"exploration_cursor,omitempty"`
+}
+
+type explorationState struct {
+	AccountID        int64      `json:"account_id"`
+	OriginalPriority int        `json:"original_priority"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
 }
 
 type accountState struct {
@@ -17,6 +25,7 @@ type accountState struct {
 	CandidateCount    int        `json:"candidate_count,omitempty"`
 	LastAppliedAt     *time.Time `json:"last_applied_at,omitempty"`
 	LastApplied       int        `json:"last_applied_priority,omitempty"`
+	LastExploredAt    *time.Time `json:"last_explored_at,omitempty"`
 }
 
 func loadState(path string) (*syncState, error) {

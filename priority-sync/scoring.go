@@ -61,11 +61,9 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		score := rawScore*confidence + 50*(1-confidence)
 
 		hardExcluded, hardReason := accountHardExcluded(account, now)
-		recommended := account.CurrentPriority
+		currentPriority := normalizedPriority(account.CurrentPriority)
+		recommended := currentPriority
 		reason := "证据不足，保持当前优先级"
-		if recommended < 0 {
-			recommended = priorityNeutral
-		}
 		if hardExcluded {
 			recommended = priorityUnavailable
 			reason = hardReason
@@ -82,7 +80,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			Name:                     account.Name,
 			Platform:                 account.Platform,
 			Status:                   account.Status,
-			CurrentPriority:          account.CurrentPriority,
+			CurrentPriority:          currentPriority,
 			RecommendedPriority:      recommended,
 			LatencyP90Ms:             positiveOrZero(account.LatencyP90Ms),
 			FirstTokenP90Ms:          positiveOrZero(account.FirstTokenP90Ms),
@@ -99,25 +97,30 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			Score:                    score,
 			HardExcluded:             hardExcluded,
 			Reason:                   reason,
+			applyImmediately:         hardExcluded,
 		}
 		if costValid[index] {
 			recommendation.CostPerMillionTokens = costValues[index]
 		}
 		result = append(result, recommendation)
 	}
-	sort.SliceStable(result, func(i, j int) bool {
-		if result[i].RecommendedPriority != result[j].RecommendedPriority {
-			return result[i].RecommendedPriority < result[j].RecommendedPriority
-		}
-		if result[i].Score != result[j].Score {
-			return result[i].Score > result[j].Score
-		}
-		if strings.TrimSpace(result[i].Name) != strings.TrimSpace(result[j].Name) {
-			return strings.TrimSpace(result[i].Name) < strings.TrimSpace(result[j].Name)
-		}
-		return result[i].ID < result[j].ID
-	})
+	sortRecommendations(result)
 	return result
+}
+
+func sortRecommendations(recommendations []Recommendation) {
+	sort.SliceStable(recommendations, func(i, j int) bool {
+		if recommendations[i].RecommendedPriority != recommendations[j].RecommendedPriority {
+			return recommendations[i].RecommendedPriority < recommendations[j].RecommendedPriority
+		}
+		if recommendations[i].Score != recommendations[j].Score {
+			return recommendations[i].Score > recommendations[j].Score
+		}
+		if strings.TrimSpace(recommendations[i].Name) != strings.TrimSpace(recommendations[j].Name) {
+			return strings.TrimSpace(recommendations[i].Name) < strings.TrimSpace(recommendations[j].Name)
+		}
+		return recommendations[i].ID < recommendations[j].ID
+	})
 }
 
 func effectiveAvailability(account AccountMetrics) float64 {
@@ -165,6 +168,19 @@ func priorityForScore(score float64) int {
 	default:
 		return priorityPoor
 	}
+}
+
+// normalizedPriority keeps an existing positive priority intact so accounts
+// that are still waiting for enough evidence are not moved unexpectedly. A
+// missing or invalid database value falls back to the neutral band.
+func normalizedPriority(value int) int {
+	if value <= 0 {
+		return priorityNeutral
+	}
+	if value > 10000 {
+		return priorityUnavailable
+	}
+	return value
 }
 
 // normalizeLowerBetter 对越小越好的指标做稳健的 0..100 反向归一化。

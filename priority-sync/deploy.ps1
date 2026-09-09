@@ -56,5 +56,5 @@ Start-ExtensionCompose -RuntimeRoot $runtimeRoot
 Wait-ExtensionContainer -Name 'sub2api-priority-sync'
 
 Write-Host ''
-Write-Host 'Priority sync deployment completed (dry-run by default).' -ForegroundColor Green
+Write-Host 'Priority sync deployment completed (automatic priority updates enabled).' -ForegroundColor Green
 Write-Host "Runtime directory: $runtimeRoot"

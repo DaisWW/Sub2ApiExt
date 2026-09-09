@@ -27,6 +27,12 @@ WITH usage_candidates AS (
           ul.actual_cost > 0
           OR ul.total_cost > 0
           OR ul.account_stats_cost > 0
+          OR COALESCE(ul.input_tokens, 0) > 0
+          OR COALESCE(ul.output_tokens, 0) > 0
+          OR COALESCE(ul.cache_creation_tokens, 0) > 0
+          OR COALESCE(ul.cache_read_tokens, 0) > 0
+          OR COALESCE(ul.duration_ms, 0) > 0
+          OR COALESCE(ul.first_token_ms, 0) > 0
       )
 ), usage_rows AS MATERIALIZED (
     SELECT DISTINCT ON (account_id, request_key) *

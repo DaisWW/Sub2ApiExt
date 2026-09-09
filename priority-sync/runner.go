@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"sort"
 	"time"
 )
 
@@ -14,11 +17,12 @@ type metricsSource interface {
 }
 
 type Runner struct {
-	config Config
-	source metricsSource
-	admin  *adminAPI
-	state  *syncState
-	logger *slog.Logger
+	config      Config
+	source      metricsSource
+	admin       *adminAPI
+	state       *syncState
+	logger      *slog.Logger
+	tableWriter io.Writer
 }
 
 func NewRunner(config Config, source metricsSource, client *http.Client, state *syncState, logger *slog.Logger) *Runner {
@@ -32,11 +36,12 @@ func NewRunner(config Config, source metricsSource, client *http.Client, state *
 		logger = slog.Default()
 	}
 	return &Runner{
-		config: config,
-		source: source,
-		admin:  newAdminAPI(config.Sub2APIURL, client),
-		state:  state,
-		logger: logger,
+		config:      config,
+		source:      source,
+		admin:       newAdminAPI(config.Sub2APIURL, client),
+		state:       state,
+		logger:      logger,
+		tableWriter: os.Stdout,
 	}
 }
 
@@ -50,6 +55,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		return err
 	}
 	recommendations := scoreAccounts(accounts, now, r.config.MinSamples)
+	r.prepareExploration(accounts, recommendations, now)
 	apiKey := r.config.AdminAPIKey
 	if !r.config.DryRun && hasPendingChanges(recommendations) && apiKey == "" {
 		apiKey, err = r.source.AdminAPIKey(ctx)
@@ -71,6 +77,9 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 	if err := saveReport(r.config.ReportFile, report); err != nil {
 		return err
 	}
+	if err := writeRecommendationTable(r.tableWriter, now.Format(time.RFC3339), recommendations); err != nil {
+		r.logger.Error("输出优先级账户表失败", "error", err)
+	}
 	r.logger.Info("优先级策略周期完成",
 		"accounts", len(recommendations),
 		"changed", changed,
@@ -90,15 +99,211 @@ func hasPendingChanges(recommendations []Recommendation) bool {
 	return false
 }
 
+// prepareExploration gives one low-evidence, low-priority account a bounded
+// observation slot. It only prepares recommendations; durable exploration
+// state is written by applyRecommendations after the Admin API succeeds.
+func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations []Recommendation, now time.Time) {
+	if r == nil || r.state == nil || len(recommendations) == 0 {
+		return
+	}
+	byID := make(map[int64]AccountMetrics, len(accounts))
+	for _, account := range accounts {
+		byID[account.ID] = account
+	}
+	if exploration := r.state.Exploration; exploration != nil {
+		account, exists := byID[exploration.AccountID]
+		if !exists {
+			// The account is no longer eligible for the read-only snapshot (for
+			// example it was disabled or deleted); discard the stale lease so it
+			// cannot block all other accounts forever.
+			r.state.Exploration = nil
+			return
+		}
+		for index := range recommendations {
+			recommendation := &recommendations[index]
+			if recommendation.ID != exploration.AccountID {
+				continue
+			}
+			recommendation.Exploration = true
+			evidence := account.SuccessfulRequests + account.TerminalFailures
+			hardExcluded, hardReason := accountHardExcluded(account, now)
+			switch {
+			case hardExcluded:
+				recommendation.RecommendedPriority = priorityUnavailable
+				recommendation.Reason = hardReason + "；结束探索"
+				recommendation.applyImmediately = true
+				recommendation.explorationEnd = true
+			case exploration.StartedAt != nil && !now.Before(exploration.StartedAt.Add(explorationDuration)):
+				recommendation.RecommendedPriority = normalizedPriority(exploration.OriginalPriority)
+				recommendation.Reason = "探索超时，恢复探索前优先级"
+				recommendation.applyImmediately = true
+				recommendation.explorationEnd = true
+			case evidence >= int64(r.config.MinSamples):
+				recommendation.RecommendedPriority = priorityForScore(recommendation.Score)
+				recommendation.Reason += "；探索样本已足够，进入正式评分确认"
+				recommendation.explorationEnd = true
+			default:
+				recommendation.RecommendedPriority = priorityExplore
+				recommendation.Reason = "低样本账户探索中，等待更多最终结果"
+				recommendation.ApplyStatus = "exploring"
+			}
+			break
+		}
+		if !containsRecommendation(recommendations, exploration.AccountID) {
+			r.state.Exploration = nil
+			return
+		}
+		sortRecommendations(recommendations)
+		return
+	}
+	if r.config.DryRun {
+		return
+	}
+	candidate, ok := r.selectExplorationCandidate(accounts, now)
+	if !ok {
+		return
+	}
+	for index := range recommendations {
+		if recommendations[index].ID != candidate.ID {
+			continue
+		}
+		recommendation := &recommendations[index]
+		recommendation.RecommendedPriority = priorityExplore
+		recommendation.Exploration = true
+		recommendation.explorationStart = true
+		recommendation.applyImmediately = true
+		recommendation.Reason = "证据不足，进入有限探索档位"
+		break
+	}
+	sortRecommendations(recommendations)
+}
+
+func containsRecommendation(recommendations []Recommendation, id int64) bool {
+	for _, recommendation := range recommendations {
+		if recommendation.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Runner) selectExplorationCandidate(accounts []AccountMetrics, now time.Time) (AccountMetrics, bool) {
+	eligible := make([]AccountMetrics, 0, len(accounts))
+	for _, account := range accounts {
+		if accountState, ok := r.state.Accounts[account.ID]; ok && accountState.LastExploredAt != nil && now.Sub(*accountState.LastExploredAt) < explorationDuration {
+			continue
+		}
+		evidence := account.SuccessfulRequests + account.TerminalFailures
+		hardExcluded, _ := accountHardExcluded(account, now)
+		priority := normalizedPriority(account.CurrentPriority)
+		if evidence >= int64(r.config.MinSamples) || hardExcluded || priority < priorityNeutral || priority >= priorityUnavailable {
+			continue
+		}
+		eligible = append(eligible, account)
+	}
+	return selectExplorationCandidate(eligible, r.state.Exploration, r.state.ExplorationCursor, now, r.config.MinSamples)
+}
+
+// selectExplorationCandidate returns the first eligible account after the
+// persisted cursor, wrapping by stable ID to give cold accounts fair turns.
+func selectExplorationCandidate(accounts []AccountMetrics, active *explorationState, cursor int64, now time.Time, minSamples int) (AccountMetrics, bool) {
+	if minSamples < 1 {
+		minSamples = defaultMinSamples
+	}
+	eligible := make([]AccountMetrics, 0, len(accounts))
+	for _, account := range accounts {
+		if active != nil && account.ID == active.AccountID {
+			continue
+		}
+		evidence := account.SuccessfulRequests + account.TerminalFailures
+		hardExcluded, _ := accountHardExcluded(account, now)
+		priority := normalizedPriority(account.CurrentPriority)
+		if account.ID <= 0 || evidence >= int64(minSamples) || hardExcluded || priority < priorityNeutral || priority >= priorityUnavailable {
+			continue
+		}
+		eligible = append(eligible, account)
+	}
+	if len(eligible) == 0 {
+		return AccountMetrics{}, false
+	}
+	sort.SliceStable(eligible, func(i, j int) bool { return eligible[i].ID < eligible[j].ID })
+	for _, account := range eligible {
+		if account.ID > cursor {
+			return account, true
+		}
+	}
+	return eligible[0], true
+}
+
 func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Recommendation, apiKey string, now time.Time) (changed, pending int) {
 	seen := make(map[int64]struct{}, len(recommendations))
-	for _, recommendation := range recommendations {
+	activeExplorationID := int64(0)
+	if r.state.Exploration != nil {
+		activeExplorationID = r.state.Exploration.AccountID
+	} else {
+		for _, recommendation := range recommendations {
+			if recommendation.explorationStart {
+				activeExplorationID = recommendation.ID
+				break
+			}
+		}
+	}
+	for index := range recommendations {
+		recommendation := &recommendations[index]
 		seen[recommendation.ID] = struct{}{}
 		state := r.state.Accounts[recommendation.ID]
+		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately {
+			if recommendation.RecommendedPriority != recommendation.CurrentPriority {
+				pending++
+			}
+			recommendation.ApplyStatus = "deferred-exploration"
+			continue
+		}
+		if recommendation.explorationStart {
+			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, now, &state) {
+				pending++
+				continue
+			}
+			r.state.Accounts[recommendation.ID] = state
+			recommendation.ApplyStatus = "exploration-started"
+			state.LastExploredAt = timePtr(now)
+			r.state.Accounts[recommendation.ID] = state
+			r.state.Exploration = &explorationState{
+				AccountID:        recommendation.ID,
+				OriginalPriority: recommendation.CurrentPriority,
+				StartedAt:        timePtr(now),
+			}
+			r.state.ExplorationCursor = recommendation.ID
+			changed++
+			activeExplorationID = recommendation.ID
+			continue
+		}
+		isActiveExploration := recommendation.Exploration && r.state.Exploration != nil && r.state.Exploration.AccountID == recommendation.ID
 		if recommendation.RecommendedPriority == recommendation.CurrentPriority {
 			state.CandidatePriority = 0
 			state.CandidateCount = 0
 			r.state.Accounts[recommendation.ID] = state
+			if isActiveExploration && recommendation.explorationEnd {
+				r.state.Exploration = nil
+				recommendation.ApplyStatus = "exploration-ended"
+			} else if recommendation.ApplyStatus == "" {
+				recommendation.ApplyStatus = "unchanged"
+			}
+			continue
+		}
+		if recommendation.applyImmediately {
+			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, now, &state) {
+				pending++
+				continue
+			}
+			r.state.Accounts[recommendation.ID] = state
+			if isActiveExploration && recommendation.explorationEnd {
+				r.state.Exploration = nil
+				recommendation.ApplyStatus = "exploration-ended"
+			} else {
+				recommendation.ApplyStatus = "updated"
+			}
+			changed++
 			continue
 		}
 		if state.CandidatePriority == recommendation.RecommendedPriority {
@@ -108,18 +313,21 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			state.CandidateCount = 1
 		}
 		if state.CandidateCount < r.config.Confirmations {
+			recommendation.ApplyStatus = "pending"
 			pending++
 			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
-		if state.LastAppliedAt != nil && now.Sub(*state.LastAppliedAt) < r.config.ChangeCooldown {
+		if !isActiveExploration && state.LastAppliedAt != nil && now.Sub(*state.LastAppliedAt) < r.config.ChangeCooldown {
+			recommendation.ApplyStatus = "cooldown"
 			pending++
 			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
 		if r.config.DryRun {
+			recommendation.ApplyStatus = "dry-run"
 			r.logger.Info("dry-run 建议更新账户优先级",
-				"account_id", recommendation.ID,
+				"account", accountLabel(recommendation.Name, recommendation.ID),
 				"from", recommendation.CurrentPriority,
 				"to", recommendation.RecommendedPriority,
 				"score", roundScore(recommendation.Score),
@@ -129,30 +337,61 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			continue
 		}
 		if apiKey == "" {
+			recommendation.ApplyStatus = "missing-key"
 			pending++
-			r.logger.Warn("缺少 Admin API Key，跳过账户优先级写入", "account_id", recommendation.ID)
+			r.logger.Warn("缺少 Admin API Key，跳过账户优先级写入", "account", accountLabel(recommendation.Name, recommendation.ID))
 			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
-		if err := r.admin.updatePriority(ctx, apiKey, recommendation.ID, recommendation.RecommendedPriority); err != nil {
+		if !r.applyPriorityUpdate(ctx, recommendation, apiKey, now, &state) {
 			pending++
-			r.logger.Error("账户优先级写入失败", "account_id", recommendation.ID, "error", err)
 			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
-		state.LastAppliedAt = timePtr(now)
-		state.LastApplied = recommendation.RecommendedPriority
-		state.CandidatePriority = 0
-		state.CandidateCount = 0
 		r.state.Accounts[recommendation.ID] = state
+		if isActiveExploration && recommendation.explorationEnd {
+			r.state.Exploration = nil
+			recommendation.ApplyStatus = "exploration-ended"
+		} else {
+			recommendation.ApplyStatus = "updated"
+		}
 		changed++
 	}
 	for id := range r.state.Accounts {
-		if _, exists := seen[id]; !exists {
+		if _, exists := seen[id]; !exists && (r.state.Exploration == nil || id != r.state.Exploration.AccountID) {
 			delete(r.state.Accounts, id)
 		}
 	}
 	return changed, pending
+}
+
+func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recommendation, apiKey string, now time.Time, state *accountState) bool {
+	if r.config.DryRun {
+		recommendation.ApplyStatus = "dry-run"
+		r.logger.Info("dry-run 建议更新账户优先级",
+			"account", accountLabel(recommendation.Name, recommendation.ID),
+			"from", recommendation.CurrentPriority,
+			"to", recommendation.RecommendedPriority,
+			"score", roundScore(recommendation.Score),
+		)
+		return false
+	}
+	if apiKey == "" {
+		recommendation.ApplyStatus = "missing-key"
+		r.logger.Warn("缺少 Admin API Key，跳过账户优先级写入", "account", accountLabel(recommendation.Name, recommendation.ID))
+		return false
+	}
+	if err := r.admin.updatePriority(ctx, apiKey, recommendation.ID, recommendation.RecommendedPriority); err != nil {
+		recommendation.ApplyStatus = "failed"
+		r.logger.Error("账户优先级写入失败", "account", accountLabel(recommendation.Name, recommendation.ID), "error", err)
+		return false
+	}
+	state.LastAppliedAt = timePtr(now)
+	state.LastApplied = recommendation.RecommendedPriority
+	state.CandidatePriority = 0
+	state.CandidateCount = 0
+	recommendation.ApplyStatus = "updated"
+	return true
 }
 
 func roundScore(value float64) float64 {

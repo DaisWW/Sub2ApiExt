@@ -13,7 +13,7 @@ import (
 
 const (
 	defaultSub2APIURL    = "http://sub2api:8080"
-	defaultInterval      = 5 * time.Minute
+	defaultInterval      = 10 * time.Minute
 	defaultWindow        = time.Hour
 	defaultCooldown      = 15 * time.Minute
 	defaultMinSamples    = 5
@@ -28,14 +28,18 @@ const (
 	availabilityWeight = 0.15
 )
 
-// 优先级数值越小越优先。使用档位而不是连续名次，避免最佳账号独占全部流量。
+// 优先级数值越小越优先。自动档位之间保留空档，探索档位用于给低样本账号
+// 一个有限的观测机会，不与正式评分档位混用。
 const (
-	priorityBest        = 1
-	priorityGood        = 25
+	priorityBest        = 10
+	priorityExplore     = 20
+	priorityGood        = 30
 	priorityNeutral     = 50
-	priorityDegraded    = 75
-	priorityPoor        = 100
+	priorityDegraded    = 70
+	priorityPoor        = 90
 	priorityUnavailable = 1000
+
+	explorationDuration = 30 * time.Minute
 )
 
 type Config struct {
@@ -62,7 +66,7 @@ func LoadConfig() (Config, error) {
 		ChangeCooldown: envDuration("PRIORITY_SYNC_CHANGE_COOLDOWN", defaultCooldown),
 		MinSamples:     envInt("PRIORITY_SYNC_MIN_SAMPLES", defaultMinSamples),
 		Confirmations:  envInt("PRIORITY_SYNC_CONFIRMATIONS", defaultConfirmations),
-		DryRun:         envBool("PRIORITY_SYNC_DRY_RUN", true),
+		DryRun:         envBool("PRIORITY_SYNC_DRY_RUN", false),
 		StateFile:      envString("PRIORITY_SYNC_STATE_FILE", defaultStateFile),
 		ReportFile:     envString("PRIORITY_SYNC_REPORT_FILE", defaultReportFile),
 	}

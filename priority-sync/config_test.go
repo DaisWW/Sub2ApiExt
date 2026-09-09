@@ -4,9 +4,10 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestLoadConfigDefaultsToDryRun(t *testing.T) {
+func TestLoadConfigDefaultsToAutoApply(t *testing.T) {
 	for _, key := range []string{
 		"PRIORITY_SYNC_DATABASE_URL", "DATABASE_HOST", "DATABASE_PORT", "DATABASE_USER",
 		"DATABASE_PASSWORD", "DATABASE_DBNAME", "DATABASE_SSLMODE", "PRIORITY_SYNC_SUB2API_URL",
@@ -23,7 +24,7 @@ func TestLoadConfigDefaultsToDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !config.DryRun || config.Interval != defaultInterval || config.Window != defaultWindow {
+	if config.DryRun || config.Interval != 10*time.Minute || config.Window != defaultWindow {
 		t.Fatalf("unexpected defaults: %+v", config)
 	}
 	if !strings.Contains(config.DatabaseURL, "db.example") {
@@ -37,6 +38,19 @@ func TestLoadConfigRejectsShortInterval(t *testing.T) {
 	_, err := LoadConfig()
 	if err == nil || !strings.Contains(err.Error(), "不能小于") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadConfigDefaultsToTenMinuteInterval(t *testing.T) {
+	t.Setenv("PRIORITY_SYNC_DATABASE_URL", "postgres://user:pass@db/sub2api")
+	t.Setenv("PRIORITY_SYNC_INTERVAL", "")
+	t.Setenv("PRIORITY_SYNC_DRY_RUN", "")
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Interval != 10*time.Minute || config.DryRun {
+		t.Fatalf("interval=%s dry_run=%v", config.Interval, config.DryRun)
 	}
 }
 

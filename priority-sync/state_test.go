@@ -24,6 +24,45 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStateRoundTripPreservesExploration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	started := time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
+	want := &syncState{
+		Accounts: map[int64]accountState{},
+		Exploration: &explorationState{
+			AccountID:        9,
+			OriginalPriority: 90,
+			StartedAt:        &started,
+		},
+		ExplorationCursor: 9,
+	}
+	if err := saveState(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Exploration == nil || got.Exploration.AccountID != 9 || got.Exploration.OriginalPriority != 90 || got.ExplorationCursor != 9 {
+		t.Fatalf("exploration state = %+v", got)
+	}
+}
+
+func TestStateRoundTripPreservesExplorationCooldown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	last := time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
+	want := &syncState{Accounts: map[int64]accountState{
+		9: {LastExploredAt: &last},
+	}}
+	if err := saveState(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadState(path)
+	if err != nil || got.Accounts[9].LastExploredAt == nil || !got.Accounts[9].LastExploredAt.Equal(last) {
+		t.Fatalf("exploration cooldown = %+v, err=%v", got, err)
+	}
+}
+
 func TestLoadMissingStateStartsEmpty(t *testing.T) {
 	state, err := loadState(filepath.Join(t.TempDir(), "missing.json"))
 	if err != nil || state == nil || len(state.Accounts) != 0 {

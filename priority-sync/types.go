@@ -50,7 +50,12 @@ type Recommendation struct {
 	AvailabilityScore        float64 `json:"availability_score"`
 	Score                    float64 `json:"score"`
 	HardExcluded             bool    `json:"hard_excluded"`
+	Exploration              bool    `json:"exploration,omitempty"`
+	ApplyStatus              string  `json:"apply_status,omitempty"`
 	Reason                   string  `json:"reason"`
+	applyImmediately         bool
+	explorationStart         bool
+	explorationEnd           bool
 }
 
 type PriorityReport struct {

@@ -146,3 +146,30 @@ func TestPriorityForScoreUsesBands(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizedPriorityUsesSafeBounds(t *testing.T) {
+	cases := []struct {
+		value int
+		want  int
+	}{
+		{value: -1, want: priorityNeutral},
+		{value: 0, want: priorityNeutral},
+		{value: 10, want: 10},
+		{value: 10000, want: 10000},
+		{value: 10001, want: priorityUnavailable},
+	}
+	for _, item := range cases {
+		if got := normalizedPriority(item.value); got != item.want {
+			t.Errorf("normalizedPriority(%d)=%d, want %d", item.value, got, item.want)
+		}
+	}
+}
+
+func TestEffectiveAvailabilityClampsSoftRateLimitWeight(t *testing.T) {
+	if got := effectiveAvailability(AccountMetrics{SuccessfulRequests: 5, RecoveredRateLimitWeight: -3}); got != 1 {
+		t.Fatalf("negative soft weight reduced availability to %v", got)
+	}
+	if got := effectiveAvailability(AccountMetrics{SuccessfulRequests: 5, RecoveredRateLimitWeight: 100}); got < 0 || got > 1 {
+		t.Fatalf("availability escaped bounds: %v", got)
+	}
+}
