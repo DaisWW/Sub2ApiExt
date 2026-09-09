@@ -282,6 +282,7 @@ export class DashboardPanel {
           ${currentConcurrencyMetric}
         </div>
         <div class="metrics">
+          ${renderMetric('首字最快', formatMs(firstByte.fastest_ms), '最近 1 小时成功样本的首字/首字节最快到达时间', latencyMetricClass(firstByte.fastest_ms))}
           ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 1 小时成功样本的首字/首字节中位数', latencyMetricClass(firstByte.median_ms))}
           ${renderMetric('总耗时中位数', formatMedianMs(latency), '最近 1 小时成功样本的完整请求总耗时中位数', latencyMetricClass(latency.median_ms))}
           ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值', latencyMetricClass(latency.p95_ms))}

@@ -406,6 +406,7 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 		"const availabilityLabel = `近 1 小时通过率${availabilityDetail}`",
 		"const currentSample = recentSamples[recentSamples.length - 1]",
 		"const availabilityTone = availabilityToneForStatus(currentGridStatus)",
+		"renderMetric('首字最快', formatMs(firstByte.fastest_ms)",
 		"renderMetric('首字中位数', formatMedianMs(firstByte)",
 		"renderMetric('总耗时中位数', formatMedianMs(latency)",
 		"renderMetric('P95', formatMs(latency.p95_ms)",
@@ -416,7 +417,6 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 		}
 	}
 	for _, marker := range []string{
-		"renderMetric('首字最快'",
 		"renderMetric('最快'",
 		"renderMetric('中位数'",
 		"真实请求错误证据",
