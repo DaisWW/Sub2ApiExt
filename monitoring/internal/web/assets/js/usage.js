@@ -15,11 +15,14 @@ const donutColors = ['#77a9ef', '#54d6ae', '#e8b85f', '#c18df0', '#f27a82', '#8f
 const minimumDonutPercent = 0.5;
 const usageMetrics = new Set(['tokens', 'cost', 'unit_cost']);
 const shareMetricSet = new Set(['tokens', 'cost']);
+const usageEntitySortMetrics = new Set(['cost', 'unit_cost', 'multiplier', 'tokens']);
 
 export class UsagePanel {
   usage = null;
   period = 'today';
   entityKind = 'group';
+  entitySortMetric = 'cost';
+  entitySortDirection = 'asc';
   trendMetric = 'tokens';
   shareMetrics = { model: 'tokens', group: 'tokens' };
   #requests = new LatestRequest();
@@ -34,6 +37,10 @@ export class UsagePanel {
     });
     document.querySelectorAll('[data-usage-entity]').forEach((button) => {
       button.addEventListener('click', () => this.setEntityKind(button.dataset.usageEntity, button));
+    });
+    $('#usageEntitySortSelect').addEventListener('change', (event) => this.setEntitySortMetric(event.target.value));
+    document.querySelectorAll('[data-usage-sort-direction]').forEach((button) => {
+      button.addEventListener('click', () => this.setEntitySortDirection(button.dataset.usageSortDirection, button));
     });
   }
 
@@ -52,6 +59,19 @@ export class UsagePanel {
     if (kind !== 'group' && kind !== 'account') return;
     this.entityKind = kind;
     activateToggle('[data-usage-entity]', button);
+    this.#renderEntityCards();
+  }
+
+  setEntitySortMetric(metric) {
+    if (!usageEntitySortMetrics.has(metric)) return;
+    this.entitySortMetric = metric;
+    this.#renderEntityCards();
+  }
+
+  setEntitySortDirection(direction, button) {
+    if (direction !== 'asc' && direction !== 'desc') return;
+    this.entitySortDirection = direction;
+    activateToggle('[data-usage-sort-direction]', button);
     this.#renderEntityCards();
   }
 
@@ -108,7 +128,9 @@ export class UsagePanel {
     renderUsageCards(
       this.usage[group ? 'groups' : 'accounts'],
       group ? '暂无分组用量数据' : '暂无账户用量数据',
-      this.entityKind
+      this.entityKind,
+      this.entitySortMetric,
+      this.entitySortDirection
     );
   }
 
@@ -180,17 +202,45 @@ function renderUsageKPI([label, value, note, color]) {
   </article>`;
 }
 
-function renderUsageCards(sourceItems, emptyText, kind) {
+function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'cost', sortDirection = 'asc') {
   const container = $('#usageEntityCardList');
   const items = (Array.isArray(sourceItems) ? sourceItems : [])
     .slice()
-    .sort((left, right) => String(left.name || '').trim().localeCompare(String(right.name || '').trim(), 'zh-CN')
-      || String(left.key).localeCompare(String(right.key), 'zh-CN'));
+    .sort((left, right) => compareUsageCards(left, right, sortMetric, sortDirection));
   if (!items.length) {
     container.innerHTML = '<div class="empty-state usage-entity-empty">' + emptyText + '</div>';
     return;
   }
   container.innerHTML = items.map((item) => renderUsageCard(item, kind)).join('');
+}
+
+function compareUsageCards(left, right, sortMetric, sortDirection) {
+  const leftValue = usageEntitySortValue(left, sortMetric);
+  const rightValue = usageEntitySortValue(right, sortMetric);
+  if (leftValue === null || rightValue === null) {
+    if (leftValue !== rightValue) return leftValue === null ? 1 : -1;
+  } else {
+    const valueDifference = leftValue - rightValue;
+    if (valueDifference !== 0) return sortDirection === 'desc' ? -valueDifference : valueDifference;
+  }
+  return String(left.name || '').trim().localeCompare(String(right.name || '').trim(), 'zh-CN')
+    || String(left.key).localeCompare(String(right.key), 'zh-CN');
+}
+
+function usageEntitySortValue(item, metric) {
+  if (metric === 'unit_cost') {
+    const totalTokens = nullableNonNegativeNumber(item?.total_tokens);
+    if (totalTokens === null || totalTokens <= 0) return null;
+    const reported = nullableNonNegativeNumber(item?.cost_per_million_tokens);
+    if (reported !== null) return reported;
+    const totalCost = nullableNonNegativeNumber(item?.total_cost);
+    if (totalCost === null) return null;
+    const calculated = totalCost * 1_000_000 / totalTokens;
+    return Number.isFinite(calculated) ? calculated : null;
+  }
+  if (metric === 'multiplier') return nullableNonNegativeNumber(item?.effective_rate_multiplier);
+  if (metric === 'tokens') return nullableNonNegativeNumber(item?.total_tokens);
+  return nullableNonNegativeNumber(item?.total_cost);
 }
 
 function renderUsageCard(item, kind) {
@@ -623,6 +673,12 @@ function formatMultiplier(value) {
 function nonNegativeNumber(value) {
   const number = Number(value || 0);
   return Number.isFinite(number) ? Math.max(number, 0) : 0;
+}
+
+function nullableNonNegativeNumber(value) {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 function isolateChartWheel(event) {
