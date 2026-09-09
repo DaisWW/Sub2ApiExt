@@ -285,7 +285,13 @@ function Protect-ExtensionRuntimeFiles {
             continue
         }
         try {
-            $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+            $file = [IO.FileInfo]::new($path)
+            if ($PSVersionTable.PSEdition -eq 'Core') {
+                $acl = [IO.FileSystemAclExtensions]::GetAccessControl(
+                    $file, [Security.AccessControl.AccessControlSections]::Access)
+            } else {
+                $acl = $file.GetAccessControl([Security.AccessControl.AccessControlSections]::Access)
+            }
             foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
                 $acl.PurgeAccessRules($rule.IdentityReference)
             }
@@ -299,7 +305,11 @@ function Protect-ExtensionRuntimeFiles {
             $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
                     $currentUser, [Security.AccessControl.FileSystemRights]::Modify,
                     [Security.AccessControl.AccessControlType]::Allow))
-            Set-Acl -LiteralPath $path -AclObject $acl -ErrorAction Stop
+            if ($PSVersionTable.PSEdition -eq 'Core') {
+                [IO.FileSystemAclExtensions]::SetAccessControl($file, $acl)
+            } else {
+                $file.SetAccessControl($acl)
+            }
         }
         catch {
             throw "Could not restrict access to ${path}: $($_.Exception.Message)"
