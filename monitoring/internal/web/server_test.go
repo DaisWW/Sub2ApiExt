@@ -356,12 +356,18 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 		"all: '全部平台'",
 		"openai_compatible",
 		"['claude', 'anthropic']",
+		"['grok', 'grok']",
+		"['xai', 'grok']",
+		"grok: 'Grok'",
 		"function renderPlatformFilters",
 		"<option value=\"${escapeHTML(key)}\">",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("shared.js is missing %q", marker)
 		}
+	}
+	if strings.Contains(body, "['grok', 'openai']") || strings.Contains(body, "['xai', 'openai']") {
+		t.Error("shared.js still aliases grok/xai to openai")
 	}
 	if strings.Contains(body, "options.set('openai'") || strings.Contains(body, "options.set('anthropic'") {
 		t.Error("shared.js hardcodes platform options instead of deriving them from values")

@@ -38,8 +38,8 @@ const platformAliases = new Map([
   ['openai', 'openai'],
   ['openai_compatible', 'openai'],
   ['codex', 'openai'],
-  ['grok', 'openai'],
-  ['xai', 'openai'],
+  ['grok', 'grok'],
+  ['xai', 'grok'],
   ['anthropic', 'anthropic'],
   ['claude', 'anthropic'],
   ['arthropic', 'anthropic'],
@@ -49,6 +49,7 @@ const platformAliases = new Map([
 const platformNames = {
   all: '全部平台',
   openai: 'OpenAI',
+  grok: 'Grok',
   anthropic: 'Anthropic',
   mixed: '混合平台',
   unknown: '未知平台'
