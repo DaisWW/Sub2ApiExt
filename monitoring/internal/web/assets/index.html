@@ -149,6 +149,10 @@
             <div class="usage-entity-heading">
               <div><p class="eyebrow" id="usageEntityEyebrow">GROUP USAGE</p><h3 id="usageEntityTitle">分组缓存与成本</h3></div>
               <div class="usage-entity-actions">
+                <div class="segmented usage-entity-toggle" role="group" aria-label="用量卡片类型">
+                  <button class="active" type="button" data-usage-entity="group" aria-pressed="true">分组</button>
+                  <button type="button" data-usage-entity="account" aria-pressed="false">账户</button>
+                </div>
                 <div class="segmented platform-filters usage-platform-filters" id="usagePlatformFilters" role="group" aria-label="用量平台类型">
                   <button type="button" class="platform-filter platform-filter-openai active" data-platform-filter="openai" aria-pressed="true">OpenAI</button>
                   <button type="button" class="platform-filter platform-filter-anthropic" data-platform-filter="anthropic" aria-pressed="false">Anthropic</button>
@@ -165,10 +169,6 @@
                   </select>
                 </label>
                 <button class="icon-button usage-sort-direction" id="usageEntitySortDirection" type="button" title="当前按每百万 Tokens 成本低到高，点击切换为高到低" aria-label="当前按每百万 Tokens 成本低到高，点击切换为高到低" aria-pressed="false">↑</button>
-                <div class="segmented usage-entity-toggle" role="group" aria-label="用量卡片类型">
-                  <button class="active" type="button" data-usage-entity="group" aria-pressed="true">分组</button>
-                  <button type="button" data-usage-entity="account" aria-pressed="false">账户</button>
-                </div>
               </div>
             </div>
             <div class="usage-entity-grid" id="usageEntityCardList" aria-live="polite"></div>
