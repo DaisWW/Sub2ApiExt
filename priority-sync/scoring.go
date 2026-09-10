@@ -169,26 +169,32 @@ func future(value *time.Time, now time.Time) bool {
 }
 
 func priorityForScore(score float64) int {
-	switch {
-	case score >= 80:
-		return priorityBest
-	case score >= 65:
-		return priorityGood
-	case score >= 50:
-		return priorityNeutral
-	case score >= 35:
-		return priorityDegraded
-	default:
-		return priorityPoor
-	}
+	return priorityForScoreRange(score, priorityBest, priorityPoor)
 }
 
 func coldAnchorPriority(multiplierScore float64) int {
-	anchor := priorityForScore(multiplierScore)
-	if anchor < coldAnchorFloor {
-		return coldAnchorFloor
+	return priorityForScoreRange(multiplierScore, coldAnchorFloor, priorityPoor)
+}
+
+// priorityForScoreRange maps a higher score to a lower priority number while
+// keeping the neutral score at the neutral priority. This preserves the
+// default position when a metric has no usable peer evidence.
+func priorityForScoreRange(score float64, best, worst int) int {
+	if best <= 0 || best > priorityNeutral || worst < priorityNeutral {
+		return priorityNeutral
 	}
-	return anchor
+	score = clamp(score, 0, 100)
+	var priority int
+	if score >= 50 {
+		priority = best + int(math.Round((100-score)*float64(priorityNeutral-best)/50))
+	} else {
+		priority = priorityNeutral + int(math.Round((50-score)*float64(worst-priorityNeutral)/50))
+	}
+	// Keep the bounded exploration slot distinct from formal score output.
+	if priority == priorityExplore {
+		priority++
+	}
+	return priority
 }
 
 // normalizedPriority preserves positive database values. A missing or invalid

@@ -425,7 +425,7 @@ func priorityChangeDirection(current, candidate int) int {
 	}
 }
 
-// rampPriority limits normal formal-band changes to one 20-point step. A
+// rampPriority limits normal scored-priority changes to one 20-point step. A
 // larger custom gap is capped to four writes; unavailable recovery re-enters
 // at neutral for good-or-better targets, but keeps degraded/poor targets so a
 // bad account is never promoted straight back into the front of the queue.

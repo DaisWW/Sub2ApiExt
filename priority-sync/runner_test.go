@@ -72,12 +72,16 @@ func TestRunnerAppliesScoredPriorityThroughAdminAPI(t *testing.T) {
 	if err := runner.RunOnce(context.Background(), nowForTest()); err != nil {
 		t.Fatal(err)
 	}
-	if len(updates) != 1 {
+	if len(updates) != 2 {
 		t.Fatalf("got %d updates", len(updates))
 	}
-	got := <-updates
-	if got.id != "1" || got.priority != priorityDegraded {
-		t.Fatalf("update = %+v", got)
+	got := make(map[string]int, 2)
+	for range 2 {
+		update := <-updates
+		got[update.id] = update.priority
+	}
+	if got["1"] != 70 || got["2"] != 82 {
+		t.Fatalf("updates = %+v", got)
 	}
 }
 
@@ -214,9 +218,9 @@ func TestRunnerExplorationWithEnoughEvidenceUsesNormalConfirmation(t *testing.T)
 		t.Fatal(err)
 	}
 	if runner.state.Exploration != nil || len(updates) != 1 {
-		t.Fatalf("exploration did not finish after second confirmation: state=%+v updates=%d", runner.state, len(updates))
+		t.Fatalf("exploration did not finish at continuous target: state=%+v updates=%d", runner.state, len(updates))
 	}
-	if got := <-updates; got != priorityNeutral {
+	if got := <-updates; got != 46 {
 		t.Fatalf("final scored priority = %d", got)
 	}
 }
@@ -244,7 +248,7 @@ func TestRunnerExplorationExpiryUsesMeasuredTargetWhenEvidenceIsReady(t *testing
 			break
 		}
 	}
-	if measured.RecommendedPriority != priorityBest || !measured.explorationEnd {
+	if measured.RecommendedPriority != 18 || !measured.explorationEnd {
 		t.Fatalf("expiry ignored measured target: %+v", measured)
 	}
 }
@@ -291,7 +295,7 @@ func TestRunnerExplorationDoesNotBlockMatureAccount(t *testing.T) {
 	}
 }
 
-func TestRunnerConfirmsPriorityChangeAcrossBandsInSameDirection(t *testing.T) {
+func TestRunnerConfirmsLatestPriorityInSameDirection(t *testing.T) {
 	updates := make(chan int, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -310,7 +314,7 @@ func TestRunnerConfirmsPriorityChangeAcrossBandsInSameDirection(t *testing.T) {
 	runner.tableWriter = io.Discard
 	current := 90
 	for index, want := range []int{70, 50, 30, 10} {
-		first := Recommendation{ID: 21, Name: "oscillating", CurrentPriority: current, RecommendedPriority: 20, SuccessfulRequests: 5}
+		first := Recommendation{ID: 21, Name: "oscillating", CurrentPriority: current, RecommendedPriority: 21, SuccessfulRequests: 5}
 		if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{first}, "secret", nowForTest().Add(time.Duration(index*20)*time.Minute)); changed != 0 || pending != 1 {
 			t.Fatalf("step %d first confirmation changed=%d pending=%d", index, changed, pending)
 		}
@@ -332,7 +336,7 @@ func TestRunnerConfirmsPriorityChangeAcrossBandsInSameDirection(t *testing.T) {
 func TestRunnerConfirmationResetsWhenPriorityDirectionChanges(t *testing.T) {
 	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runner.tableWriter = io.Discard
-	first := Recommendation{ID: 22, Name: "direction-change", CurrentPriority: 90, RecommendedPriority: 20, SuccessfulRequests: 5}
+	first := Recommendation{ID: 22, Name: "direction-change", CurrentPriority: 90, RecommendedPriority: 21, SuccessfulRequests: 5}
 	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{first}, "", nowForTest()); changed != 0 || pending != 1 {
 		t.Fatalf("first confirmation changed=%d pending=%d", changed, pending)
 	}

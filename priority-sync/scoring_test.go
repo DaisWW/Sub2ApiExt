@@ -116,8 +116,8 @@ func TestScoreAccountsMovesColdAccountTowardMultiplierAnchor(t *testing.T) {
 			break
 		}
 	}
-	if cold.AnchorPriority != coldAnchorFloor || cold.RecommendedPriority != coldAnchorFloor {
-		t.Fatalf("cold account anchor = %+v, want priority %d", cold, coldAnchorFloor)
+	if cold.AnchorPriority != 30 || cold.RecommendedPriority != 30 {
+		t.Fatalf("cold account anchor = %+v, want priority 30", cold)
 	}
 	if cold.Confidence != 0 {
 		t.Fatalf("cold account confidence = %v", cold.Confidence)
@@ -180,17 +180,95 @@ func TestNormalizeLowerBetter(t *testing.T) {
 	}
 }
 
-func TestPriorityForScoreUsesBands(t *testing.T) {
+func TestPriorityForScoreUsesContinuousRange(t *testing.T) {
 	cases := []struct {
 		score float64
 		want  int
 	}{
-		{90, priorityBest}, {70, priorityGood}, {55, priorityNeutral}, {40, priorityDegraded}, {10, priorityPoor},
+		{100, priorityBest}, {90, 18}, {70, 34}, {55, 46}, {50, priorityNeutral}, {40, 58}, {10, 82}, {0, priorityPoor},
 	}
 	for _, item := range cases {
 		if got := priorityForScore(item.score); got != item.want {
 			t.Errorf("priorityForScore(%v)=%d, want %d", item.score, got, item.want)
 		}
+	}
+}
+
+func TestColdAnchorUsesContinuousMultiplierRange(t *testing.T) {
+	cheap := coldAnchorPriority(100)
+	mid := coldAnchorPriority(75)
+	expensive := coldAnchorPriority(50)
+	if !(cheap < mid && mid < expensive) {
+		t.Fatalf("multiplier anchors are not ordered: cheap=%d mid=%d expensive=%d", cheap, mid, expensive)
+	}
+	if cheap != coldAnchorFloor || mid != 40 || expensive != priorityNeutral {
+		t.Fatalf("unexpected multiplier anchors: cheap=%d expensive=%d", cheap, expensive)
+	}
+}
+
+func TestScoreAccountsSeparatesColdPriceAnchors(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "cheap", Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 0.05},
+		{ID: 2, Name: "mid-cheap", Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 0.10},
+		{ID: 3, Name: "mid-expensive", Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 0.15},
+		{ID: 4, Name: "expensive", Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 0.20},
+	}, now, 5)
+	anchors := make(map[int64]int, len(result))
+	for _, item := range result {
+		anchors[item.ID] = item.AnchorPriority
+	}
+	if !(anchors[1] < anchors[2] && anchors[2] < anchors[3] && anchors[3] < anchors[4]) {
+		t.Fatalf("cold price anchors are not ordered: %+v", anchors)
+	}
+}
+
+func TestScoreAccountsSeparatesMeasuredScores(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "cheap", Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
+		{ID: 2, Name: "mid-cheap", Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 2, LatencyP90Ms: 100},
+		{ID: 3, Name: "mid-expensive", Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 3, LatencyP90Ms: 100},
+		{ID: 4, Name: "expensive", Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 4, LatencyP90Ms: 100},
+	}, now, 5)
+	priorities := make(map[int64]int, len(result))
+	for _, item := range result {
+		priorities[item.ID] = item.RecommendedPriority
+	}
+	if !(priorities[1] < priorities[2] && priorities[2] < priorities[3] && priorities[3] < priorities[4]) {
+		t.Fatalf("measured priorities are not ordered: %+v", priorities)
+	}
+}
+
+func TestPriorityForScoreKeepsExplorationSlotReserved(t *testing.T) {
+	if got := priorityForScore(87.5); got == priorityExplore {
+		t.Fatalf("formal score reused exploration priority %d", priorityExplore)
+	}
+	if !(priorityForScore(90) < priorityForScore(87.5)) {
+		t.Fatalf("score ordering was lost around exploration slot")
+	}
+}
+
+func TestPriorityMappingsStayOrderedAndInRange(t *testing.T) {
+	previousScored := priorityForScore(0)
+	previousAnchor := coldAnchorPriority(0)
+	for score := 0; score <= 100; score++ {
+		scored := priorityForScore(float64(score))
+		anchor := coldAnchorPriority(float64(score))
+		if scored < priorityBest || scored > priorityPoor || scored == priorityExplore {
+			t.Fatalf("score %d mapped to invalid formal priority %d", score, scored)
+		}
+		if anchor < coldAnchorFloor || anchor > priorityPoor || anchor == priorityExplore {
+			t.Fatalf("score %d mapped to invalid cold anchor %d", score, anchor)
+		}
+		if scored > previousScored || anchor > previousAnchor {
+			t.Fatalf("mapping reversed at score %d: scored=%d previous=%d anchor=%d previousAnchor=%d", score, scored, previousScored, anchor, previousAnchor)
+		}
+		previousScored = scored
+		previousAnchor = anchor
+	}
+	if got := priorityForScore(50); got != priorityNeutral {
+		t.Fatalf("neutral score mapped to %d, want %d", got, priorityNeutral)
 	}
 }
 
