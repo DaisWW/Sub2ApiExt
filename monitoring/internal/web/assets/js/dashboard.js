@@ -33,7 +33,7 @@ const dashboardSortLabels = {
 export class DashboardPanel {
   dashboard = null;
   filter = 'group';
-  platformFilter = 'openai';
+  platformFilter = 'all';
   sortMetricByKind = { group: 'name', account: 'priority' };
   sortDirection = 'asc';
   #requests = new LatestRequest();
@@ -70,8 +70,9 @@ export class DashboardPanel {
   }
 
   setPlatformFilter(platform) {
-    const normalized = normalizePlatform(platform);
-    if (!normalized || normalized === 'all') return;
+    const raw = String(platform ?? '').trim();
+    if (!raw) return;
+    const normalized = normalizePlatform(raw);
     this.platformFilter = normalized;
     this.render();
   }
@@ -217,8 +218,10 @@ export class DashboardPanel {
   }
 
   #renderPlatformFilters() {
-    const values = (this.dashboard.targets || []).map((target) => target.platform);
-    const selected = renderPlatformFilters($('#dashboardPlatformFilters'), values, this.platformFilter);
+    const values = (this.dashboard.targets || [])
+      .filter((target) => target.kind === this.filter)
+      .map((target) => target.platform);
+    const selected = renderPlatformFilters($('#dashboardPlatformFilter'), values, this.platformFilter);
     if (selected) this.platformFilter = selected;
   }
 

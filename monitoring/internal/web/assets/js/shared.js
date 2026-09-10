@@ -47,6 +47,7 @@ const platformAliases = new Map([
 ]);
 
 const platformNames = {
+  all: '全部平台',
   openai: 'OpenAI',
   anthropic: 'Anthropic',
   mixed: '混合平台',
@@ -74,22 +75,18 @@ export function platformMatches(value, filter) {
 
 export function renderPlatformFilters(container, values, activeKey) {
   if (!container) return activeKey;
-  const options = new Map();
-  options.set('openai', platformNames.openai);
-  options.set('anthropic', platformNames.anthropic);
+  const options = new Map([['all', platformNames.all]]);
   for (const value of values || []) {
-    const key = normalizePlatform(value);
+    const raw = String(value ?? '').trim();
+    if (!raw) continue;
+    const key = normalizePlatform(raw);
     if (!options.has(key)) options.set(key, platformLabel(value));
   }
-  const selected = options.has(activeKey)
-    ? activeKey
-    : options.has('openai') ? 'openai' : options.keys().next().value;
+  const selected = options.has(activeKey) ? activeKey : 'all';
   container.innerHTML = [...options.entries()].map(([key, label]) => {
-    const tone = platformTone(key);
-    const active = key === selected;
-    return `<button type="button" class="platform-filter platform-filter-${tone}${active ? ' active' : ''}"
-      data-platform-filter="${escapeHTML(key)}" aria-pressed="${String(active)}">${escapeHTML(label)}</button>`;
+    return `<option value="${escapeHTML(key)}">${escapeHTML(label)}</option>`;
   }).join('');
+  container.value = selected;
   return selected;
 }
 

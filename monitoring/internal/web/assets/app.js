@@ -62,18 +62,12 @@ document.querySelectorAll('[data-filter]').forEach((button) => {
   });
 });
 
-document.addEventListener('click', (event) => {
-  const button = event.target.closest?.('[data-platform-filter]');
-  if (!button) return;
-  if (button.closest('#dashboardPanel')) {
-    activateToggle('#dashboardPanel [data-platform-filter]', button);
-    dashboard.setPlatformFilter(button.dataset.platformFilter);
-    return;
-  }
-  if (button.closest('#usagePlatformFilters')) {
-    activateToggle('#usagePlatformFilters [data-platform-filter]', button);
-    usage.setPlatformFilter(button.dataset.platformFilter);
-  }
+$('#dashboardPlatformFilter').addEventListener('change', (event) => {
+  dashboard.setPlatformFilter(event.target.value);
+});
+
+$('#usagePlatformFilter').addEventListener('change', (event) => {
+  usage.setPlatformFilter(event.target.value);
 });
 
 $('#usagePeriodSelect').addEventListener('change', (event) => {

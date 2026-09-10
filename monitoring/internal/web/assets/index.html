@@ -43,10 +43,12 @@
               <button class="active" data-filter="group" aria-pressed="true">分组</button>
               <button data-filter="account" aria-pressed="false">账户</button>
             </div>
-            <div class="segmented platform-filters" id="dashboardPlatformFilters" role="group" aria-label="平台类型">
-              <button type="button" class="platform-filter platform-filter-openai active" data-platform-filter="openai" aria-pressed="true">OpenAI</button>
-              <button type="button" class="platform-filter platform-filter-anthropic" data-platform-filter="anthropic" aria-pressed="false">Anthropic</button>
-            </div>
+            <label class="select-wrap platform-filter-select">
+              <span class="sr-only">实时平台</span>
+              <select id="dashboardPlatformFilter" aria-label="实时平台">
+                <option value="all" selected>全部平台</option>
+              </select>
+            </label>
             <label class="select-wrap dashboard-sort-select">
               <span class="sr-only">实时卡片排序指标</span>
               <select id="dashboardSortSelect" aria-label="实时卡片排序指标">
@@ -153,10 +155,12 @@
                   <button class="active" type="button" data-usage-entity="group" aria-pressed="true">分组</button>
                   <button type="button" data-usage-entity="account" aria-pressed="false">账户</button>
                 </div>
-                <div class="segmented platform-filters usage-platform-filters" id="usagePlatformFilters" role="group" aria-label="用量平台类型">
-                  <button type="button" class="platform-filter platform-filter-openai active" data-platform-filter="openai" aria-pressed="true">OpenAI</button>
-                  <button type="button" class="platform-filter platform-filter-anthropic" data-platform-filter="anthropic" aria-pressed="false">Anthropic</button>
-                </div>
+                <label class="select-wrap platform-filter-select">
+                  <span class="sr-only">统计平台</span>
+                  <select id="usagePlatformFilter" aria-label="统计平台">
+                    <option value="all" selected>全部平台</option>
+                  </select>
+                </label>
                 <span class="usage-sort-label">排序</span>
                 <label class="select-wrap usage-sort-select">
                   <span class="sr-only">卡片排序指标</span>

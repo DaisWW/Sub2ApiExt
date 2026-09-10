@@ -35,7 +35,7 @@ export class UsagePanel {
   usage = null;
   period = 'today';
   entityKind = 'group';
-  platformFilter = 'openai';
+  platformFilter = 'all';
   entitySortMetric = 'unit_cost';
   entitySortDirection = 'asc';
   trendMetric = 'tokens';
@@ -66,8 +66,9 @@ export class UsagePanel {
   }
 
   setPlatformFilter(platform) {
-    const normalized = normalizePlatform(platform);
-    if (normalized === 'all') return;
+    const raw = String(platform ?? '').trim();
+    if (!raw) return;
+    const normalized = normalizePlatform(raw);
     this.platformFilter = normalized;
     this.#renderEntityCards();
   }
@@ -88,6 +89,7 @@ export class UsagePanel {
     updateUsageSortMetricAvailability(this.entityKind, this.entitySortMetric);
     activateToggle('[data-usage-entity]', button);
     updateUsageSortDirectionControl(this.entitySortMetric, this.entitySortDirection);
+    this.#renderPlatformFilters();
     this.#renderEntityCards();
   }
 
@@ -169,13 +171,14 @@ export class UsagePanel {
 
   #platformValues() {
     if (!this.usage) return [];
-    return [...(this.usage.accounts || []), ...(this.usage.groups || [])]
-      .map((item) => normalizePlatform(item?.platform));
+    const items = this.entityKind === 'group' ? this.usage.groups : this.usage.accounts;
+    return (items || [])
+      .map((item) => item?.platform);
   }
 
   #renderPlatformFilters() {
     const selected = renderPlatformFilters(
-      $('#usagePlatformFilters'),
+      $('#usagePlatformFilter'),
       this.#platformValues(),
       this.platformFilter
     );
@@ -250,7 +253,7 @@ function renderUsageKPI([label, value, note, color]) {
   </article>`;
 }
 
-function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'unit_cost', sortDirection = 'asc', platformFilter = 'openai') {
+function renderUsageCards(sourceItems, emptyText, kind, sortMetric = 'unit_cost', sortDirection = 'asc', platformFilter = 'all') {
   const container = $('#usageEntityCardList');
   const items = (Array.isArray(sourceItems) ? sourceItems : [])
     .slice()

@@ -111,14 +111,16 @@ func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
 	for path, markers := range map[string][]string{
 		"/": {
 			`<option value="priority" hidden disabled>账户优先级</option>`,
-			`id="usagePlatformFilters"`,
+			`id="usagePlatformFilter"`,
+			`<option value="all" selected>全部平台</option>`,
 		},
 		"/js/usage.js": {
 			"'priority'",
-			"platformFilter = 'openai'",
+			"platformFilter = 'all'",
 			"setPlatformFilter(platform)",
 			"platformMatches(item?.platform, platformFilter)",
 			"renderPlatformFilters(",
+			"const items = this.entityKind === 'group' ? this.usage.groups : this.usage.accounts;",
 			"账户优先级",
 			"priorityOption.hidden = accountOnly",
 			"priorityValue(item?.priority)",
@@ -298,10 +300,9 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	}
 	body := response.Body.String()
 	for _, marker := range []string{
-		"aria-label=\"平台类型\"",
-		"class=\"platform-filter platform-filter-openai active\"",
-		"data-platform-filter=\"openai\"",
-		"data-platform-filter=\"anthropic\"",
+		"aria-label=\"实时平台\"",
+		"id=\"dashboardPlatformFilter\"",
+		"<option value=\"all\" selected>全部平台</option>",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("index.html is missing %q", marker)
@@ -313,17 +314,15 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	}
 	usageBody := body[usageStart:]
 	for _, marker := range []string{
-		"id=\"usagePlatformFilters\"",
-		"class=\"platform-filter platform-filter-openai active\"",
-		"data-platform-filter=\"openai\"",
-		"data-platform-filter=\"anthropic\"",
+		"id=\"usagePlatformFilter\"",
+		"<option value=\"all\" selected>全部平台</option>",
 	} {
 		if !strings.Contains(usageBody, marker) {
 			t.Errorf("usage section is missing %q", marker)
 		}
 	}
-	if strings.Contains(usageBody, `data-platform-filter="all"`) {
-		t.Error("usage section still exposes the all-platform filter")
+	if strings.Contains(body, `data-platform-filter=`) {
+		t.Error("index.html still exposes button platform filters")
 	}
 
 	request = httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
@@ -334,10 +333,11 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	}
 	body = response.Body.String()
 	for _, marker := range []string{
-		"platformFilter = 'openai'",
+		"platformFilter = 'all'",
 		"setPlatformFilter(platform)",
 		"platformMatches(target.platform, this.platformFilter)",
-		"renderPlatformFilters($('#dashboardPlatformFilters'",
+		".filter((target) => target.kind === this.filter)",
+		"renderPlatformFilters($('#dashboardPlatformFilter'",
 		"target-platform-${platformTone(platform)}",
 	} {
 		if !strings.Contains(body, marker) {
@@ -353,13 +353,18 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 	body = response.Body.String()
 	for _, marker := range []string{
 		"const platformAliases = new Map",
+		"all: '全部平台'",
 		"openai_compatible",
 		"['claude', 'anthropic']",
 		"function renderPlatformFilters",
+		"<option value=\"${escapeHTML(key)}\">",
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("shared.js is missing %q", marker)
 		}
+	}
+	if strings.Contains(body, "options.set('openai'") || strings.Contains(body, "options.set('anthropic'") {
+		t.Error("shared.js hardcodes platform options instead of deriving them from values")
 	}
 	request = httptest.NewRequest(http.MethodGet, "/app.js", nil)
 	response = httptest.NewRecorder()
@@ -368,10 +373,10 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 		t.Fatalf("app.js returned status %d", response.Code)
 	}
 	for _, marker := range []string{
-		"document.addEventListener('click'",
-		"#dashboardPanel [data-platform-filter]",
-		"#usagePlatformFilters [data-platform-filter]",
-		"usage.setPlatformFilter(button.dataset.platformFilter)",
+		"#dashboardPlatformFilter').addEventListener('change'",
+		"#usagePlatformFilter').addEventListener('change'",
+		"dashboard.setPlatformFilter(event.target.value)",
+		"usage.setPlatformFilter(event.target.value)",
 	} {
 		if !strings.Contains(response.Body.String(), marker) {
 			t.Errorf("app.js is missing %q", marker)

@@ -82,13 +82,10 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .muted { color: var(--muted); }
 .overview-controls { gap: 11px; flex-wrap: wrap; justify-content: flex-end; }
 .segmented { padding: 3px; gap: 2px; border: 1px solid var(--line); background: #111a25; border-radius: 8px; }
-.platform-filters { flex-wrap: wrap; }
 .segmented button { border: 0; border-radius: 5px; padding: 7px 11px; background: transparent; color: var(--muted); }
 .segmented button.active { background: #263446; color: var(--text); font-weight: 700; }
-.segmented button.platform-filter-openai.active { background: var(--platform-openai-quiet); color: var(--platform-openai); }
-.segmented button.platform-filter-anthropic.active { background: var(--platform-anthropic-quiet); color: var(--platform-anthropic); }
-.segmented button.platform-filter-other.active { background: var(--platform-other-quiet); color: var(--platform-other); }
 .select-wrap select { min-height: 35px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--soft); padding: 0 10px; }
+.platform-filter-select select { min-width: 132px; }
 .target-heading-meta { display: flex; align-items: center; justify-content: flex-end; gap: 18px; }
 .probe-status { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }
 .probe-cooldown { position: relative; width: 38px; height: 38px; flex: 0 0 auto; display: grid; place-items: center; font-variant-numeric: tabular-nums; }
