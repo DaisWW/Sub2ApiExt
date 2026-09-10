@@ -309,7 +309,7 @@ export class DashboardPanel {
       : '';
     const targetNote = evidenceNote(item, status);
     const note = targetNote
-      ? `<div class="target-note">${escapeHTML(targetNote)}</div>`
+      ? `<div class="target-note" title="${escapeHTML(targetNote)}">${escapeHTML(targetNote)}</div>`
       : '';
     const routeNote = renderRouteState(item);
     const evidenceAgeLabel = item.stale && item.latest_source
@@ -318,6 +318,8 @@ export class DashboardPanel {
     const statusTitle = evidenceAgeLabel
       ? `当前状态：${evidenceAgeLabel}`
       : '当前状态：最新证据';
+    const platformName = platformLabel(item.platform);
+    const platformTitle = evidenceAgeLabel ? `${platformName} · ${evidenceAgeLabel}` : platformName;
     const platformClass = ` target-platform-${platformTone(platform)}`;
     return `
       <article class="target-card target-${displayStatus}" data-target="${escapeHTML(item.key)}" data-name="${escapeHTML(item.name)}"
@@ -326,9 +328,7 @@ export class DashboardPanel {
           <div class="target-copy">
             <div class="target-kind">${item.kind === 'group' ? 'GROUP' : 'ACCOUNT'}</div>
             <div class="target-name" title="${escapeHTML(item.name)}">${escapeHTML(item.name)}</div>
-            <div class="target-platform${platformClass}">${escapeHTML(platformLabel(item.platform))}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
-            ${note}
-            ${routeNote}
+            <div class="target-platform${platformClass}" title="${escapeHTML(platformTitle)}">${escapeHTML(platformName)}${evidenceAgeLabel ? `<span class="stale-label">● ${escapeHTML(evidenceAgeLabel)}</span>` : ''}</div>
           </div>
           <div class="target-head-meta">
             ${priority !== null ? `<span class="account-priority" title="数值越小，路由优先级越高">优先级 ${priority}</span>` : ''}
@@ -336,6 +336,7 @@ export class DashboardPanel {
             <span class="status-badge ${statusClass(displayStatus)}" title="${escapeHTML(statusTitle)}">${targetStatusLabel(displayStatus, item.health_reason)}</span>
           </div>
         </div>
+        <div class="target-notes">${note}${routeNote}</div>
         <div class="availability">
           <span class="availability-label">${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
@@ -527,9 +528,7 @@ function renderStatusHistory(samples, item) {
     return `<i class="${classes}" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
   });
   const caption = statusHistoryCaption(recent, item, gatewayError, recoveryPending);
-  const captionMarkup = caption
-    ? `<span class="status-history-caption">${escapeHTML(caption)}</span>`
-    : '';
+  const captionMarkup = `<span class="status-history-caption">${caption ? escapeHTML(caption) : ''}</span>`;
   const legend = statusHistoryLegend(hasUnknownSamples);
   return `<div class="status-history-block">
     <div class="status-history" aria-label="24 小时内 24 段状态轨迹">${empty.concat(items).join('')}</div>
@@ -578,7 +577,8 @@ function renderMetric(label, value, help = '', tone = '') {
 function renderRouteState(item) {
   if (item?.route_configured !== false) return '';
   const message = String(item?.route_message || '').trim() || '当前没有可调度路由';
-  return `<div class="route-note">路由状态：${escapeHTML(message)}</div>`;
+  const text = `路由状态：${message}`;
+  return `<div class="route-note" title="${escapeHTML(text)}">${escapeHTML(text)}</div>`;
 }
 
 function staleLabel(item, status) {
