@@ -58,3 +58,65 @@ func TestManualEmptySyncHostsRemainUnrestricted(t *testing.T) {
 		t.Fatal("an unconfigured empty SyncHosts map should remain unrestricted")
 	}
 }
+
+func TestConfiguredFactorsAdmitUnlistedAccountHosts(t *testing.T) {
+	channel := testChannel("https://xinghubai.top", 1)
+	syncer := &Syncer{
+		config: &Config{
+			SyncTarget: "account",
+			Factors:    map[string]float64{"lucen.cc": 0.9},
+			SyncHosts:  map[string]struct{}{"lucen.cc": {}},
+		},
+		state:  newState(),
+		logger: log.New(io.Discard, "", 0),
+	}
+	plan := newChannelCheckPlan("account", []Channel{channel}, nil)
+	stats := syncStats{}
+	report := newSyncReport("account", []Channel{channel})
+	if !plan.admitAccountHost(syncer, &channel, report, &stats) {
+		t.Fatal("unlisted hosts should still be admitted with default factor 1.0")
+	}
+	if stats.skipped != 0 || stats.failed != 0 {
+		t.Fatalf("unlisted host was not admitted cleanly: %+v", stats)
+	}
+}
+
+func TestLegacySyncHostsStillRestrictAccountHosts(t *testing.T) {
+	channel := testChannel("https://xinghubai.top", 1)
+	syncer := &Syncer{
+		config: &Config{
+			SyncTarget:          "account",
+			SyncHosts:           map[string]struct{}{"lucen.cc": {}},
+			syncHostsConfigured: true,
+		},
+		state:  newState(),
+		logger: log.New(io.Discard, "", 0),
+	}
+	plan := newChannelCheckPlan("account", []Channel{channel}, nil)
+	stats := syncStats{}
+	report := newSyncReport("account", []Channel{channel})
+	if plan.admitAccountHost(syncer, &channel, report, &stats) {
+		t.Fatal("legacy sync_hosts should still restrict unlisted hosts")
+	}
+	if stats.skipped != 1 || stats.failed != 0 {
+		t.Fatalf("legacy sync_hosts stats=%+v", stats)
+	}
+}
+
+func TestInvalidAccountBaseURLFailsAdmission(t *testing.T) {
+	channel := testChannel("not-a-url", 1)
+	syncer := &Syncer{
+		config: &Config{SyncTarget: "account"},
+		state:  newState(),
+		logger: log.New(io.Discard, "", 0),
+	}
+	plan := newChannelCheckPlan("account", []Channel{channel}, nil)
+	stats := syncStats{}
+	report := newSyncReport("account", []Channel{channel})
+	if plan.admitAccountHost(syncer, &channel, report, &stats) {
+		t.Fatal("invalid base_url should not be admitted")
+	}
+	if stats.failed != 1 {
+		t.Fatalf("invalid base_url stats=%+v", stats)
+	}
+}

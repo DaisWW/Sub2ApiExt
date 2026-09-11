@@ -71,15 +71,15 @@ func (p *channelCheckPlan) admit(s *Syncer, channel *Channel, report *syncReport
 }
 
 func (p *channelCheckPlan) admitAccountHost(s *Syncer, channel *Channel, report *syncReport, stats *syncStats) bool {
-	if !s.config.syncHostsConfigured && len(s.config.SyncHosts) == 0 {
-		return true
-	}
 	_, host, err := s.config.factorForBaseURL(channel.BaseURL)
 	if err != nil {
 		stats.failed++
 		report.markChannel(channel, reportStatusFailed)
 		s.logger.Printf("[%s] 同步失败: %v", channelLabel(channel), err)
 		return false
+	}
+	if !s.config.syncHostsConfigured {
+		return true
 	}
 	if _, allowed := s.config.SyncHosts[host]; allowed {
 		return true
@@ -88,7 +88,7 @@ func (p *channelCheckPlan) admitAccountHost(s *Syncer, channel *Channel, report 
 		p.skippedAccounts[channel.AccountID] = true
 		stats.skipped++
 		report.markChannel(channel, reportStatusSkipped)
-		s.logger.Printf("[%s] 暂不自动: 账户模式白名单未包含上游主机 %s", channelLabel(channel), host)
+		s.logger.Printf("[%s] 暂不自动: 旧版 sync_hosts 未包含上游主机 %s", channelLabel(channel), host)
 	}
 	return false
 }

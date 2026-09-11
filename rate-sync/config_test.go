@@ -28,7 +28,7 @@ func TestLoadConfigUsesSimpleDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadConfigUsesUpstreamFactorsAsAllowlistAndFactors(t *testing.T) {
+func TestLoadConfigUsesUpstreamFactorsAsDiscountMap(t *testing.T) {
 	path := writeTestConfig(t, `{
   "sync_target":"account",
   "upstream_factors":{
@@ -45,9 +45,12 @@ func TestLoadConfigUsesUpstreamFactorsAsAllowlistAndFactors(t *testing.T) {
 	if len(config.SyncHosts) != 3 || len(config.Factors) != 3 {
 		t.Fatalf("unexpected upstream config: %+v", config)
 	}
+	if config.syncHostsConfigured {
+		t.Fatal("upstream_factors must not enable the legacy sync_hosts allowlist")
+	}
 	for host := range config.Factors {
 		if _, ok := config.SyncHosts[host]; !ok {
-			t.Fatalf("upstream host %q was not added to sync allowlist", host)
+			t.Fatalf("upstream host %q was not recorded as an explicit factor host", host)
 		}
 	}
 	if factor, host, err := config.factorForBaseURL("https://www.codexapis.com/v1"); err != nil || factor != 1 || host != "www.codexapis.com" {
@@ -58,16 +61,16 @@ func TestLoadConfigUsesUpstreamFactorsAsAllowlistAndFactors(t *testing.T) {
 	}
 }
 
-func TestLoadConfigCanonicalEmptyUpstreamFactorsDoNotAllowAllHosts(t *testing.T) {
+func TestLoadConfigEmptyUpstreamFactorsDefaultToOne(t *testing.T) {
 	config, err := loadConfig(writeTestConfig(t, `{"sync_target":"account","upstream_factors":{}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.SyncHosts == nil {
-		t.Fatal("canonical empty upstream_factors should remain an explicit empty allowlist")
+	if config.syncHostsConfigured {
+		t.Fatal("empty upstream_factors must not enable the legacy sync_hosts allowlist")
 	}
-	if !config.syncHostsConfigured {
-		t.Fatal("canonical upstream_factors should mark the allowlist as configured")
+	if factor, host, err := config.factorForBaseURL("https://xinghubai.top/v1"); err != nil || factor != 1 || host != "xinghubai.top" {
+		t.Fatalf("unlisted host factorForBaseURL() = %v, %q, %v", factor, host, err)
 	}
 }
 
@@ -89,6 +92,9 @@ func TestLoadConfigAllowsOptionalRuntimeSettings(t *testing.T) {
 	}
 	if config.ProxyURL != "http://host.docker.internal:7897" || len(config.ProxyFallbackURLs) != 1 || config.ProxyFallbackURLs[0] != "http://host.docker.internal:7890" || config.Interval != 90*time.Second || config.Confirmations != 3 || !config.DryRun || config.SyncTarget != "account" || !config.UsageBootstrap {
 		t.Fatalf("unexpected config: %+v", config)
+	}
+	if !config.syncHostsConfigured {
+		t.Fatal("legacy sync_hosts should remain restrictive")
 	}
 	if _, ok := config.SyncHosts["www.codexapis.com"]; !ok {
 		t.Fatalf("sync_hosts missing normalized DaoGe host: %+v", config.SyncHosts)

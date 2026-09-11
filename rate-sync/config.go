@@ -46,7 +46,7 @@ type Config struct {
 	AdminAPIKey       string
 	Interval          time.Duration
 	SyncTarget        string
-	// SyncHosts is derived from the canonical upstream_factors mapping.
+	// SyncHosts lists hosts with an explicit coefficient, derived from upstream_factors or legacy sync_hosts.
 	SyncHosts         map[string]struct{}
 	UsageBootstrap    bool
 	HistoryWindow     time.Duration
@@ -55,8 +55,9 @@ type Config struct {
 	Confirmations     int
 	StateFile         string
 	// Factors contains the normalized discount coefficients derived from upstream_factors.
+	// Unlisted hosts still sync with factor 1.0.
 	Factors map[string]float64
-	// syncHostsConfigured distinguishes an explicit canonical empty allowlist from legacy defaults.
+	// syncHostsConfigured keeps the legacy sync_hosts allowlist behavior.
 	syncHostsConfigured bool
 }
 
@@ -112,7 +113,7 @@ func normalizeFileConfig(raw fileConfig) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	canonicalUpstream := raw.upstreamFactorsSet || raw.UpstreamFactors != nil
+	legacySyncHostsConfigured := !raw.upstreamFactorsSet && raw.UpstreamFactors == nil && (raw.syncHostsSet || raw.SyncHosts != nil)
 	return &Config{
 		Sub2APIURL:          strings.TrimRight(raw.Sub2APIURL, "/"),
 		ProxyURL:            strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
@@ -127,7 +128,7 @@ func normalizeFileConfig(raw fileConfig) (*Config, error) {
 		Confirmations:       raw.Confirmations,
 		StateFile:           raw.StateFile,
 		Factors:             factors,
-		syncHostsConfigured: canonicalUpstream,
+		syncHostsConfigured: legacySyncHostsConfigured,
 	}, nil
 }
 
@@ -153,7 +154,7 @@ func normalizeUpstreamConfig(raw fileConfig) (map[string]float64, map[string]str
 		return factors, syncHosts, nil
 	}
 
-	// 兼容旧版拆分配置；新配置应使用 upstream_factors，避免白名单和系数漂移。
+	// 兼容旧版拆分配置；新配置应使用 upstream_factors，避免折扣系数漂移。
 	if raw.factorsSet && raw.Factors == nil {
 		return nil, nil, fmt.Errorf("factors 必须是域名到系数的对象")
 	}

@@ -264,47 +264,99 @@ func TestAccountTargetBootstrapsIdleUsageAccount(t *testing.T) {
 	}
 }
 
-func TestAccountTargetHonorsSyncHostAllowlist(t *testing.T) {
-	var allowedCalls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/pricing" {
-			w.WriteHeader(http.StatusNotFound)
-			return
+func TestAccountTargetSyncsUnlistedHostsWithDefaultFactor(t *testing.T) {
+	usageHandler := func(counter *atomic.Int32) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/pricing" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if r.URL.Path != "/v1/usage" {
+				t.Errorf("unexpected upstream URL: %s", r.URL)
+			}
+			if counter.Add(1) == 1 {
+				writeJSON(t, w, map[string]any{"usage": map[string]any{"today": upstreamToday{Cost: 10, ActualCost: 1}}})
+				return
+			}
+			writeJSON(t, w, map[string]any{"usage": map[string]any{"today": upstreamToday{Cost: 20, ActualCost: 2}}})
 		}
-		if r.URL.Path != "/v1/usage" {
-			t.Errorf("unexpected upstream URL: %s", r.URL)
-		}
-		allowedCalls.Add(1)
-		writeJSON(t, w, map[string]any{"usage": map[string]any{"today": upstreamToday{Cost: 10, ActualCost: 1}}})
-	}))
-	defer upstream.Close()
-	parsed, err := url.Parse(upstream.URL)
+	}
+	var discountedCalls atomic.Int32
+	discounted := httptest.NewServer(usageHandler(&discountedCalls))
+	defer discounted.Close()
+	var defaultCalls atomic.Int32
+	unlisted := httptest.NewServer(usageHandler(&defaultCalls))
+	defer unlisted.Close()
+	unlistedURL, err := url.Parse(unlisted.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Use a different hostname while retaining the test server's listener so
+	// factorForBaseURL can distinguish the explicitly discounted host.
+	unlistedURL.Host = "localhost:" + unlistedURL.Port()
 
-	allowed := testChannel(upstream.URL, 0.1)
-	disallowed := testChannel("https://other-upstream.invalid", 0.2)
-	disallowed.AccountID = 19
-	disallowed.AccountName = "other-test"
-	disallowed.Group.ID = 25
-	disallowed.Group.Name = "other-test"
-	source := &staticChannelSource{channels: []Channel{allowed, disallowed}}
-	syncer := newTestSyncer(t, source, "http://admin.invalid", false, 1, "", 1)
+	discountedChannel := testChannel(discounted.URL, 0.1)
+	unlistedChannel := testChannel(unlistedURL.String(), 0.2)
+	unlistedChannel.AccountID = 19
+	unlistedChannel.AccountName = "other-test"
+	unlistedChannel.Group.ID = 25
+	unlistedChannel.Group.Name = "other-test"
+	source := &staticChannelSource{channels: []Channel{discountedChannel, unlistedChannel}}
+	updates := make(chan float64, 2)
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			t.Errorf("unexpected admin method: %s", r.Method)
+		}
+		var payload accountUpdate
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode account update: %v", err)
+			return
+		}
+		updates <- payload.RateMultiplier
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+	syncer := newTestSyncer(t, source, admin.URL, false, 1, discounted.URL, 0.9)
 	syncer.config.SyncTarget = "account"
-	syncer.config.SyncHosts = map[string]struct{}{parsed.Hostname(): {}}
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 
-	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
-		t.Fatal(err)
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 2; i++ {
+		if err := syncer.RunOnce(context.Background(), now.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if allowedCalls.Load() != 1 {
-		t.Fatalf("allowed upstream calls = %d", allowedCalls.Load())
+	if discountedCalls.Load() != 2 || defaultCalls.Load() != 2 {
+		t.Fatalf("upstream calls discounted=%d default=%d", discountedCalls.Load(), defaultCalls.Load())
 	}
-	if !strings.Contains(output.String(), "白名单未包含上游主机") || !strings.Contains(output.String(), "已检查=1") {
-		t.Fatalf("allowlist was not enforced:\n%s", output.String())
+	if strings.Contains(output.String(), "白名单未包含上游主机") {
+		t.Fatalf("unlisted host was skipped:\n%s", output.String())
 	}
+	if !strings.Contains(output.String(), "已检查=2") || !strings.Contains(output.String(), "暂不自动=0") {
+		t.Fatalf("unlisted host was not checked:\n%s", output.String())
+	}
+	gotRates := make([]float64, 0, 2)
+	for i := 0; i < 2; i++ {
+		select {
+		case rate := <-updates:
+			gotRates = append(gotRates, rate)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for account update %d", i+1)
+		}
+	}
+	if !containsRate(gotRates, 0.09) || !containsRate(gotRates, 0.1) {
+		t.Fatalf("unexpected updated rates: %v", gotRates)
+	}
+}
+
+func containsRate(values []float64, want float64) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestUsageTemplateLogsCurrentLocalRateWithoutNewUsage(t *testing.T) {

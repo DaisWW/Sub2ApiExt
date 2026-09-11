@@ -1,8 +1,8 @@
 # Sub2API Rate Sync
 
-独立的倍率同步服务，不修改 Sub2API 源码或数据库结构。分组 worker 每 60 秒从 Sub2API 的 PostgreSQL 自动发现可用渠道：只有一个可用账号的分组直接继承该账号倍率；多个账号的分组使用成功请求记录维护快慢成本记忆并动态调价。账户 worker 每 900 秒读取刀哥、Lucen 和 TokenHorse 的上游价格并更新账户倍率。两者都通过 Sub2API Admin API 写回。
+独立的倍率同步服务，不修改 Sub2API 源码或数据库结构。分组 worker 每 60 秒从 Sub2API 的 PostgreSQL 自动发现可用渠道：只有一个可用账号的分组直接继承该账号倍率；多个账号的分组使用成功请求记录维护快慢成本记忆并动态调价。账户 worker 每 900 秒读取可用账号的上游价格并更新账户倍率。两者都通过 Sub2API Admin API 写回。
 
-> 重要：账户配置只维护 `upstream_factors` 一个映射。它的值是“上游倍率的折扣系数”，不是最终账户倍率；映射中的域名同时构成允许自动同步的上游白名单。例如上游倍率 `0.115`、配置系数 `0.9` 时，最终写回 `0.1035`（`0.115 × 0.9`）。禁止因为配置值为 `0.9` 就直接把账户倍率写成 `0.9`。
+> 重要：账户配置只维护 `upstream_factors` 一个映射。它的值是“上游倍率的折扣系数”，不是最终账户倍率。未列出的域名默认系数 `1.0`，仍会自动同步。例如上游倍率 `0.115`、配置系数 `0.9` 时，最终写回 `0.1035`（`0.115 × 0.9`）。禁止因为配置值为 `0.9` 就直接把账户倍率写成 `0.9`。系数 `1.0` 不必写入映射。
 
 ## 最简配置
 
@@ -17,7 +17,7 @@
 }
 ```
 
-`sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。特殊上游系数只在账户配置中使用；账户配置的 `upstream_factors` 同时定义自动同步白名单和对应折扣系数，只处理映射中的上游域名；映射之外的账号保持手动倍率。新增上游或修改系数时只改这个映射，不要再同时维护其他倍率字段。
+`sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。特殊上游系数只在账户配置中使用；`upstream_factors` 只填写需要折扣的上游域名。未列出的账号仍自动同步，系数按 `1.0` 计算。新增折扣或修改系数时只改这个映射，不要再同时维护其他倍率字段。
 
 账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen 和 TokenHorse 的上游倍率在写回前各自乘一次映射中的 `0.9`（覆盖 `lucen.cc`、`xixiapi.io` 和 `ppsubapi.com`）；分组 worker 不会再次乘该系数。
 
@@ -45,7 +45,6 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 ```json
 {
   "upstream_factors": {
-    "www.codexapis.com": 1.0,
     "lucen.cc": 0.9,
     "xixiapi.io": 0.9,
     "ppsubapi.com": 0.9
@@ -68,10 +67,10 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 
 规则如下：
 
-- 旧版拆分配置中，已允许但未配置系数的域名默认为 `1.0`；使用新配置时，`upstream_factors` 未列出的域名不会进入账户自动同步。
-- `upstream_factors` 中的每个域名同时加入账户 worker 白名单；同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 和 TokenHorse 只需各配置一次 `0.9`。
+- `upstream_factors` 未列出的域名默认系数 `1.0`，仍进入账户自动同步；系数 `1.0` 不必写入映射。
+- 同一域名下新增的可用渠道会自动继承该域名系数，因此 Lucen 和 TokenHorse 只需各配置一次 `0.9`。
 - 渠道、账号或分组改名不影响同步；内部使用账号 ID 和分组 ID 作为稳定身份。
-- 账户 worker 的上游域名变化或折扣系数变化时，只需修改账户配置中的 `upstream_factors`。
+- 账户 worker 的上游折扣变化时，只需修改账户配置中的 `upstream_factors`。
 
 旧版 `sync_hosts` 与 `factors` 仍可读取以便平滑迁移，但不要和 `upstream_factors` 混用；一旦采用新字段，应删除旧字段。
 
@@ -94,7 +93,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 - 分组已挂到一个 `active` 渠道；
 - 账号有有效的 `base_url` 和 `api_key`。
 
-当前用户侧“可用渠道”页面对应的可用绑定会自动发现。分组 worker 处理历史成本；账户 worker 只处理白名单中的刀哥、Lucen 和 TokenHorse。itai 等未列入白名单的账号保持手动。
+当前用户侧“可用渠道”页面对应的可用绑定会自动发现。分组 worker 处理历史成本；账户 worker 检查全部可用账号，未配置折扣的上游按 `1.0` 同步。无法匹配价格模板的账号保持当前手动倍率。
 
 新增渠道满足这些条件后，最长一个同步周期会自动纳入，无需修改 JSON 或重新部署。单账号分组直接跟随唯一账号的已保存倍率，不读取历史用量；账号倍率尚未有效同步时保持当前分组倍率，等待账户 worker 同步，不会回退到上游探测。多账号分组才使用动态快慢记忆，没有足够初始化用量时保持原值等待数据。
 
