@@ -158,6 +158,10 @@ func TestAccountTargetUpdatesAccountRateWithoutUpdatingGroup(t *testing.T) {
 	}
 	upstreamCall := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sub2api/billing" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.URL.Path == "/api/pricing" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -217,6 +221,8 @@ func TestAccountTargetUpdatesAccountRateWithoutUpdatingGroup(t *testing.T) {
 func TestAccountTargetUsesFirstValidUsageWithoutBootstrap(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/sub2api/billing":
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/pricing":
 			w.WriteHeader(http.StatusNotFound)
 		case "/v1/usage":
@@ -266,6 +272,10 @@ func TestAccountTargetUsesFirstValidUsageWithoutBootstrap(t *testing.T) {
 func TestAccountTargetSyncsUnlistedHostsWithDefaultFactor(t *testing.T) {
 	usageHandler := func(counter *atomic.Int32) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/sub2api/billing" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if r.URL.Path == "/api/pricing" {
 				w.WriteHeader(http.StatusNotFound)
 				return
@@ -1108,11 +1118,15 @@ func TestNewAPIPricingDoesNotGuessWithoutBillingLog(t *testing.T) {
 }
 
 func TestAccountTargetFallsBackToUsageWhenDirectRateUnavailable(t *testing.T) {
+	billingCalls := 0
 	pricingCalls := 0
 	logCalls := 0
 	usageCalls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/sub2api/billing":
+			billingCalls++
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/pricing":
 			pricingCalls++
 			writeJSON(t, w, groupRatioResponse{Success: true, GroupRatio: map[string]float64{"gptplus": 0.2}})
@@ -1149,9 +1163,9 @@ func TestAccountTargetFallsBackToUsageWhenDirectRateUnavailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := syncer.state.Rules["account:18"]
-	if pricingCalls != 1 || logCalls != 1 || usageCalls != 1 || updatedRate != 0.09 ||
+	if billingCalls != 1 || pricingCalls != 1 || logCalls != 1 || usageCalls != 1 || updatedRate != 0.09 ||
 		state.Template != templateUsageRatio || state.CandidateUpstreamRate != 0.1 {
-		t.Fatalf("pricing=%d log=%d usage=%d rate=%.4f state=%+v", pricingCalls, logCalls, usageCalls, updatedRate, state)
+		t.Fatalf("billing=%d pricing=%d log=%d usage=%d rate=%.4f state=%+v", billingCalls, pricingCalls, logCalls, usageCalls, updatedRate, state)
 	}
 	if !strings.Contains(output.String(), "上游直接倍率不可用，改用请求成本计算") ||
 		!strings.Contains(output.String(), "已更新｜请求计算｜原 0.5000") ||
@@ -1206,6 +1220,74 @@ func TestAccountTargetPrefersDirectRateOverUsageCalculation(t *testing.T) {
 	if !strings.Contains(output.String(), "已更新｜上游同步｜原 0.5000") ||
 		!strings.Contains(output.String(), "预期倍率") {
 		t.Fatalf("account table did not identify the direct upstream source:\n%s", output.String())
+	}
+}
+
+func TestAccountTargetPrefersSub2APIBillingOverOtherSources(t *testing.T) {
+	billingCalls := 0
+	pricingCalls := 0
+	logCalls := 0
+	usageCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-upstream" {
+			t.Errorf("Authorization = %q", got)
+		}
+		switch r.URL.Path {
+		case "/v1/sub2api/billing":
+			billingCalls++
+			writeJSON(t, w, map[string]any{
+				"object":                    "sub2api.key_billing",
+				"resolved_rate_multiplier":  0.075,
+				"effective_rate_multiplier": 0.5,
+			})
+		case "/api/pricing":
+			pricingCalls++
+			w.WriteHeader(http.StatusNotFound)
+		case "/api/log/token":
+			logCalls++
+			w.WriteHeader(http.StatusNotFound)
+		case "/v1/usage":
+			usageCalls++
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected upstream URL: %s", r.URL)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	channel := testChannel(upstream.URL, 0.5)
+	channel.AccountRateMultiplier = 0.5
+	source := &staticChannelSource{channels: []Channel{channel}}
+	updatedRate := 0.0
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload accountUpdate
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updatedRate = payload.RateMultiplier
+		source.channels[0].AccountRateMultiplier = updatedRate
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	syncer := newAccountTestSyncer(t, source, admin.URL, false, 1, upstream.URL, 0.9)
+	var output bytes.Buffer
+	syncer.logger = log.New(&output, "", 0)
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	state := syncer.state.Rules["account:18"]
+	if billingCalls != 1 || pricingCalls != 0 || logCalls != 0 || usageCalls != 0 || updatedRate != 0.0675 {
+		t.Fatalf("billing=%d pricing=%d log=%d usage=%d updated=%.4f", billingCalls, pricingCalls, logCalls, usageCalls, updatedRate)
+	}
+	if state == nil || state.Template != templateSub2APIBilling || state.CandidateUpstreamRate != 0.075 {
+		t.Fatalf("unexpected Sub2API billing state: %+v", state)
+	}
+	if !strings.Contains(output.String(), "已读取 Sub2API 自动探测倍率 0.0750") ||
+		!strings.Contains(output.String(), "已更新｜上游同步｜原 0.5000") {
+		t.Fatalf("missing direct billing result:\n%s", output.String())
 	}
 }
 
@@ -1526,6 +1608,10 @@ func TestMultipleAccountGroupDoesNotInheritOneAccountRate(t *testing.T) {
 func TestAccountBindingsAreCheckedOnce(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sub2api/billing" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.URL.Path == "/api/pricing" {
 			w.WriteHeader(http.StatusNotFound)
 			return

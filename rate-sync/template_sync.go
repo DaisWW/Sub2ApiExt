@@ -23,7 +23,7 @@ func (s *Syncer) syncChannel(ctx context.Context, channel *Channel, ruleState *R
 	return s.tryUsageAccountTemplate(ctx, channel, ruleState, now, factor, report, host, directErr)
 }
 
-// tryDirectAccountTemplate 优先使用实时计费接口，失败时保留原有状态供请求成本计算回退。
+// tryDirectAccountTemplate 优先使用上游已解析的静态倍率，再兼容旧直接倍率接口。
 func (s *Syncer) tryDirectAccountTemplate(
 	ctx context.Context,
 	channel *Channel,
@@ -33,31 +33,51 @@ func (s *Syncer) tryDirectAccountTemplate(
 	report *syncReport,
 	host string,
 ) (bool, error) {
-	wasDirectTemplate := state.Template == templateNewAPIRatio
-	directState := *state
-	matched, err := s.applyTemplate(ctx, channel, &directState, now, templateNewAPIRatio)
-	if matched {
-		report.setAccountSource(channel.AccountID, reportAccountSourceUpstream)
-	}
-	if !matched || err != nil {
-		// 直接倍率本轮不可用时，不能让旧直接候选跨过失败周期继续累计确认。
-		// usage 的基线和候选则留给回退路径继续使用。
-		if wasDirectTemplate {
-			*state = directState
-			state.resetCandidate()
-		} else if matched && err != nil && state.Template != templateUsageRatio {
-			*state = directState
-			state.Template = templateNewAPIRatio
-			state.resetCandidate()
+	var directErr error
+	var failedDirectState *RuleState
+	failedDirectTemplate := ""
+	for _, template := range []string{templateSub2APIBilling, templateNewAPIRatio} {
+		directState := *state
+		if directState.Template != template {
+			directState.resetCandidate()
+			directState.PriceKey = ""
 		}
-		return false, err
+		matched, err := s.applyTemplate(ctx, channel, &directState, now, template)
+		if matched {
+			report.setAccountSource(channel.AccountID, reportAccountSourceUpstream)
+		}
+		if !matched {
+			if err != nil {
+				directErr = err
+			}
+			continue
+		}
+		if err != nil {
+			directErr = err
+			failedState := directState
+			failedDirectState = &failedState
+			failedDirectTemplate = template
+			continue
+		}
+		wasTemplate := state.Template == template
+		*state = directState
+		state.Template = template
+		if !wasTemplate {
+			s.logger.Printf("[%s] 已自动识别价格模板: %s（上游 %s）", channelLabel(channel), template, host)
+		}
+		return true, s.applyCandidate(ctx, channel, state, factor, report)
 	}
-	*state = directState
-	state.Template = templateNewAPIRatio
-	if !wasDirectTemplate {
-		s.logger.Printf("[%s] 已自动识别价格模板: %s（上游 %s）", channelLabel(channel), templateNewAPIRatio, host)
+
+	// 直接倍率本轮不可用时，不能让旧直接候选跨过失败周期继续累计确认。
+	// usage 的基线和候选则留给回退路径继续使用。
+	if state.Template != templateUsageRatio {
+		if failedDirectState != nil {
+			*state = *failedDirectState
+			state.Template = failedDirectTemplate
+		}
+		state.resetCandidate()
 	}
-	return true, s.applyCandidate(ctx, channel, state, factor, report)
+	return false, directErr
 }
 
 func (s *Syncer) tryUsageAccountTemplate(
@@ -99,13 +119,15 @@ func (s *Syncer) tryUsageAccountTemplate(
 	if directErr != nil {
 		return directErr
 	}
-	return skipError("未匹配 sub2api_usage 或 newapi_pricing 模板，保持当前手动倍率")
+	return skipError("未匹配 sub2api_billing、newapi_pricing 或 sub2api_usage 模板，保持当前手动倍率")
 }
 
 func (s *Syncer) applyTemplate(ctx context.Context, channel *Channel, state *RuleState, now time.Time, template string) (bool, error) {
 	switch template {
 	case templateUsageRatio:
 		return s.applyUsageTemplate(ctx, channel, state, now)
+	case templateSub2APIBilling:
+		return s.applySub2APIBillingTemplate(ctx, channel, state)
 	case templateNewAPIRatio:
 		return s.applyNewAPITemplate(ctx, channel, state)
 	default:
