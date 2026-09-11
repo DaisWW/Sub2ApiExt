@@ -1153,7 +1153,8 @@ func TestAccountTargetFallsBackToUsageWhenDirectRateUnavailable(t *testing.T) {
 		state.Template != templateUsageRatio || state.CandidateUpstreamRate != 0.1 {
 		t.Fatalf("pricing=%d log=%d usage=%d rate=%.4f state=%+v", pricingCalls, logCalls, usageCalls, updatedRate, state)
 	}
-	if !strings.Contains(output.String(), "上游直接倍率不可用，改用请求成本计算") {
+	if !strings.Contains(output.String(), "上游直接倍率不可用，改用请求成本计算") ||
+		!strings.Contains(output.String(), "已更新（请求计算）") {
 		t.Fatalf("missing fallback log:\n%s", output.String())
 	}
 }
@@ -1191,12 +1192,17 @@ func TestAccountTargetPrefersDirectRateOverUsageCalculation(t *testing.T) {
 
 	channel := testChannel(upstream.URL, 0.5)
 	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, upstream.URL, 0.9)
+	var output bytes.Buffer
+	syncer.logger = log.New(&output, "", 0)
 	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	state := syncer.state.Rules["account:18"]
 	if usageCalls != 0 || updatedRate != 0.18 || state.Template != templateNewAPIRatio || state.CandidateUpstreamRate != 0.2 {
 		t.Fatalf("usage=%d rate=%.4f state=%+v", usageCalls, updatedRate, state)
+	}
+	if !strings.Contains(output.String(), "已更新（上游同步）") {
+		t.Fatalf("account table did not identify the direct upstream source:\n%s", output.String())
 	}
 }
 

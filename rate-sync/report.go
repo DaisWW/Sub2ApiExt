@@ -14,6 +14,9 @@ const (
 	reportStatusUpdated = "已更新"
 	reportStatusSkipped = "暂不自动"
 	reportStatusFailed  = "失败"
+
+	reportAccountSourceUpstream = "上游同步"
+	reportAccountSourceUsage    = "请求计算"
 )
 
 type syncReport struct {
@@ -24,17 +27,18 @@ type syncReport struct {
 }
 
 type syncReportRow struct {
-	key         string
-	accountID   int64
-	groupID     int64
-	accountName string
-	groupName   string
-	accountRate float64
-	groupRate   float64
-	proxy       string
-	status      string
-	window      string
-	detail      string
+	key           string
+	accountID     int64
+	groupID       int64
+	accountName   string
+	groupName     string
+	accountRate   float64
+	groupRate     float64
+	proxy         string
+	status        string
+	accountSource string
+	window        string
+	detail        string
 }
 
 func newSyncReport(target string, channels []Channel) *syncReport {
@@ -112,6 +116,20 @@ func (r *syncReport) updateAccountRate(accountID int64, rate float64) {
 	for _, row := range r.rows {
 		if strings.HasPrefix(row.key, prefix) {
 			row.accountRate = rate
+		}
+	}
+}
+
+func (r *syncReport) setAccountSource(accountID int64, source string) {
+	if r == nil || r.target != "account" || source == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := fmt.Sprintf("account:%d/", accountID)
+	for _, row := range r.rows {
+		if strings.HasPrefix(row.key, prefix) {
+			row.accountSource = source
 		}
 	}
 }

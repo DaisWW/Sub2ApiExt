@@ -36,6 +36,9 @@ func (s *Syncer) tryDirectAccountTemplate(
 	wasDirectTemplate := state.Template == templateNewAPIRatio
 	directState := *state
 	matched, err := s.applyTemplate(ctx, channel, &directState, now, templateNewAPIRatio)
+	if matched {
+		report.setAccountSource(channel.AccountID, reportAccountSourceUpstream)
+	}
 	if !matched || err != nil {
 		// 直接倍率本轮不可用时，不能让旧直接候选跨过失败周期继续累计确认。
 		// usage 的基线和候选则留给回退路径继续使用。
@@ -76,6 +79,7 @@ func (s *Syncer) tryUsageAccountTemplate(
 	matched, err := s.applyTemplate(ctx, channel, &usageState, now, templateUsageRatio)
 	if matched {
 		*state = usageState
+		report.setAccountSource(channel.AccountID, reportAccountSourceUsage)
 		if err != nil {
 			return err
 		}

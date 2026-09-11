@@ -49,6 +49,28 @@ func TestSyncReportAccountTableRendersSanitizedProxy(t *testing.T) {
 	}
 }
 
+func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
+	upstream := testChannel("https://upstream.example", 0.1)
+	upstream.AccountName = "上游账号"
+	calculated := upstream
+	calculated.AccountID++
+	calculated.Group.ID++
+	calculated.AccountName = "计算账号"
+	report := newSyncReport("account", []Channel{upstream, calculated})
+	report.setAccountSource(upstream.AccountID, reportAccountSourceUpstream)
+	report.setAccountSource(calculated.AccountID, reportAccountSourceUsage)
+	report.markAccount(upstream.AccountID, reportStatusStable)
+	report.markAccount(calculated.AccountID, reportStatusUpdated)
+
+	output := strings.Join(report.tableLines(), "\n")
+	if !strings.Contains(output, "稳定（上游同步）") || !strings.Contains(output, "已更新（请求计算）") {
+		t.Fatalf("account table should show the rate source in the result: %s", output)
+	}
+	if strings.Contains(strings.SplitN(output, "\n", 2)[0], "方式") {
+		t.Fatalf("account table should keep the source inside the result column: %s", output)
+	}
+}
+
 func TestSyncReportAlignsWideCharacters(t *testing.T) {
 	first := testChannel("https://upstream.example", 0.1)
 	first.AccountName = "刀哥"

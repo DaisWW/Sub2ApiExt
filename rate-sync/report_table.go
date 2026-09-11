@@ -99,10 +99,11 @@ func (r *syncReport) groupSummaryRows(keys []string) ([]string, []reportTableRow
 
 func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableRow) {
 	type accountSummary struct {
-		name     string
-		rate     float64
-		proxies  []string
-		statuses []string
+		name          string
+		rate          float64
+		proxies       []string
+		statuses      []string
+		accountSource []string
 	}
 
 	summaries := make(map[int64]*accountSummary)
@@ -120,6 +121,9 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 		}
 		summary.proxies = appendUnique(summary.proxies, row.proxy)
 		summary.statuses = appendUnique(summary.statuses, row.status)
+		if row.accountSource != "" {
+			summary.accountSource = appendUnique(summary.accountSource, row.accountSource)
+		}
 	}
 
 	rows := make([]reportTableRow, 0, len(order))
@@ -129,12 +133,20 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 			cells: []string{
 				tableCell(summary.name),
 				fmt.Sprintf("%.4f", summary.rate),
-				tableCell(strings.Join(summary.statuses, ", ")),
+				tableCell(accountResultLabel(summary.statuses, summary.accountSource)),
 				tableCell(strings.Join(summary.proxies, ", ")),
 			},
 		})
 	}
 	return []string{"账号", "账户倍率", "结果", "代理"}, rows
+}
+
+func accountResultLabel(statuses, sources []string) string {
+	result := strings.Join(statuses, ", ")
+	if len(sources) == 0 {
+		return result
+	}
+	return result + "（" + strings.Join(sources, "、") + "）"
 }
 
 func appendUnique(values []string, value string) []string {
