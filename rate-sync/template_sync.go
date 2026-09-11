@@ -140,31 +140,35 @@ func (s *Syncer) applyCandidate(ctx context.Context, channel *Channel, state *Ru
 	if s.syncTarget() != "account" {
 		return skipError("分组倍率由账户倍率继承或统计校准")
 	}
-	if state.CandidateCount < s.config.Confirmations {
+	if state.CandidateCount <= 0 {
 		return nil
 	}
 	finalRate, err := candidateFinalRate(state, factor)
 	if err != nil {
 		return err
 	}
+	report.setAccountExpectedRate(channel.AccountID, finalRate)
+	if state.CandidateCount < s.config.Confirmations {
+		return nil
+	}
 	currentRate := channel.AccountRateMultiplier
 	if almostEqual(currentRate, finalRate) {
 		report.markChannel(channel, reportStatusStable)
 		s.logger.Printf(
-			"[%s] 本地倍率与本轮检测一致: 上游 %.4f × 本地系数 %.4f = %.4f",
-			channelLabel(channel), state.CandidateUpstreamRate, factor, finalRate,
+			"[%s] 倍率稳定: 当前 %.4f = 预期 %.4f（上游 %.4f × 系数 %.4f）",
+			channelLabel(channel), currentRate, finalRate, state.CandidateUpstreamRate, factor,
 		)
 		return nil
 	}
 	if s.config.DryRun {
 		report.markChannel(channel, reportStatusPreview)
 		s.logger.Printf(
-			"[%s] dry-run: 上游 %.4f × 本地系数 %.4f = %.4f；当前本地 %.4f，不执行更新",
-			channelLabel(channel), state.CandidateUpstreamRate, factor, finalRate, currentRate,
+			"[%s] 预览更新: 原 %.4f -> 预期 %.4f（上游 %.4f × 系数 %.4f），dry-run 未写回",
+			channelLabel(channel), currentRate, finalRate, state.CandidateUpstreamRate, factor,
 		)
 		return nil
 	}
-	return s.publishAccountCandidate(ctx, channel, state, factor, finalRate, report)
+	return s.publishAccountCandidate(ctx, channel, state, factor, currentRate, finalRate, report)
 }
 
 func candidateFinalRate(state *RuleState, factor float64) (float64, error) {
@@ -175,16 +179,16 @@ func candidateFinalRate(state *RuleState, factor float64) (float64, error) {
 	return rate, nil
 }
 
-func (s *Syncer) publishAccountCandidate(ctx context.Context, channel *Channel, state *RuleState, factor, finalRate float64, report *syncReport) error {
+func (s *Syncer) publishAccountCandidate(ctx context.Context, channel *Channel, state *RuleState, factor, previousRate, finalRate float64, report *syncReport) error {
 	if err := s.updateAccount(ctx, channel.AccountID, finalRate); err != nil {
 		return err
 	}
 	report.updateAccountRate(channel.AccountID, finalRate)
 	report.markAccount(channel.AccountID, reportStatusUpdated)
 	s.logger.Printf(
-		"[%s] 已更新账号 %s(%d) 上游倍率: %.4f × 本地系数 %.4f = %.4f",
+		"[%s] 已更新账号 %s(%d) 账户倍率: 原 %.4f -> 新 %.4f（上游 %.4f × 系数 %.4f）",
 		channelLabel(channel), channel.AccountName, channel.AccountID,
-		state.CandidateUpstreamRate, factor, finalRate,
+		previousRate, finalRate, state.CandidateUpstreamRate, factor,
 	)
 	return nil
 }

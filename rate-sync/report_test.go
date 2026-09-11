@@ -52,6 +52,7 @@ func TestSyncReportAccountTableRendersSanitizedProxy(t *testing.T) {
 func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	upstream := testChannel("https://upstream.example", 0.1)
 	upstream.AccountName = "上游账号"
+	upstream.AccountRateMultiplier = 0.1
 	calculated := upstream
 	calculated.AccountID++
 	calculated.Group.ID++
@@ -59,12 +60,18 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	report := newSyncReport("account", []Channel{upstream, calculated})
 	report.setAccountSource(upstream.AccountID, reportAccountSourceUpstream)
 	report.setAccountSource(calculated.AccountID, reportAccountSourceUsage)
+	report.setAccountExpectedRate(upstream.AccountID, 0.1)
+	report.setAccountExpectedRate(calculated.AccountID, 0.18)
 	report.markAccount(upstream.AccountID, reportStatusStable)
 	report.markAccount(calculated.AccountID, reportStatusUpdated)
+	report.updateAccountRate(calculated.AccountID, 0.18)
 
 	output := strings.Join(report.tableLines(), "\n")
-	if !strings.Contains(output, "稳定（上游同步）") || !strings.Contains(output, "已更新（请求计算）") {
+	if !strings.Contains(output, "稳定｜上游同步") || !strings.Contains(output, "已更新｜请求计算｜原 0.1000") {
 		t.Fatalf("account table should show the rate source in the result: %s", output)
+	}
+	if !strings.Contains(output, "预期倍率") || !strings.Contains(output, "0.1800") {
+		t.Fatalf("account table should show the expected rate: %s", output)
 	}
 	lines := strings.Split(output, "\n")
 	resultStart := tableColumnDisplayStart(lines[0], "结果")
@@ -81,6 +88,25 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 		if resultStart < 0 || proxyStart <= resultStart || sourceStart < resultStart || sourceStart >= proxyStart {
 			t.Fatalf("rate source %q is outside the result column:\n%s", source, output)
 		}
+	}
+}
+
+func TestSyncReportAccountTableShowsExpectedRateBeforeConfirmation(t *testing.T) {
+	channel := testChannel("https://upstream.example", 0.1)
+	channel.AccountName = "待确认账号"
+	channel.AccountRateMultiplier = 0.2
+	report := newSyncReport("account", []Channel{channel})
+	report.setAccountSource(channel.AccountID, reportAccountSourceUsage)
+	report.setAccountExpectedRate(channel.AccountID, 0.09)
+	report.markAccount(channel.AccountID, reportStatusChecked)
+
+	lines := report.tableLines()
+	if len(lines) != 3 || !strings.Contains(lines[2], "0.2000") || !strings.Contains(lines[2], "0.0900") ||
+		!strings.Contains(lines[2], "检查｜请求计算") {
+		t.Fatalf("expected current, expected, and checked values in one row:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(lines[2], "原 0.2000") {
+		t.Fatalf("checked row should not show an update-only previous-rate marker:\n%s", strings.Join(lines, "\n"))
 	}
 }
 

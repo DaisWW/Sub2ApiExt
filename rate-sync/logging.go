@@ -138,7 +138,10 @@ func classifyLogLine(line string) logStatus {
 		"动态成本稳定",
 		"已按动态成本更新分组",
 		"本地倍率与本轮检测一致",
-		"检查成功:",
+		"倍率稳定:",
+		"预览更新:",
+		"检查:",
+		"检查成功:", // 兼容旧版本日志。
 	) {
 		return logStatusOK
 	}

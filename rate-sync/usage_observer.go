@@ -66,7 +66,7 @@ func (s *Syncer) observeUsage(name string, state *RuleState, current upstreamTod
 		if s.observeCumulativeUsage(name, state, current, "无新增用量") {
 			return
 		}
-		s.logger.Printf("[%s] 检查成功: 无新增用量，当前本地使用倍率 %.4f，等待有效请求成本", name, localRate)
+		s.logger.Printf("[%s] 检查: 无新增用量，当前本地使用倍率 %.4f，等待有效请求成本", name, localRate)
 		return
 	}
 	if deltaActual <= 0 {

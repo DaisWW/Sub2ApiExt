@@ -8,7 +8,7 @@ import (
 
 const (
 	reportStatusPending = "未处理"
-	reportStatusChecked = "检查成功"
+	reportStatusChecked = "检查"
 	reportStatusStable  = "稳定"
 	reportStatusPreview = "预览"
 	reportStatusUpdated = "已更新"
@@ -33,6 +33,10 @@ type syncReportRow struct {
 	accountName   string
 	groupName     string
 	accountRate   float64
+	previousRate  float64
+	hasPrevious   bool
+	expectedRate  float64
+	hasExpected   bool
 	groupRate     float64
 	proxy         string
 	status        string
@@ -54,15 +58,17 @@ func newSyncReport(target string, channels []Channel) *syncReport {
 			continue
 		}
 		report.rows[key] = &syncReportRow{
-			key:         key,
-			accountID:   channel.AccountID,
-			groupID:     channel.Group.ID,
-			accountName: strings.TrimSpace(channel.AccountName),
-			groupName:   strings.TrimSpace(channel.Group.Name),
-			accountRate: channel.AccountRateMultiplier,
-			groupRate:   channel.Group.RateMultiplier,
-			proxy:       proxyLabel(channel.ProxyURL),
-			status:      reportStatusPending,
+			key:          key,
+			accountID:    channel.AccountID,
+			groupID:      channel.Group.ID,
+			accountName:  strings.TrimSpace(channel.AccountName),
+			groupName:    strings.TrimSpace(channel.Group.Name),
+			accountRate:  channel.AccountRateMultiplier,
+			previousRate: channel.AccountRateMultiplier,
+			hasPrevious:  true,
+			groupRate:    channel.Group.RateMultiplier,
+			proxy:        proxyLabel(channel.ProxyURL),
+			status:       reportStatusPending,
 		}
 		report.order = append(report.order, key)
 	}
@@ -116,6 +122,21 @@ func (r *syncReport) updateAccountRate(accountID int64, rate float64) {
 	for _, row := range r.rows {
 		if strings.HasPrefix(row.key, prefix) {
 			row.accountRate = rate
+		}
+	}
+}
+
+func (r *syncReport) setAccountExpectedRate(accountID int64, rate float64) {
+	if r == nil || r.target != "account" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := fmt.Sprintf("account:%d/", accountID)
+	for _, row := range r.rows {
+		if strings.HasPrefix(row.key, prefix) {
+			row.expectedRate = rate
+			row.hasExpected = true
 		}
 	}
 }

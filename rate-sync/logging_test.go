@@ -17,6 +17,9 @@ func TestClassifyLogLine(t *testing.T) {
 		{name: "summary failure", line: "2026/08/26 09:21:14 同步检查完成: 可用绑定=1 已检查=1 检查正常=0 暂不自动=0 失败=1", status: logStatusFail},
 		{name: "summary skip", line: "2026/08/26 09:21:14 同步检查完成: 可用绑定=2 已检查=1 检查正常=1 暂不自动=1 失败=0", status: logStatusSkip},
 		{name: "summary success", line: "2026/08/26 09:21:14 同步检查完成: 可用绑定=1 已检查=1 检查正常=1 暂不自动=0 失败=0", status: logStatusOK},
+		{name: "checked", line: "2026/08/26 09:21:14 [foo] 检查: 无新增用量", status: logStatusOK},
+		{name: "stable", line: "2026/08/26 09:21:14 [foo] 倍率稳定: 当前 0.1000 = 预期 0.1000", status: logStatusOK},
+		{name: "preview", line: "2026/08/26 09:21:14 [foo] 预览更新: 原 0.2000 -> 预期 0.1000", status: logStatusOK},
 		{name: "run", line: "2026/08/26 09:21:13 开始自动发现并同步价格", status: logStatusRun},
 	}
 

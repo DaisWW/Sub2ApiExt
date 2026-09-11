@@ -101,6 +101,10 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 	type accountSummary struct {
 		name          string
 		rate          float64
+		previousRate  float64
+		hasPrevious   bool
+		expectedRate  float64
+		hasExpected   bool
 		proxies       []string
 		statuses      []string
 		accountSource []string
@@ -115,9 +119,18 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 		}
 		summary := summaries[row.accountID]
 		if summary == nil {
-			summary = &accountSummary{name: row.accountName, rate: row.accountRate}
+			summary = &accountSummary{
+				name:         row.accountName,
+				rate:         row.accountRate,
+				previousRate: row.previousRate,
+				hasPrevious:  row.hasPrevious,
+			}
 			summaries[row.accountID] = summary
 			order = append(order, row.accountID)
+		}
+		if !summary.hasExpected && row.hasExpected {
+			summary.expectedRate = row.expectedRate
+			summary.hasExpected = true
 		}
 		summary.proxies = appendUnique(summary.proxies, row.proxy)
 		summary.statuses = appendUnique(summary.statuses, row.status)
@@ -133,20 +146,44 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 			cells: []string{
 				tableCell(summary.name),
 				fmt.Sprintf("%.4f", summary.rate),
-				tableCell(accountResultLabel(summary.statuses, summary.accountSource)),
+				accountExpectedRateLabel(summary.expectedRate, summary.hasExpected),
+				tableCell(accountResultLabel(summary.statuses, summary.accountSource, summary.previousRate, summary.hasPrevious)),
 				tableCell(strings.Join(summary.proxies, ", ")),
 			},
 		})
 	}
-	return []string{"账号", "账户倍率", "结果", "代理"}, rows
+	return []string{"账号", "账户倍率", "预期倍率", "结果", "代理"}, rows
 }
 
-func accountResultLabel(statuses, sources []string) string {
-	result := strings.Join(statuses, ", ")
-	if len(sources) == 0 {
-		return result
+func accountExpectedRateLabel(rate float64, ok bool) string {
+	if !ok {
+		return "-"
 	}
-	return result + "（" + strings.Join(sources, "、") + "）"
+	return fmt.Sprintf("%.4f", rate)
+}
+
+func accountResultLabel(statuses, sources []string, previousRate float64, hasPrevious bool) string {
+	parts := make([]string, 0, 3)
+	if result := strings.Join(statuses, "、"); result != "" {
+		parts = append(parts, result)
+	}
+	if len(sources) > 0 {
+		parts = append(parts, strings.Join(sources, "、"))
+	}
+	if hasPrevious && accountResultShowsPrevious(statuses) {
+		parts = append(parts, fmt.Sprintf("原 %.4f", previousRate))
+	}
+	return strings.Join(parts, "｜")
+}
+
+func accountResultShowsPrevious(statuses []string) bool {
+	for _, status := range statuses {
+		switch status {
+		case reportStatusUpdated, reportStatusPreview, reportStatusFailed:
+			return true
+		}
+	}
+	return false
 }
 
 func appendUnique(values []string, value string) []string {
