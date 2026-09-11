@@ -1427,8 +1427,8 @@ func TestSingleAccountGroupWaitsForInvalidAccountRate(t *testing.T) {
 	if upstreamCalls.Load() != 0 || adminCalls.Load() != 0 {
 		t.Fatalf("invalid account rate triggered fallback work: upstream=%d admin=%d", upstreamCalls.Load(), adminCalls.Load())
 	}
-	if !strings.Contains(output.String(), "等待账户倍率同步") {
-		t.Fatalf("missing wait evidence: %s", output.String())
+	if !strings.Contains(output.String(), "等待账户 worker 同步") || !strings.Contains(output.String(), "说明") || !strings.Contains(output.String(), "等待账户倍率") {
+		t.Fatalf("missing wait evidence or table explanation: %s", output.String())
 	}
 }
 

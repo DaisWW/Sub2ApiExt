@@ -7,8 +7,7 @@ import (
 )
 
 type reportTableRow struct {
-	cells    []string
-	evidence []string
+	cells []string
 }
 
 func (r *syncReport) tableLines() []string {
@@ -23,15 +22,13 @@ func (r *syncReport) tableLines() []string {
 	}
 	headers, rows := r.summaryRows(keys)
 	widths := tableColumnWidths(headers, rows)
-	lines := make([]string, 0, len(rows)*2+2)
-	evidence := make([]string, 0, len(rows))
+	lines := make([]string, 0, len(rows)+2)
 	lines = append(lines, formatTableRow(headers, widths))
 	lines = append(lines, formatTableSeparator(widths))
 	for _, row := range rows {
 		lines = append(lines, formatTableRow(row.cells, widths))
-		evidence = append(evidence, row.evidence...)
 	}
-	return append(lines, evidence...)
+	return lines
 }
 
 func tableColumnWidths(headers []string, rows []reportTableRow) []int {
@@ -61,7 +58,8 @@ func (r *syncReport) groupSummaryRows(keys []string) ([]string, []reportTableRow
 		name     string
 		rate     float64
 		statuses []string
-		evidence string
+		window   string
+		detail   string
 	}
 
 	summaries := make(map[int64]*groupSummary)
@@ -78,8 +76,9 @@ func (r *syncReport) groupSummaryRows(keys []string) ([]string, []reportTableRow
 			order = append(order, row.groupID)
 		}
 		summary.statuses = appendUnique(summary.statuses, row.status)
-		if summary.evidence == "" {
-			summary.evidence = reportEvidence(row)
+		if summary.window == "" && summary.detail == "" {
+			summary.window = row.window
+			summary.detail = row.detail
 		}
 	}
 
@@ -91,11 +90,11 @@ func (r *syncReport) groupSummaryRows(keys []string) ([]string, []reportTableRow
 				tableCell(summary.name),
 				fmt.Sprintf("%.4f", summary.rate),
 				tableCell(strings.Join(summary.statuses, ", ")),
+				tableCell(reportExplanation(summary.window, summary.detail)),
 			},
-			evidence: reportEvidenceLines(summary.name, summary.evidence),
 		})
 	}
-	return []string{"分组", "分组倍率", "结果"}, rows
+	return []string{"分组", "分组倍率", "结果", "说明"}, rows
 }
 
 func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableRow) {
@@ -147,22 +146,58 @@ func appendUnique(values []string, value string) []string {
 	return append(values, value)
 }
 
-func reportEvidence(row *syncReportRow) string {
-	evidence := row.window
-	if row.detail == "" {
-		return evidence
+func reportExplanation(window, detail string) string {
+	window = strings.TrimSpace(window)
+	detail = strings.TrimSpace(detail)
+	switch {
+	case strings.Contains(detail, "样本不足"):
+		return "样本不足"
+	case strings.Contains(detail, "历史账号成本无效"):
+		return "历史成本无效"
+	case strings.Contains(detail, "等待账户倍率同步"):
+		return "等待账户倍率"
+	case strings.Contains(detail, "四舍五入后无效"):
+		return "账户倍率无效"
+	case strings.Contains(detail, "待发布目标无效"):
+		return "目标无效，等待初始化"
+	case strings.Contains(detail, "等待重新初始化"):
+		return "等待重新初始化"
+	case strings.Contains(detail, "计算结果无效"):
+		return "计算结果无效"
+	case strings.Contains(detail, "分组用量统计失败"):
+		return "统计失败，等待重试"
+	case window == "新增请求":
+		return "新增请求"
+	case window == "账号倍率变更":
+		return "账号倍率变更"
+	case window == "无新增，冻结":
+		return "无新增，保持不变"
+	case window == "待发布重试":
+		return "待发布重试"
+	case strings.HasPrefix(window, "初始化"):
+		return "初始化"
+	case window != "":
+		return window
+	case detail == "":
+		return ""
+	case strings.Contains(detail, "F=") || strings.Contains(detail, "M=") ||
+		strings.Contains(detail, "P=") || strings.Contains(detail, "目标="):
+		return ""
+	default:
+		return compactReportExplanation(detail)
 	}
-	if evidence == "" {
-		return row.detail
-	}
-	return evidence + "；" + row.detail
 }
 
-func reportEvidenceLines(groupName, evidence string) []string {
-	if evidence == "" {
-		return nil
+func compactReportExplanation(detail string) string {
+	if index := strings.IndexAny(detail, "；;"); index >= 0 {
+		detail = detail[:index]
 	}
-	return []string{fmt.Sprintf("  ↳ 分组 %s：%s", tableCell(groupName), tableCell(evidence))}
+	runes := []rune(strings.TrimSpace(detail))
+	const maxRunes = 18
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "..."
+	}
+	return string(runes)
 }
 
 func formatTableRow(cells []string, widths []int) string {

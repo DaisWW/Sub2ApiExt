@@ -78,7 +78,7 @@ func TestSyncReportAlignsWideCharacters(t *testing.T) {
 	}
 }
 
-func TestSyncReportGroupSummaryKeepsEvidenceBelowTable(t *testing.T) {
+func TestSyncReportGroupSummaryRendersExplanationColumn(t *testing.T) {
 	first := testChannel("https://upstream.example", 0.1)
 	first.AccountName = "账号甲"
 	first.AccountRateMultiplier = 0.25
@@ -94,24 +94,27 @@ func TestSyncReportGroupSummaryKeepsEvidenceBelowTable(t *testing.T) {
 	lines := report.tableLines()
 	output := strings.Join(lines, "\n")
 
-	if len(lines) != 4 {
-		t.Fatalf("expected one group row and one evidence line; got %d lines: %s", len(lines), output)
+	if len(lines) != 3 {
+		t.Fatalf("expected header, separator, and one group row; got %d lines: %s", len(lines), output)
+	}
+	if !strings.Contains(lines[0], "说明") {
+		t.Fatalf("group table should include a dedicated explanation column: %s", output)
 	}
 	if strings.Contains(output, "账号甲") || strings.Contains(output, "账号乙") || strings.Contains(output, "账号倍率") {
 		t.Fatalf("group table mixed in account information: %s", output)
 	}
-	if strings.Contains(lines[2], "很长的说明") || !strings.HasPrefix(lines[3], "  ↳ 分组 共享分组：") {
-		t.Fatalf("evidence should be a clearly marked indented line: %s", output)
+	if !strings.Contains(lines[2], "过去 30 天") || strings.Contains(lines[2], "很长的说明") {
+		t.Fatalf("group explanation should stay concise and on the group row: %s", output)
 	}
-	if displayWidth(lines[2]) >= displayWidth(lines[3]) {
-		t.Fatalf("long evidence should not widen the table row: %s", output)
+	if strings.Contains(output, "↳") {
+		t.Fatalf("group explanation should not be rendered as a separate line: %s", output)
 	}
 	if strings.Contains(output, "代理") || strings.Contains(output, "proxy.example") || strings.Contains(output, "secret") || strings.Contains(output, "user@") {
 		t.Fatalf("group table should not render proxy details: %s", output)
 	}
 }
 
-func TestSyncReportGroupTableAppendsEvidenceAfterAllRows(t *testing.T) {
+func TestSyncReportGroupTableKeepsExplanationsWithRows(t *testing.T) {
 	first := testChannel("https://upstream.example", 0.1)
 	first.Group.Name = "分组甲"
 	second := first
@@ -122,14 +125,43 @@ func TestSyncReportGroupTableAppendsEvidenceAfterAllRows(t *testing.T) {
 	report.setGroupEvidence(second.Group.ID, "窗口乙", "说明乙")
 
 	lines := report.tableLines()
-	if len(lines) != 6 {
-		t.Fatalf("expected header, separator, two rows, and two evidence lines; got %d lines: %s", len(lines), strings.Join(lines, "\n"))
+	if len(lines) != 4 {
+		t.Fatalf("expected header, separator, and two group rows; got %d lines: %s", len(lines), strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(lines[2], "分组甲") || !strings.Contains(lines[3], "分组乙") {
-		t.Fatalf("group rows were interrupted by evidence: %s", strings.Join(lines, "\n"))
+	if !strings.Contains(lines[0], "说明") {
+		t.Fatalf("group table should include a dedicated explanation column: %s", strings.Join(lines, "\n"))
 	}
-	if !strings.HasPrefix(lines[4], "  ↳ 分组 分组甲：") || !strings.HasPrefix(lines[5], "  ↳ 分组 分组乙：") {
-		t.Fatalf("evidence order = %q, %q", lines[4], lines[5])
+	if !strings.Contains(lines[2], "分组甲") || !strings.Contains(lines[2], "窗口甲") {
+		t.Fatalf("first group explanation should stay on its row: %s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(lines[2], "窗口乙") || strings.Contains(lines[2], "说明乙") {
+		t.Fatalf("first group row mixed in the second group's explanation: %s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[3], "分组乙") || !strings.Contains(lines[3], "窗口乙") || strings.Contains(lines[3], "窗口甲") {
+		t.Fatalf("second group explanation should stay on its row: %s", strings.Join(lines, "\n"))
+	}
+	if tableColumnDisplayStart(lines[0], "说明") != tableColumnDisplayStart(lines[2], "窗口甲") ||
+		tableColumnDisplayStart(lines[0], "说明") != tableColumnDisplayStart(lines[3], "窗口乙") {
+		t.Fatalf("explanation column is not aligned:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(strings.Join(lines, "\n"), "↳") {
+		t.Fatalf("explanations should not be rendered as separate lines: %s", strings.Join(lines, "\n"))
+	}
+}
+
+func TestSyncReportGroupSummarySimplifiesDynamicEvidence(t *testing.T) {
+	channel := testChannel("https://upstream.example", 0.1)
+	report := newSyncReport("group", []Channel{channel})
+	report.setGroupEvidence(channel.Group.ID, "新增请求", "新增=$1.0505 F=0.1999 M=0.1854 P=0.1999 目标=0.1988")
+
+	output := strings.Join(report.tableLines(), "\n")
+	if !strings.Contains(output, "新增请求") {
+		t.Fatalf("group table should keep the short explanation: %s", output)
+	}
+	for _, detail := range []string{"F=", "M=", "P=", "目标="} {
+		if strings.Contains(output, detail) {
+			t.Fatalf("group table should not expose dynamic calculation detail %q: %s", detail, output)
+		}
 	}
 }
 
