@@ -1286,7 +1286,7 @@ func TestAccountTargetPrefersSub2APIBillingOverOtherSources(t *testing.T) {
 		t.Fatalf("unexpected Sub2API billing state: %+v", state)
 	}
 	if !strings.Contains(output.String(), "已读取 Sub2API 自动探测倍率 0.0750") ||
-		!strings.Contains(output.String(), "已更新｜上游同步｜原 0.5000") {
+		!strings.Contains(output.String(), "已更新｜自动探测｜原 0.5000") {
 		t.Fatalf("missing direct billing result:\n%s", output.String())
 	}
 }

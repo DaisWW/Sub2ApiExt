@@ -15,6 +15,7 @@ const (
 	reportStatusSkipped = "暂不自动"
 	reportStatusFailed  = "失败"
 
+	reportAccountSourceProbe    = "自动探测"
 	reportAccountSourceUpstream = "上游同步"
 	reportAccountSourceUsage    = "请求计算"
 )

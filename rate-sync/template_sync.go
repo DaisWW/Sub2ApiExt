@@ -43,9 +43,6 @@ func (s *Syncer) tryDirectAccountTemplate(
 			directState.PriceKey = ""
 		}
 		matched, err := s.applyTemplate(ctx, channel, &directState, now, template)
-		if matched {
-			report.setAccountSource(channel.AccountID, reportAccountSourceUpstream)
-		}
 		if !matched {
 			if err != nil {
 				directErr = err
@@ -59,6 +56,7 @@ func (s *Syncer) tryDirectAccountTemplate(
 			failedDirectTemplate = template
 			continue
 		}
+		report.setAccountSource(channel.AccountID, accountSourceForTemplate(template))
 		wasTemplate := state.Template == template
 		*state = directState
 		state.Template = template
@@ -99,10 +97,10 @@ func (s *Syncer) tryUsageAccountTemplate(
 	matched, err := s.applyTemplate(ctx, channel, &usageState, now, templateUsageRatio)
 	if matched {
 		*state = usageState
-		report.setAccountSource(channel.AccountID, reportAccountSourceUsage)
 		if err != nil {
 			return err
 		}
+		report.setAccountSource(channel.AccountID, reportAccountSourceUsage)
 		state.Template = templateUsageRatio
 		state.PriceKey = ""
 		if !wasUsageTemplate {
@@ -120,6 +118,17 @@ func (s *Syncer) tryUsageAccountTemplate(
 		return directErr
 	}
 	return skipError("未匹配 sub2api_billing、newapi_pricing 或 sub2api_usage 模板，保持当前手动倍率")
+}
+
+func accountSourceForTemplate(template string) string {
+	switch template {
+	case templateSub2APIBilling:
+		return reportAccountSourceProbe
+	case templateNewAPIRatio:
+		return reportAccountSourceUpstream
+	default:
+		return ""
+	}
 }
 
 func (s *Syncer) applyTemplate(ctx context.Context, channel *Channel, state *RuleState, now time.Time, template string) (bool, error) {

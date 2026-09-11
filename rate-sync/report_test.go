@@ -91,6 +91,36 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	}
 }
 
+func TestSyncReportAccountTableDistinguishesRateSources(t *testing.T) {
+	probe := testChannel("https://probe.example", 0.1)
+	probe.AccountName = "自动探测账号"
+	probe.AccountID = 31
+	probe.Group.ID = 31
+	upstream := testChannel("https://newapi.example", 0.1)
+	upstream.AccountName = "上游同步账号"
+	upstream.AccountID = 32
+	upstream.Group.ID = 32
+	calculated := testChannel("https://usage.example", 0.1)
+	calculated.AccountName = "请求计算账号"
+	calculated.AccountID = 33
+	calculated.Group.ID = 33
+
+	report := newSyncReport("account", []Channel{probe, upstream, calculated})
+	report.setAccountSource(probe.AccountID, reportAccountSourceProbe)
+	report.setAccountSource(upstream.AccountID, reportAccountSourceUpstream)
+	report.setAccountSource(calculated.AccountID, reportAccountSourceUsage)
+	report.markAccount(probe.AccountID, reportStatusStable)
+	report.markAccount(upstream.AccountID, reportStatusStable)
+	report.markAccount(calculated.AccountID, reportStatusStable)
+
+	output := strings.Join(report.tableLines(), "\n")
+	for _, source := range []string{"稳定｜自动探测", "稳定｜上游同步", "稳定｜请求计算"} {
+		if !strings.Contains(output, source) {
+			t.Fatalf("missing rate source %q: %s", source, output)
+		}
+	}
+}
+
 func TestSyncReportAccountTableShowsExpectedRateBeforeConfirmation(t *testing.T) {
 	channel := testChannel("https://upstream.example", 0.1)
 	channel.AccountName = "待确认账号"
