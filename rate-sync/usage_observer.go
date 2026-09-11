@@ -109,8 +109,8 @@ func (s *Syncer) observeCumulativeUsage(name string, state *RuleState, current u
 	}
 	s.observeRate(name, state, upstreamRate)
 	s.logger.Printf(
-		"[%s] %s，使用累计请求成本计算上游倍率 %.4f（确认 %d/%d）",
-		name, reason, upstreamRate, state.CandidateCount, s.config.Confirmations,
+		"[%s] %s，使用累计请求成本计算上游倍率 %.4f",
+		name, reason, upstreamRate,
 	)
 	return true
 }
@@ -126,16 +126,10 @@ func (s *Syncer) observeDeltaRate(name string, state *RuleState, rawRate, localR
 }
 
 func (s *Syncer) observeRate(name string, state *RuleState, upstreamRate float64) {
-	state.CandidateCount = min(state.CandidateCount, s.config.Confirmations)
-	if almostEqual(state.CandidateUpstreamRate, upstreamRate) {
-		if state.CandidateCount < s.config.Confirmations {
-			state.CandidateCount++
-		}
-	} else {
-		state.CandidateUpstreamRate = upstreamRate
-		state.CandidateCount = 1
-	}
-	s.logger.Printf("[%s] 检测到上游倍率 %.4f（确认 %d/%d）", name, upstreamRate, state.CandidateCount, s.config.Confirmations)
+	state.CandidateUpstreamRate = upstreamRate
+	// CandidateCount 只作为“本轮已有有效候选”的持久化标记，不再承担多次确认门槛。
+	state.CandidateCount = 1
+	s.logger.Printf("[%s] 检测到上游倍率 %.4f", name, upstreamRate)
 }
 
 func setBaseline(state *RuleState, day string, current upstreamToday) {

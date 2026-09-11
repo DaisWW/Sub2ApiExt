@@ -99,14 +99,15 @@ func (r *syncReport) groupSummaryRows(keys []string) ([]string, []reportTableRow
 
 func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableRow) {
 	type accountSummary struct {
-		name          string
-		rate          float64
-		previousRate  float64
-		expectedRate  float64
-		hasExpected   bool
-		proxies       []string
-		statuses      []string
-		accountSource []string
+		name             string
+		rate             float64
+		previousRate     float64
+		expectedRate     float64
+		hasExpected      bool
+		rechargeDiscount float64
+		proxies          []string
+		statuses         []string
+		accountSource    []string
 	}
 
 	summaries := make(map[int64]*accountSummary)
@@ -119,9 +120,10 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 		summary := summaries[row.accountID]
 		if summary == nil {
 			summary = &accountSummary{
-				name:         row.accountName,
-				rate:         row.accountRate,
-				previousRate: row.previousRate,
+				name:             row.accountName,
+				rate:             row.accountRate,
+				previousRate:     row.previousRate,
+				rechargeDiscount: row.rechargeDiscount,
 			}
 			summaries[row.accountID] = summary
 			order = append(order, row.accountID)
@@ -145,12 +147,13 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 				tableCell(summary.name),
 				fmt.Sprintf("%.4f", summary.rate),
 				accountExpectedRateLabel(summary.expectedRate, summary.hasExpected),
+				fmt.Sprintf("%.4f", summary.rechargeDiscount),
 				tableCell(accountResultLabel(summary.statuses, summary.accountSource, summary.previousRate)),
 				tableCell(strings.Join(summary.proxies, ", ")),
 			},
 		})
 	}
-	return []string{"账号", "账户倍率", "预期倍率", "结果", "代理"}, rows
+	return []string{"账号", "账户倍率", "预期倍率", "充值折扣", "结果", "代理"}, rows
 }
 
 func accountExpectedRateLabel(rate float64, ok bool) string {

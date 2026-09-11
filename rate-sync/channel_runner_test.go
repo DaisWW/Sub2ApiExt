@@ -44,10 +44,10 @@ func TestRunChannelChecksDoesNotStartAfterCancellation(t *testing.T) {
 	}
 }
 
-func TestManualEmptySyncHostsRemainUnrestricted(t *testing.T) {
+func TestAccountHostsAreAdmittedWithDefaultRechargeDiscount(t *testing.T) {
 	channel := testChannel("https://upstream.example", 0.1)
 	syncer := &Syncer{
-		config: &Config{SyncTarget: "account", SyncHosts: map[string]struct{}{}},
+		config: &Config{SyncTarget: "account"},
 		state:  newState(),
 		logger: log.New(io.Discard, "", 0),
 	}
@@ -55,17 +55,19 @@ func TestManualEmptySyncHostsRemainUnrestricted(t *testing.T) {
 	stats := syncStats{}
 	report := newSyncReport("account", []Channel{channel})
 	if !plan.admitAccountHost(syncer, &channel, report, &stats) {
-		t.Fatal("an unconfigured empty SyncHosts map should remain unrestricted")
+		t.Fatal("unconfigured hosts should be admitted with the default recharge discount")
+	}
+	if report.rows["account:18/group:24"].rechargeDiscount != 1 {
+		t.Fatalf("default recharge discount = %.4f", report.rows["account:18/group:24"].rechargeDiscount)
 	}
 }
 
-func TestConfiguredFactorsAdmitUnlistedAccountHosts(t *testing.T) {
-	channel := testChannel("https://xinghubai.top", 1)
+func TestConfiguredRechargeDiscountAdmitsAccountHosts(t *testing.T) {
+	channel := testChannel("https://lucen.cc", 1)
 	syncer := &Syncer{
 		config: &Config{
-			SyncTarget: "account",
-			Factors:    map[string]float64{"lucen.cc": 0.9},
-			SyncHosts:  map[string]struct{}{"lucen.cc": {}},
+			SyncTarget:        "account",
+			RechargeDiscounts: map[string]float64{"lucen.cc": 0.9},
 		},
 		state:  newState(),
 		logger: log.New(io.Discard, "", 0),
@@ -74,32 +76,13 @@ func TestConfiguredFactorsAdmitUnlistedAccountHosts(t *testing.T) {
 	stats := syncStats{}
 	report := newSyncReport("account", []Channel{channel})
 	if !plan.admitAccountHost(syncer, &channel, report, &stats) {
-		t.Fatal("unlisted hosts should still be admitted with default factor 1.0")
+		t.Fatal("configured hosts should be admitted with their recharge discount")
 	}
 	if stats.skipped != 0 || stats.failed != 0 {
-		t.Fatalf("unlisted host was not admitted cleanly: %+v", stats)
+		t.Fatalf("configured host was not admitted cleanly: %+v", stats)
 	}
-}
-
-func TestLegacySyncHostsStillRestrictAccountHosts(t *testing.T) {
-	channel := testChannel("https://xinghubai.top", 1)
-	syncer := &Syncer{
-		config: &Config{
-			SyncTarget:          "account",
-			SyncHosts:           map[string]struct{}{"lucen.cc": {}},
-			syncHostsConfigured: true,
-		},
-		state:  newState(),
-		logger: log.New(io.Discard, "", 0),
-	}
-	plan := newChannelCheckPlan("account", []Channel{channel}, nil)
-	stats := syncStats{}
-	report := newSyncReport("account", []Channel{channel})
-	if plan.admitAccountHost(syncer, &channel, report, &stats) {
-		t.Fatal("legacy sync_hosts should still restrict unlisted hosts")
-	}
-	if stats.skipped != 1 || stats.failed != 0 {
-		t.Fatalf("legacy sync_hosts stats=%+v", stats)
+	if report.rows["account:18/group:24"].rechargeDiscount != 0.9 {
+		t.Fatalf("configured recharge discount = %.4f", report.rows["account:18/group:24"].rechargeDiscount)
 	}
 }
 
@@ -118,5 +101,60 @@ func TestInvalidAccountBaseURLFailsAdmission(t *testing.T) {
 	}
 	if stats.failed != 1 {
 		t.Fatalf("invalid base_url stats=%+v", stats)
+	}
+}
+
+func TestDuplicateAccountChannelsKeepFirstAdmittedRechargeDiscount(t *testing.T) {
+	first := testChannel("https://lucen.cc", 0.1)
+	second := first
+	second.BaseURL = "https://other-upstream.example"
+	syncer := &Syncer{
+		config: &Config{
+			SyncTarget:        "account",
+			RechargeDiscounts: map[string]float64{"lucen.cc": 0.9},
+		},
+		state:  newState(),
+		logger: log.New(io.Discard, "", 0),
+	}
+	plan := newChannelCheckPlan("account", []Channel{first, second}, nil)
+	stats := syncStats{}
+	report := newSyncReport("account", []Channel{first, second})
+	if !plan.admit(syncer, &first, report, &stats) {
+		t.Fatal("first channel should be admitted")
+	}
+	if plan.admit(syncer, &second, report, &stats) {
+		t.Fatal("duplicate account channel should not be checked twice")
+	}
+	if got := report.rows["account:18/group:24"].rechargeDiscount; got != 0.9 {
+		t.Fatalf("duplicate channel overwrote recharge discount: %.4f", got)
+	}
+	if stats.failed != 0 || stats.skipped != 0 {
+		t.Fatalf("duplicate channel changed admission stats: %+v", stats)
+	}
+}
+
+func TestInvalidFirstAccountChannelCanBeReplacedByValidChannel(t *testing.T) {
+	first := testChannel("not-a-url", 0.1)
+	second := first
+	second.BaseURL = "https://lucen.cc"
+	syncer := &Syncer{
+		config: &Config{
+			SyncTarget:        "account",
+			RechargeDiscounts: map[string]float64{"lucen.cc": 0.9},
+		},
+		state:  newState(),
+		logger: log.New(io.Discard, "", 0),
+	}
+	plan := newChannelCheckPlan("account", []Channel{first, second}, nil)
+	stats := syncStats{}
+	report := newSyncReport("account", []Channel{first, second})
+	if plan.admit(syncer, &first, report, &stats) {
+		t.Fatal("invalid first channel should not be admitted")
+	}
+	if !plan.admit(syncer, &second, report, &stats) {
+		t.Fatal("valid replacement channel should be admitted")
+	}
+	if got := report.rows["account:18/group:24"].rechargeDiscount; got != 0.9 {
+		t.Fatalf("replacement channel did not set recharge discount: %.4f", got)
 	}
 }

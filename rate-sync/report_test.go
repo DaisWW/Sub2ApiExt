@@ -60,6 +60,8 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	report := newSyncReport("account", []Channel{upstream, calculated})
 	report.setAccountSource(upstream.AccountID, reportAccountSourceUpstream)
 	report.setAccountSource(calculated.AccountID, reportAccountSourceUsage)
+	report.setAccountRechargeDiscount(upstream.AccountID, 0.9)
+	report.setAccountRechargeDiscount(calculated.AccountID, 1.0)
 	report.setAccountExpectedRate(upstream.AccountID, 0.1)
 	report.setAccountExpectedRate(calculated.AccountID, 0.18)
 	report.markAccount(upstream.AccountID, reportStatusStable)
@@ -73,9 +75,28 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	if !strings.Contains(output, "预期倍率") || !strings.Contains(output, "0.1800") {
 		t.Fatalf("account table should show the expected rate: %s", output)
 	}
+	if !strings.Contains(output, "充值折扣") || !strings.Contains(output, "0.9000") {
+		t.Fatalf("account table should show the configured recharge discount: %s", output)
+	}
 	lines := strings.Split(output, "\n")
 	resultStart := tableColumnDisplayStart(lines[0], "结果")
+	discountStart := tableColumnDisplayStart(lines[0], "充值折扣")
 	proxyStart := tableColumnDisplayStart(lines[0], "代理")
+	if discountStart < 0 {
+		t.Fatalf("recharge discount column is missing: %s", output)
+	}
+	for _, value := range []string{"0.9000", "1.0000"} {
+		var row string
+		for _, line := range lines[2:] {
+			if strings.Contains(line, value) {
+				row = line
+				break
+			}
+		}
+		if tableColumnDisplayStart(row, value) != discountStart {
+			t.Fatalf("recharge discount %q is not aligned:\n%s", value, output)
+		}
+	}
 	for _, source := range []string{"上游同步", "请求计算"} {
 		var row string
 		for _, line := range lines[2:] {
@@ -121,9 +142,9 @@ func TestSyncReportAccountTableDistinguishesRateSources(t *testing.T) {
 	}
 }
 
-func TestSyncReportAccountTableShowsExpectedRateBeforeConfirmation(t *testing.T) {
+func TestSyncReportAccountTableShowsExpectedRateBeforeCandidate(t *testing.T) {
 	channel := testChannel("https://upstream.example", 0.1)
-	channel.AccountName = "待确认账号"
+	channel.AccountName = "待同步账号"
 	channel.AccountRateMultiplier = 0.2
 	report := newSyncReport("account", []Channel{channel})
 	report.setAccountSource(channel.AccountID, reportAccountSourceUsage)

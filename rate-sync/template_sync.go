@@ -12,24 +12,25 @@ func (s *Syncer) syncChannel(ctx context.Context, channel *Channel, ruleState *R
 	if s.syncTarget() != "account" {
 		return skipError("分组倍率由账户倍率继承或统计校准")
 	}
-	factor, host, err := s.config.factorForBaseURL(channel.BaseURL)
+	rechargeDiscount, host, err := s.config.rechargeDiscountForBaseURL(channel.BaseURL)
 	if err != nil {
 		return err
 	}
-	handled, directErr := s.tryDirectAccountTemplate(ctx, channel, ruleState, now, factor, report, host)
+	report.setAccountRechargeDiscount(channel.AccountID, rechargeDiscount)
+	handled, directErr := s.tryDirectAccountTemplate(ctx, channel, ruleState, now, rechargeDiscount, report, host)
 	if handled {
 		return directErr
 	}
-	return s.tryUsageAccountTemplate(ctx, channel, ruleState, now, factor, report, host, directErr)
+	return s.tryUsageAccountTemplate(ctx, channel, ruleState, now, rechargeDiscount, report, host, directErr)
 }
 
-// tryDirectAccountTemplate 优先使用上游已解析的静态倍率，再兼容旧直接倍率接口。
+// tryDirectAccountTemplate 优先使用上游已解析的静态倍率，再读取上游价格接口。
 func (s *Syncer) tryDirectAccountTemplate(
 	ctx context.Context,
 	channel *Channel,
 	state *RuleState,
 	now time.Time,
-	factor float64,
+	rechargeDiscount float64,
 	report *syncReport,
 	host string,
 ) (bool, error) {
@@ -63,10 +64,10 @@ func (s *Syncer) tryDirectAccountTemplate(
 		if !wasTemplate {
 			s.logger.Printf("[%s] 已自动识别价格模板: %s（上游 %s）", channelLabel(channel), template, host)
 		}
-		return true, s.applyCandidate(ctx, channel, state, factor, report)
+		return true, s.applyCandidate(ctx, channel, state, rechargeDiscount, report)
 	}
 
-	// 直接倍率本轮不可用时，不能让旧直接候选跨过失败周期继续累计确认。
+	// 直接倍率本轮不可用时，不能让旧直接候选跨过失败周期继续参与发布。
 	// usage 的基线和候选则留给回退路径继续使用。
 	if state.Template != templateUsageRatio {
 		if failedDirectState != nil {
@@ -83,7 +84,7 @@ func (s *Syncer) tryUsageAccountTemplate(
 	channel *Channel,
 	state *RuleState,
 	now time.Time,
-	factor float64,
+	rechargeDiscount float64,
 	report *syncReport,
 	host string,
 	directErr error,
@@ -109,7 +110,7 @@ func (s *Syncer) tryUsageAccountTemplate(
 		if directErr != nil {
 			s.logger.Printf("[%s] 上游直接倍率不可用，改用请求成本计算: %v", channelLabel(channel), directErr)
 		}
-		return s.applyCandidate(ctx, channel, state, factor, report)
+		return s.applyCandidate(ctx, channel, state, rechargeDiscount, report)
 	}
 	if err != nil {
 		return fmt.Errorf("已识别模板 %s 请求失败: %w", templateUsageRatio, err)
@@ -167,59 +168,60 @@ func (s *Syncer) applyUsageTemplate(ctx context.Context, channel *Channel, state
 	return true, nil
 }
 
-func (s *Syncer) applyCandidate(ctx context.Context, channel *Channel, state *RuleState, factor float64, report *syncReport) error {
+func (s *Syncer) applyCandidate(ctx context.Context, channel *Channel, state *RuleState, rechargeDiscount float64, report *syncReport) error {
 	if s.syncTarget() != "account" {
 		return skipError("分组倍率由账户倍率继承或统计校准")
 	}
 	if state.CandidateCount <= 0 {
 		return nil
 	}
-	finalRate, err := candidateFinalRate(state, factor)
+	finalRate, err := candidateFinalRate(state, rechargeDiscount)
 	if err != nil {
 		return err
 	}
 	report.setAccountExpectedRate(channel.AccountID, finalRate)
-	if state.CandidateCount < s.config.Confirmations {
-		return nil
-	}
 	currentRate := channel.AccountRateMultiplier
 	if almostEqual(currentRate, finalRate) {
 		report.markChannel(channel, reportStatusStable)
 		s.logger.Printf(
-			"[%s] 倍率稳定: 当前 %.4f = 预期 %.4f（上游 %.4f × 系数 %.4f）",
-			channelLabel(channel), currentRate, finalRate, state.CandidateUpstreamRate, factor,
+			"[%s] 倍率稳定: 当前 %.4f；%s",
+			channelLabel(channel), currentRate, rateFormula(state.CandidateUpstreamRate, rechargeDiscount, finalRate),
 		)
 		return nil
 	}
 	if s.config.DryRun {
 		report.markChannel(channel, reportStatusPreview)
 		s.logger.Printf(
-			"[%s] 预览更新: 原 %.4f -> 预期 %.4f（上游 %.4f × 系数 %.4f），dry-run 未写回",
-			channelLabel(channel), currentRate, finalRate, state.CandidateUpstreamRate, factor,
+			"[%s] 预览更新: 原 %.4f；%s，dry-run 未写回",
+			channelLabel(channel), currentRate, rateFormula(state.CandidateUpstreamRate, rechargeDiscount, finalRate),
 		)
 		return nil
 	}
-	return s.publishAccountCandidate(ctx, channel, state, factor, currentRate, finalRate, report)
+	return s.publishAccountCandidate(ctx, channel, state, rechargeDiscount, currentRate, finalRate, report)
 }
 
-func candidateFinalRate(state *RuleState, factor float64) (float64, error) {
-	rate := round4(state.CandidateUpstreamRate * factor)
+func candidateFinalRate(state *RuleState, rechargeDiscount float64) (float64, error) {
+	rate := round4(state.CandidateUpstreamRate * rechargeDiscount)
 	if !validPositiveRate(rate) {
 		return 0, fmt.Errorf("最终倍率无效: %.8f", rate)
 	}
 	return rate, nil
 }
 
-func (s *Syncer) publishAccountCandidate(ctx context.Context, channel *Channel, state *RuleState, factor, previousRate, finalRate float64, report *syncReport) error {
+func (s *Syncer) publishAccountCandidate(ctx context.Context, channel *Channel, state *RuleState, rechargeDiscount, previousRate, finalRate float64, report *syncReport) error {
 	if err := s.updateAccount(ctx, channel.AccountID, finalRate); err != nil {
 		return err
 	}
 	report.updateAccountRate(channel.AccountID, finalRate)
 	report.markAccount(channel.AccountID, reportStatusUpdated)
 	s.logger.Printf(
-		"[%s] 已更新账号 %s(%d) 账户倍率: 原 %.4f -> 新 %.4f（上游 %.4f × 系数 %.4f）",
+		"[%s] 已更新账号 %s(%d) 账户倍率: 原 %.4f -> 新 %.4f；%s",
 		channelLabel(channel), channel.AccountName, channel.AccountID,
-		previousRate, finalRate, state.CandidateUpstreamRate, factor,
+		previousRate, finalRate, rateFormula(state.CandidateUpstreamRate, rechargeDiscount, finalRate),
 	)
 	return nil
+}
+
+func rateFormula(upstreamRate, rechargeDiscount, expectedRate float64) string {
+	return fmt.Sprintf("上游倍率 %.4f × 充值折扣 %.4f = 预期账户倍率 %.4f", upstreamRate, rechargeDiscount, expectedRate)
 }

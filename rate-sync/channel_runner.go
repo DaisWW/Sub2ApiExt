@@ -29,7 +29,6 @@ type channelCheckPlan struct {
 	loggedGroups     map[int64]bool
 	loggedAccounts   map[int64]bool
 	seenAccounts     map[int64]bool
-	skippedAccounts  map[int64]bool
 }
 
 func newChannelCheckPlan(target string, channels []Channel, handledGroups map[int64]bool) *channelCheckPlan {
@@ -41,7 +40,6 @@ func newChannelCheckPlan(target string, channels []Channel, handledGroups map[in
 		loggedGroups:     make(map[int64]bool),
 		loggedAccounts:   make(map[int64]bool),
 		seenAccounts:     make(map[int64]bool),
-		skippedAccounts:  make(map[int64]bool),
 	}
 	for groupID, binding := range buildGroupBindings(channels) {
 		plan.groupAccountNums[groupID] = len(binding.accounts)
@@ -71,26 +69,20 @@ func (p *channelCheckPlan) admit(s *Syncer, channel *Channel, report *syncReport
 }
 
 func (p *channelCheckPlan) admitAccountHost(s *Syncer, channel *Channel, report *syncReport, stats *syncStats) bool {
-	_, host, err := s.config.factorForBaseURL(channel.BaseURL)
+	// 账号已由前一个有效渠道准入时，后续绑定不应再次校验或覆盖账号级折扣。
+	// 首个渠道无效时不会设置 seenAccounts，后续有效渠道仍可接替检查。
+	if p.seenAccounts[channel.AccountID] {
+		return true
+	}
+	discount, _, err := s.config.rechargeDiscountForBaseURL(channel.BaseURL)
 	if err != nil {
 		stats.failed++
 		report.markChannel(channel, reportStatusFailed)
 		s.logger.Printf("[%s] 同步失败: %v", channelLabel(channel), err)
 		return false
 	}
-	if !s.config.syncHostsConfigured {
-		return true
-	}
-	if _, allowed := s.config.SyncHosts[host]; allowed {
-		return true
-	}
-	if !p.skippedAccounts[channel.AccountID] {
-		p.skippedAccounts[channel.AccountID] = true
-		stats.skipped++
-		report.markChannel(channel, reportStatusSkipped)
-		s.logger.Printf("[%s] 暂不自动: 旧版 sync_hosts 未包含上游主机 %s", channelLabel(channel), host)
-	}
-	return false
+	report.setAccountRechargeDiscount(channel.AccountID, discount)
+	return true
 }
 
 func (p *channelCheckPlan) skipMultiAccountGroup(s *Syncer, channel *Channel, report *syncReport, stats *syncStats) {

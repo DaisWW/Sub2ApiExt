@@ -28,21 +28,22 @@ type syncReport struct {
 }
 
 type syncReportRow struct {
-	key           string
-	accountID     int64
-	groupID       int64
-	accountName   string
-	groupName     string
-	accountRate   float64
-	previousRate  float64
-	expectedRate  float64
-	hasExpected   bool
-	groupRate     float64
-	proxy         string
-	status        string
-	accountSource string
-	window        string
-	detail        string
+	key              string
+	accountID        int64
+	groupID          int64
+	accountName      string
+	groupName        string
+	accountRate      float64
+	previousRate     float64
+	expectedRate     float64
+	hasExpected      bool
+	rechargeDiscount float64
+	groupRate        float64
+	proxy            string
+	status           string
+	accountSource    string
+	window           string
+	detail           string
 }
 
 func newSyncReport(target string, channels []Channel) *syncReport {
@@ -58,16 +59,17 @@ func newSyncReport(target string, channels []Channel) *syncReport {
 			continue
 		}
 		report.rows[key] = &syncReportRow{
-			key:          key,
-			accountID:    channel.AccountID,
-			groupID:      channel.Group.ID,
-			accountName:  strings.TrimSpace(channel.AccountName),
-			groupName:    strings.TrimSpace(channel.Group.Name),
-			accountRate:  channel.AccountRateMultiplier,
-			previousRate: channel.AccountRateMultiplier,
-			groupRate:    channel.Group.RateMultiplier,
-			proxy:        proxyLabel(channel.ProxyURL),
-			status:       reportStatusPending,
+			key:              key,
+			accountID:        channel.AccountID,
+			groupID:          channel.Group.ID,
+			accountName:      strings.TrimSpace(channel.AccountName),
+			groupName:        strings.TrimSpace(channel.Group.Name),
+			accountRate:      channel.AccountRateMultiplier,
+			previousRate:     channel.AccountRateMultiplier,
+			rechargeDiscount: 1,
+			groupRate:        channel.Group.RateMultiplier,
+			proxy:            proxyLabel(channel.ProxyURL),
+			status:           reportStatusPending,
 		}
 		report.order = append(report.order, key)
 	}
@@ -136,6 +138,20 @@ func (r *syncReport) setAccountExpectedRate(accountID int64, rate float64) {
 		if strings.HasPrefix(row.key, prefix) {
 			row.expectedRate = rate
 			row.hasExpected = true
+		}
+	}
+}
+
+func (r *syncReport) setAccountRechargeDiscount(accountID int64, discount float64) {
+	if r == nil || r.target != "account" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := fmt.Sprintf("account:%d/", accountID)
+	for _, row := range r.rows {
+		if strings.HasPrefix(row.key, prefix) {
+			row.rechargeDiscount = discount
 		}
 	}
 }

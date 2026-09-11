@@ -60,12 +60,11 @@ func main() {
 	defer stop()
 
 	logger.Printf(
-		"rate-sync 已启动: 自动发现=true templates=3 sync_target=%s interval=%s dry_run=%t confirmations=%d upstream_factors=%d",
+		"rate-sync 已启动: 自动发现=true templates=3 sync_target=%s interval=%s dry_run=%t recharge_discounts=%d",
 		config.SyncTarget,
 		config.Interval,
 		config.DryRun,
-		config.Confirmations,
-		len(config.Factors),
+		len(config.RechargeDiscounts),
 	)
 	run := func() {
 		healthy, err := syncer.runCycle(ctx, time.Now())

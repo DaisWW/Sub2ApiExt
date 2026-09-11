@@ -255,7 +255,7 @@ func TestDynamicSyncFreezesWithoutUsageAndRepricesAccountChanges(t *testing.T) {
 	}))
 	defer admin.Close()
 
-	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer := newTestSyncer(t, source, admin.URL, false, "", 1)
 	syncer.store = StateStore{Path: filepath.Join(t.TempDir(), "state.json")}
 	syncer.logger = log.New(io.Discard, "", 0)
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
@@ -334,7 +334,7 @@ func TestDynamicPendingTargetSurvivesRestartAndRetriesWithoutReconsumingUsage(t 
 
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	store := StateStore{Path: statePath}
-	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer := newTestSyncer(t, source, admin.URL, false, "", 1)
 	syncer.store = store
 	syncer.logger = log.New(io.Discard, "", 0)
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
@@ -371,7 +371,7 @@ func TestDynamicPendingTargetSurvivesRestartAndRetriesWithoutReconsumingUsage(t 
 	source.incremental = []GroupUsageAccountStats{
 		{GroupID: 24, AccountID: 1, Requests: 1, StandardCost: 5, BaseCost: 5, CurrentAccountRate: 0.5},
 	}
-	restarted := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	restarted := newTestSyncer(t, source, admin.URL, false, "", 1)
 	restarted.store = store
 	restarted.state = loaded
 	restarted.logger = log.New(io.Discard, "", 0)
@@ -450,7 +450,7 @@ func TestDynamicPendingTargetReplaysAfterSuccessfulPublishBeforeSave(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	syncer := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	syncer := newTestSyncer(t, source, admin.URL, false, "", 1)
 	syncer.store = store
 	syncer.state = loaded
 	syncer.logger = log.New(io.Discard, "", 0)
@@ -468,7 +468,7 @@ func TestDynamicPendingTargetReplaysAfterSuccessfulPublishBeforeSave(t *testing.
 		t.Fatal("test setup did not preserve pending target on disk")
 	}
 
-	restarted := newTestSyncer(t, source, admin.URL, false, 1, "", 1)
+	restarted := newTestSyncer(t, source, admin.URL, false, "", 1)
 	restarted.store = store
 	restarted.state = diskState
 	restarted.logger = log.New(io.Discard, "", 0)
@@ -558,7 +558,7 @@ func TestDynamicPendingTargetRetriesWithoutValidMemory(t *testing.T) {
 	}))
 	defer admin.Close()
 
-	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, "", 1)
+	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, "", 1)
 	syncer.state = state
 	report := newSyncReport("group", []Channel{channel})
 	syncer.publishDynamicGroup(context.Background(), &channel.Group, state.DynamicGroups[24], false, "待发布重试", dynamicUsageSummary{}, report)
@@ -575,7 +575,7 @@ func TestDynamicBootstrapPreservesPendingRetryFailureEvidence(t *testing.T) {
 	}))
 	defer admin.Close()
 
-	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, "", 1)
+	syncer := newTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, "", 1)
 	syncer.state.DynamicGroups[24] = &DynamicGroupState{
 		PendingTarget:    0.17,
 		HasPendingTarget: true,

@@ -141,7 +141,6 @@ func classifyLogLine(line string) logStatus {
 		"倍率稳定:",
 		"预览更新:",
 		"检查:",
-		"检查成功:", // 兼容旧版本日志。
 	) {
 		return logStatusOK
 	}

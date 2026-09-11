@@ -20,24 +20,16 @@ const (
 )
 
 type fileConfig struct {
-	Sub2APIURL        string   `json:"sub2api_url"`
-	ProxyURL          string   `json:"proxy_url"`
-	ProxyFallbackURLs []string `json:"proxy_fallback_urls"`
-	Interval          string   `json:"interval"`
-	SyncTarget        string   `json:"sync_target"`
-	SyncHosts         []string `json:"sync_hosts"`
-	// UsageBootstrap is accepted for compatibility with deployed account configs.
-	UsageBootstrap     bool               `json:"usage_bootstrap"`
-	HistoryWindow      string             `json:"history_window"`
-	MinHistoryCostUSD  float64            `json:"min_history_cost_usd"`
-	DryRun             bool               `json:"dry_run"`
-	Confirmations      int                `json:"confirmations"`
-	StateFile          string             `json:"state_file"`
-	UpstreamFactors    map[string]float64 `json:"upstream_factors"`
-	Factors            map[string]float64 `json:"factors"`
-	upstreamFactorsSet bool
-	syncHostsSet       bool
-	factorsSet         bool
+	Sub2APIURL        string             `json:"sub2api_url"`
+	ProxyURL          string             `json:"proxy_url"`
+	ProxyFallbackURLs []string           `json:"proxy_fallback_urls"`
+	Interval          string             `json:"interval"`
+	SyncTarget        string             `json:"sync_target"`
+	HistoryWindow     string             `json:"history_window"`
+	MinHistoryCostUSD float64            `json:"min_history_cost_usd"`
+	DryRun            bool               `json:"dry_run"`
+	StateFile         string             `json:"state_file"`
+	RechargeDiscounts map[string]float64 `json:"recharge_discounts"`
 }
 
 type Config struct {
@@ -47,18 +39,13 @@ type Config struct {
 	AdminAPIKey       string
 	Interval          time.Duration
 	SyncTarget        string
-	// SyncHosts lists hosts with an explicit coefficient, derived from upstream_factors or legacy sync_hosts.
-	SyncHosts         map[string]struct{}
 	HistoryWindow     time.Duration
 	MinHistoryCostUSD float64
 	DryRun            bool
-	Confirmations     int
 	StateFile         string
-	// Factors contains the normalized discount coefficients derived from upstream_factors.
-	// Unlisted hosts still sync with factor 1.0.
-	Factors map[string]float64
-	// syncHostsConfigured keeps the legacy sync_hosts allowlist behavior.
-	syncHostsConfigured bool
+	// RechargeDiscounts maps upstream hosts to the discount applied to the account rate.
+	// Unlisted hosts still sync with a discount of 1.0.
+	RechargeDiscounts map[string]float64
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -73,13 +60,6 @@ func loadConfig(path string) (*Config, error) {
 	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return nil, fmt.Errorf("解析配置文件: %w", err)
-	}
-	_, raw.upstreamFactorsSet = fields["upstream_factors"]
-	_, raw.syncHostsSet = fields["sync_hosts"]
-	_, raw.factorsSet = fields["factors"]
 	return normalizeFileConfig(raw)
 }
 
@@ -99,9 +79,6 @@ func normalizeFileConfig(raw fileConfig) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateConfirmations(raw.Confirmations); err != nil {
-		return nil, err
-	}
 	if err := validateHTTPURL(raw.Sub2APIURL, "sub2api_url"); err != nil {
 		return nil, err
 	}
@@ -109,66 +86,22 @@ func normalizeFileConfig(raw fileConfig) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	factors, syncHosts, err := normalizeUpstreamConfig(raw)
+	rechargeDiscounts, err := normalizeRechargeDiscounts(raw.RechargeDiscounts)
 	if err != nil {
 		return nil, err
 	}
-	legacySyncHostsConfigured := !raw.upstreamFactorsSet && raw.UpstreamFactors == nil && (raw.syncHostsSet || raw.SyncHosts != nil)
 	return &Config{
-		Sub2APIURL:          strings.TrimRight(raw.Sub2APIURL, "/"),
-		ProxyURL:            strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
-		ProxyFallbackURLs:   proxyFallbackURLs,
-		Interval:            interval,
-		SyncTarget:          raw.SyncTarget,
-		SyncHosts:           syncHosts,
-		HistoryWindow:       historyWindow,
-		MinHistoryCostUSD:   raw.MinHistoryCostUSD,
-		DryRun:              raw.DryRun,
-		Confirmations:       raw.Confirmations,
-		StateFile:           raw.StateFile,
-		Factors:             factors,
-		syncHostsConfigured: legacySyncHostsConfigured,
+		Sub2APIURL:        strings.TrimRight(raw.Sub2APIURL, "/"),
+		ProxyURL:          strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
+		ProxyFallbackURLs: proxyFallbackURLs,
+		Interval:          interval,
+		SyncTarget:        raw.SyncTarget,
+		HistoryWindow:     historyWindow,
+		MinHistoryCostUSD: raw.MinHistoryCostUSD,
+		DryRun:            raw.DryRun,
+		StateFile:         raw.StateFile,
+		RechargeDiscounts: rechargeDiscounts,
 	}, nil
-}
-
-func normalizeUpstreamConfig(raw fileConfig) (map[string]float64, map[string]struct{}, error) {
-	hasUpstreamFactors := raw.upstreamFactorsSet || raw.UpstreamFactors != nil
-	hasSyncHosts := raw.syncHostsSet || raw.SyncHosts != nil
-	hasFactors := raw.factorsSet || raw.Factors != nil
-	if hasUpstreamFactors {
-		if hasSyncHosts || hasFactors {
-			return nil, nil, fmt.Errorf("upstream_factors 不能与 sync_hosts 或 factors 同时配置，请只保留 upstream_factors")
-		}
-		if raw.UpstreamFactors == nil {
-			return nil, nil, fmt.Errorf("upstream_factors 必须是域名到折扣系数的对象")
-		}
-		factors, err := normalizeFactorsForField(raw.UpstreamFactors, "upstream_factors")
-		if err != nil {
-			return nil, nil, err
-		}
-		syncHosts := make(map[string]struct{}, len(factors))
-		for host := range factors {
-			syncHosts[host] = struct{}{}
-		}
-		return factors, syncHosts, nil
-	}
-
-	// 兼容旧版拆分配置；新配置应使用 upstream_factors，避免折扣系数漂移。
-	if raw.factorsSet && raw.Factors == nil {
-		return nil, nil, fmt.Errorf("factors 必须是域名到系数的对象")
-	}
-	factors, err := normalizeFactors(raw.Factors)
-	if err != nil {
-		return nil, nil, err
-	}
-	if raw.syncHostsSet && raw.SyncHosts == nil {
-		return nil, nil, fmt.Errorf("sync_hosts 必须是域名数组")
-	}
-	syncHosts, err := normalizeSyncHosts(raw.SyncHosts)
-	if err != nil {
-		return nil, nil, err
-	}
-	return factors, syncHosts, nil
 }
 
 func applyConfigDefaults(raw *fileConfig) {
@@ -187,9 +120,6 @@ func applyConfigDefaults(raw *fileConfig) {
 	}
 	if raw.MinHistoryCostUSD <= 0 {
 		raw.MinHistoryCostUSD = defaultMinHistoryCostUSD
-	}
-	if raw.Confirmations == 0 {
-		raw.Confirmations = 2
 	}
 	if raw.StateFile == "" {
 		raw.StateFile = defaultStateFile
@@ -232,13 +162,6 @@ func validateMinHistoryCost(value float64) error {
 	return nil
 }
 
-func validateConfirmations(value int) error {
-	if value < 1 || value > 5 {
-		return fmt.Errorf("confirmations 必须在 1 到 5 之间")
-	}
-	return nil
-}
-
 func normalizeProxyFallbacks(proxyURL string, fallbackURLs []string) ([]string, error) {
 	if strings.TrimSpace(proxyURL) != "" {
 		if err := validateProxyURL(proxyURL, "proxy_url"); err != nil {
@@ -256,54 +179,36 @@ func normalizeProxyFallbacks(proxyURL string, fallbackURLs []string) ([]string, 
 	return result, nil
 }
 
-func normalizeFactors(values map[string]float64) (map[string]float64, error) {
-	return normalizeFactorsForField(values, "factors")
+func normalizeRechargeDiscounts(values map[string]float64) (map[string]float64, error) {
+	return normalizeRechargeDiscountsForField(values, "recharge_discounts")
 }
 
-func normalizeFactorsForField(values map[string]float64, name string) (map[string]float64, error) {
-	factors := make(map[string]float64, len(values))
-	for value, factor := range values {
+func normalizeRechargeDiscountsForField(values map[string]float64, name string) (map[string]float64, error) {
+	discounts := make(map[string]float64, len(values))
+	for value, discount := range values {
 		host, err := normalizeHost(value, name)
 		if err != nil {
 			return nil, err
 		}
-		if factor <= 0 || math.IsNaN(factor) || math.IsInf(factor, 0) {
+		if discount <= 0 || math.IsNaN(discount) || math.IsInf(discount, 0) {
 			return nil, fmt.Errorf("%s[%q] 必须是大于 0 的有限数字", name, value)
 		}
-		if _, exists := factors[host]; exists {
+		if _, exists := discounts[host]; exists {
 			return nil, fmt.Errorf("%s 中的域名 %q 重复", name, host)
 		}
-		factors[host] = factor
+		discounts[host] = discount
 	}
-	return factors, nil
+	return discounts, nil
 }
 
-func normalizeSyncHosts(values []string) (map[string]struct{}, error) {
-	if values == nil {
-		return nil, nil
-	}
-	syncHosts := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		host, err := normalizeHost(value, "sync_hosts")
-		if err != nil {
-			return nil, err
-		}
-		if _, exists := syncHosts[host]; exists {
-			return nil, fmt.Errorf("sync_hosts 中的域名 %q 重复", host)
-		}
-		syncHosts[host] = struct{}{}
-	}
-	return syncHosts, nil
-}
-
-func (c *Config) factorForBaseURL(baseURL string) (float64, string, error) {
+func (c *Config) rechargeDiscountForBaseURL(baseURL string) (float64, string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return 0, "", fmt.Errorf("账号 base_url 必须是有效的 http/https URL")
 	}
 	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	if factor, exists := c.Factors[host]; exists {
-		return factor, host, nil
+	if discount, exists := c.RechargeDiscounts[host]; exists {
+		return discount, host, nil
 	}
 	return 1, host, nil
 }

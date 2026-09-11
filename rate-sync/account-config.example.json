@@ -1,8 +1,7 @@
 {
   "interval": "900s",
   "sync_target": "account",
-  "confirmations": 1,
-  "upstream_factors": {
+  "recharge_discounts": {
     "lucen.cc": 0.9,
     "xixiapi.io": 0.9,
     "ppsubapi.com": 0.9

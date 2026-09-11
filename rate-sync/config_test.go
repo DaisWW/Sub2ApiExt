@@ -9,29 +9,29 @@ import (
 )
 
 func TestLoadConfigUsesSimpleDefaults(t *testing.T) {
-	path := writeTestConfig(t, `{"factors":{"LUCEN.CC.":0.85}}`)
+	path := writeTestConfig(t, `{"recharge_discounts":{"LUCEN.CC.":0.85}}`)
 
 	config, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.ProxyURL != "" || len(config.ProxyFallbackURLs) != 0 || config.Interval != 5*time.Minute || config.HistoryWindow != 24*time.Hour || config.MinHistoryCostUSD != 0.01 || config.Confirmations != 2 || config.DryRun {
+	if config.ProxyURL != "" || len(config.ProxyFallbackURLs) != 0 || config.Interval != 5*time.Minute || config.HistoryWindow != 24*time.Hour || config.MinHistoryCostUSD != 0.01 || config.DryRun {
 		t.Fatalf("unexpected defaults: %+v", config)
 	}
-	factor, host, err := config.factorForBaseURL("https://lucen.cc/v1")
-	if err != nil || factor != 0.85 || host != "lucen.cc" {
-		t.Fatalf("factorForBaseURL() = %v, %q, %v", factor, host, err)
+	discount, host, err := config.rechargeDiscountForBaseURL("https://lucen.cc/v1")
+	if err != nil || discount != 0.85 || host != "lucen.cc" {
+		t.Fatalf("rechargeDiscountForBaseURL() = %v, %q, %v", discount, host, err)
 	}
-	factor, _, err = config.factorForBaseURL("https://new-upstream.test")
-	if err != nil || factor != 1 {
-		t.Fatalf("default factor = %v, %v", factor, err)
+	discount, _, err = config.rechargeDiscountForBaseURL("https://new-upstream.test")
+	if err != nil || discount != 1 {
+		t.Fatalf("default recharge discount = %v, %v", discount, err)
 	}
 }
 
-func TestLoadConfigUsesUpstreamFactorsAsDiscountMap(t *testing.T) {
+func TestLoadConfigUsesRechargeDiscountMap(t *testing.T) {
 	path := writeTestConfig(t, `{
   "sync_target":"account",
-  "upstream_factors":{
+  "recharge_discounts":{
     "WWW.CODEXAPIS.COM.":1,
     "xixiapi.io":0.9,
     "PPSUBAPI.COM":0.9
@@ -42,68 +42,45 @@ func TestLoadConfigUsesUpstreamFactorsAsDiscountMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.SyncHosts) != 3 || len(config.Factors) != 3 {
-		t.Fatalf("unexpected upstream config: %+v", config)
+	if len(config.RechargeDiscounts) != 3 {
+		t.Fatalf("unexpected recharge discount config: %+v", config)
 	}
-	if config.syncHostsConfigured {
-		t.Fatal("upstream_factors must not enable the legacy sync_hosts allowlist")
+	if discount, host, err := config.rechargeDiscountForBaseURL("https://www.codexapis.com/v1"); err != nil || discount != 1 || host != "www.codexapis.com" {
+		t.Fatalf("DaoGe rechargeDiscountForBaseURL() = %v, %q, %v", discount, host, err)
 	}
-	for host := range config.Factors {
-		if _, ok := config.SyncHosts[host]; !ok {
-			t.Fatalf("upstream host %q was not recorded as an explicit factor host", host)
-		}
-	}
-	if factor, host, err := config.factorForBaseURL("https://www.codexapis.com/v1"); err != nil || factor != 1 || host != "www.codexapis.com" {
-		t.Fatalf("DaoGe factorForBaseURL() = %v, %q, %v", factor, host, err)
-	}
-	if factor, host, err := config.factorForBaseURL("https://ppsubapi.com"); err != nil || factor != 0.9 || host != "ppsubapi.com" {
-		t.Fatalf("TokenHorse factorForBaseURL() = %v, %q, %v", factor, host, err)
+	if discount, host, err := config.rechargeDiscountForBaseURL("https://ppsubapi.com"); err != nil || discount != 0.9 || host != "ppsubapi.com" {
+		t.Fatalf("TokenHorse rechargeDiscountForBaseURL() = %v, %q, %v", discount, host, err)
 	}
 }
 
-func TestLoadConfigEmptyUpstreamFactorsDefaultToOne(t *testing.T) {
-	config, err := loadConfig(writeTestConfig(t, `{"sync_target":"account","upstream_factors":{}}`))
+func TestLoadConfigEmptyRechargeDiscountsDefaultToOne(t *testing.T) {
+	config, err := loadConfig(writeTestConfig(t, `{"sync_target":"account","recharge_discounts":{}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.syncHostsConfigured {
-		t.Fatal("empty upstream_factors must not enable the legacy sync_hosts allowlist")
-	}
-	if factor, host, err := config.factorForBaseURL("https://xinghubai.top/v1"); err != nil || factor != 1 || host != "xinghubai.top" {
-		t.Fatalf("unlisted host factorForBaseURL() = %v, %q, %v", factor, host, err)
+	if discount, host, err := config.rechargeDiscountForBaseURL("https://xinghubai.top/v1"); err != nil || discount != 1 || host != "xinghubai.top" {
+		t.Fatalf("unlisted host rechargeDiscountForBaseURL() = %v, %q, %v", discount, host, err)
 	}
 }
 
 func TestLoadConfigAllowsOptionalRuntimeSettings(t *testing.T) {
 	path := writeTestConfig(t, `{
 	  "sync_target":"account",
-	  "sync_hosts":["WWW.CODEXAPIS.COM", "xixiapi.io", "ppsubapi.com"],
-	  "factors":{"ppsubapi.com":0.9},
-	  "usage_bootstrap":true,
+	  "recharge_discounts":{"ppsubapi.com":0.9},
 	  "proxy_url":"http://host.docker.internal:7897",
 	  "proxy_fallback_urls":["http://host.docker.internal:7890"],
-  "interval":"90s",
-  "confirmations":3,
+	  "interval":"90s",
   "dry_run":true
 }`)
 	config, err := loadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.ProxyURL != "http://host.docker.internal:7897" || len(config.ProxyFallbackURLs) != 1 || config.ProxyFallbackURLs[0] != "http://host.docker.internal:7890" || config.Interval != 90*time.Second || config.Confirmations != 3 || !config.DryRun || config.SyncTarget != "account" {
+	if config.ProxyURL != "http://host.docker.internal:7897" || len(config.ProxyFallbackURLs) != 1 || config.ProxyFallbackURLs[0] != "http://host.docker.internal:7890" || config.Interval != 90*time.Second || !config.DryRun || config.SyncTarget != "account" {
 		t.Fatalf("unexpected config: %+v", config)
 	}
-	if !config.syncHostsConfigured {
-		t.Fatal("legacy sync_hosts should remain restrictive")
-	}
-	if _, ok := config.SyncHosts["www.codexapis.com"]; !ok {
-		t.Fatalf("sync_hosts missing normalized DaoGe host: %+v", config.SyncHosts)
-	}
-	if _, ok := config.SyncHosts["xixiapi.io"]; !ok {
-		t.Fatalf("sync_hosts missing Lucen host: %+v", config.SyncHosts)
-	}
-	if factor, host, err := config.factorForBaseURL("https://ppsubapi.com"); err != nil || factor != 0.9 || host != "ppsubapi.com" {
-		t.Fatalf("factorForBaseURL() = %v, %q, %v", factor, host, err)
+	if discount, host, err := config.rechargeDiscountForBaseURL("https://ppsubapi.com"); err != nil || discount != 0.9 || host != "ppsubapi.com" {
+		t.Fatalf("rechargeDiscountForBaseURL() = %v, %q, %v", discount, host, err)
 	}
 }
 
@@ -136,14 +113,11 @@ func TestLoadConfigRejectsInvalidHistoryWindow(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsInvalidFactor(t *testing.T) {
+func TestLoadConfigRejectsInvalidRechargeDiscount(t *testing.T) {
 	for _, input := range []string{
-		`{"factors":{"https://lucen.cc":0.85}}`,
-		`{"factors":{"lucen.cc":0}}`,
-		`{"factors":{"lucen.cc/path":0.85}}`,
-		`{"upstream_factors":{"https://lucen.cc":0.9}}`,
-		`{"upstream_factors":{"lucen.cc":0}}`,
-		`{"upstream_factors":{"lucen.cc/path":0.9}}`,
+		`{"recharge_discounts":{"https://lucen.cc":0.85}}`,
+		`{"recharge_discounts":{"lucen.cc":0}}`,
+		`{"recharge_discounts":{"lucen.cc/path":0.85}}`,
 	} {
 		if _, err := loadConfig(writeTestConfig(t, input)); err == nil {
 			t.Fatalf("loadConfig(%s) error = nil", input)
@@ -151,27 +125,16 @@ func TestLoadConfigRejectsInvalidFactor(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsMixedUpstreamFactorFormats(t *testing.T) {
+func TestLoadConfigRejectsRemovedConfigurationFields(t *testing.T) {
 	for _, input := range []string{
-		`{"upstream_factors":{"lucen.cc":0.9},"sync_hosts":["lucen.cc"]}`,
-		`{"upstream_factors":{"lucen.cc":0.9},"factors":{"lucen.cc":0.9}}`,
-		`{"upstream_factors":{},"sync_hosts":[]}`,
-		`{"upstream_factors":null}`,
+		`{"upstream_factors":{"lucen.cc":0.9}}`,
+		`{"factors":{"lucen.cc":0.9}}`,
+		`{"sync_hosts":["lucen.cc"]}`,
+		`{"usage_bootstrap":true}`,
+		`{"confirmations":2}`,
 	} {
-		if _, err := loadConfig(writeTestConfig(t, input)); err == nil || !strings.Contains(err.Error(), "upstream_factors") {
-			t.Fatalf("loadConfig(%s) error = %v, want mixed-format error", input, err)
-		}
-	}
-}
-
-func TestLoadConfigRejectsInvalidSyncHost(t *testing.T) {
-	for _, input := range []string{
-		`{"sync_hosts":["https://xixiapi.io"]}`,
-		`{"sync_hosts":["xixiapi.io/path"]}`,
-		`{"sync_hosts":["xixiapi.io", "XIXIAPI.IO"]}`,
-	} {
-		if _, err := loadConfig(writeTestConfig(t, input)); err == nil {
-			t.Fatalf("loadConfig(%s) error = nil", input)
+		if _, err := loadConfig(writeTestConfig(t, input)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("loadConfig(%s) error = %v, want removed-field error", input, err)
 		}
 	}
 }
