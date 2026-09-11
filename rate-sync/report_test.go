@@ -111,6 +111,28 @@ func TestSyncReportGroupSummaryKeepsEvidenceBelowTable(t *testing.T) {
 	}
 }
 
+func TestSyncReportGroupTableAppendsEvidenceAfterAllRows(t *testing.T) {
+	first := testChannel("https://upstream.example", 0.1)
+	first.Group.Name = "分组甲"
+	second := first
+	second.Group.ID++
+	second.Group.Name = "分组乙"
+	report := newSyncReport("group", []Channel{first, second})
+	report.setGroupEvidence(first.Group.ID, "窗口甲", "说明甲")
+	report.setGroupEvidence(second.Group.ID, "窗口乙", "说明乙")
+
+	lines := report.tableLines()
+	if len(lines) != 6 {
+		t.Fatalf("expected header, separator, two rows, and two evidence lines; got %d lines: %s", len(lines), strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[2], "分组甲") || !strings.Contains(lines[3], "分组乙") {
+		t.Fatalf("group rows were interrupted by evidence: %s", strings.Join(lines, "\n"))
+	}
+	if !strings.HasPrefix(lines[4], "  ↳ 分组 分组甲：") || !strings.HasPrefix(lines[5], "  ↳ 分组 分组乙：") {
+		t.Fatalf("evidence order = %q, %q", lines[4], lines[5])
+	}
+}
+
 func TestSyncReportGroupTableDoesNotMixAccountRates(t *testing.T) {
 	first := testChannel("https://upstream.example", 0.1)
 	first.AccountName = "lucen-gpt-006"

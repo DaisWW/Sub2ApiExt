@@ -24,13 +24,14 @@ func (r *syncReport) tableLines() []string {
 	headers, rows := r.summaryRows(keys)
 	widths := tableColumnWidths(headers, rows)
 	lines := make([]string, 0, len(rows)*2+2)
+	evidence := make([]string, 0, len(rows))
 	lines = append(lines, formatTableRow(headers, widths))
 	lines = append(lines, formatTableSeparator(widths))
 	for _, row := range rows {
 		lines = append(lines, formatTableRow(row.cells, widths))
-		lines = append(lines, row.evidence...)
+		evidence = append(evidence, row.evidence...)
 	}
-	return lines
+	return append(lines, evidence...)
 }
 
 func tableColumnWidths(headers []string, rows []reportTableRow) []int {
