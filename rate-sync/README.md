@@ -21,7 +21,7 @@
 
 账户 worker 的周期是 `900s`（15 分钟），`confirmations: 1` 表示单次确认即可写回。Lucen 和 TokenHorse 的上游倍率在写回前各自乘一次映射中的 `0.9`（覆盖 `lucen.cc`、`xixiapi.io` 和 `ppsubapi.com`）；分组 worker 不会再次乘该系数。
 
-账户模式优先读取上游直接价格（NewAPI 的价格表和最新计费日志）；只有直接价格接口不可用时才读取 `/v1/usage`。`usage_bootstrap: true` 可让当前本地倍率仍为 `1.0` 的占位账号在没有新增请求时，用累计 `actual_cost / cost` 先建立候选倍率；已设置过非 `1.0` 倍率的账号不会被累计值覆盖。
+账户模式每轮优先读取上游直接倍率（NewAPI 的价格表和最新计费日志）；直接倍率不可用时才读取 `/v1/usage`。只要 `actual_cost / cost` 能算出有效正倍率，就作为账户候选倍率，不要求当前本地倍率为 `1.0`、最小成本或最小请求数；最终写回值仍会乘 `upstream_factors` 的上游系数。旧配置里的 `usage_bootstrap` 仍可读取，但不再改变此行为。
 
 为避免两个机制同时写入，当前所有账户记录的 Sub2API 内置 `upstream_billing_rate_sync_enabled` 已显式设为 `false`；`rate-sync` 是唯一的账户倍率写入方。
 
@@ -101,7 +101,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 
 模板由 Go 代码实现，不再逐渠道配置；仅账户 worker 使用这些模板读取上游价格，分组 worker 不执行上游探测：
 
-1. `sub2api_usage`：读取 `/v1/usage?days=1`，优先使用新增 `actual_cost / cost`；账户模式开启 `usage_bootstrap` 且本地倍率为 `1.0` 时，无新增用量也可使用累计 `actual_cost / cost` 作为保守的初始候选。
+1. `sub2api_usage`：读取 `/v1/usage?days=1`。上游直接倍率不可用时，任一有效的 `actual_cost / cost` 都可作为候选；有新增用量时优先使用新增部分，无新增时使用累计值，不设置最小成本或最小请求数门槛。
 2. `newapi_pricing`：每个同步周期都重新读取该 Key 的 `/api/log/token`，从最新一条已计费的真实请求日志确定实际价格组，不缓存价格组或倍率。若 `/api/pricing` 可用，则读取该价格组当前的 `group_ratio`；若价格接口仅允许网页登录，则直接读取最新计费日志中的 `other.group_ratio`。
 
 无法匹配模板时不会猜测，也不会修改倍率。NewAPI 渠道至少需要产生一条已计费的真实请求日志；日志会直接给出本次计费使用的价格组，避免把覆盖模型较多的高价组误判成当前组。每轮若无法读取或解析实时计费日志、日志倍率缺失，或日志中的价格组不在当前价格表中，本地倍率保持不动，并明确记录为同步失败；不会使用旧状态冒充本轮检查成功。分组 worker 不执行上游价格探测；以后遇到第三种稳定价格 API，只需在账户模式代码中新增一个模板适配器，无需扩展每渠道配置。

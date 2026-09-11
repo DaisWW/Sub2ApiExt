@@ -20,12 +20,13 @@ const (
 )
 
 type fileConfig struct {
-	Sub2APIURL         string             `json:"sub2api_url"`
-	ProxyURL           string             `json:"proxy_url"`
-	ProxyFallbackURLs  []string           `json:"proxy_fallback_urls"`
-	Interval           string             `json:"interval"`
-	SyncTarget         string             `json:"sync_target"`
-	SyncHosts          []string           `json:"sync_hosts"`
+	Sub2APIURL        string   `json:"sub2api_url"`
+	ProxyURL          string   `json:"proxy_url"`
+	ProxyFallbackURLs []string `json:"proxy_fallback_urls"`
+	Interval          string   `json:"interval"`
+	SyncTarget        string   `json:"sync_target"`
+	SyncHosts         []string `json:"sync_hosts"`
+	// UsageBootstrap is accepted for compatibility with deployed account configs.
 	UsageBootstrap     bool               `json:"usage_bootstrap"`
 	HistoryWindow      string             `json:"history_window"`
 	MinHistoryCostUSD  float64            `json:"min_history_cost_usd"`
@@ -48,7 +49,6 @@ type Config struct {
 	SyncTarget        string
 	// SyncHosts lists hosts with an explicit coefficient, derived from upstream_factors or legacy sync_hosts.
 	SyncHosts         map[string]struct{}
-	UsageBootstrap    bool
 	HistoryWindow     time.Duration
 	MinHistoryCostUSD float64
 	DryRun            bool
@@ -121,7 +121,6 @@ func normalizeFileConfig(raw fileConfig) (*Config, error) {
 		Interval:            interval,
 		SyncTarget:          raw.SyncTarget,
 		SyncHosts:           syncHosts,
-		UsageBootstrap:      raw.UsageBootstrap,
 		HistoryWindow:       historyWindow,
 		MinHistoryCostUSD:   raw.MinHistoryCostUSD,
 		DryRun:              raw.DryRun,

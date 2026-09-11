@@ -31,19 +31,8 @@ func (s *Syncer) localRate(channel *Channel) float64 {
 	return channel.Group.RateMultiplier
 }
 
-func (s *Syncer) usageBootstrapAllowed(localRate float64) bool {
-	return s.syncTarget() == "account" &&
-		s.config != nil &&
-		s.config.UsageBootstrap &&
-		almostEqual(localRate, 1)
-}
-
-func (s *Syncer) cumulativeUsageRate(current upstreamToday) (float64, bool) {
-	minimumCost := 0.01
-	if s.config != nil && s.config.MinHistoryCostUSD > 0 {
-		minimumCost = s.config.MinHistoryCostUSD
-	}
-	if current.Cost < minimumCost || current.ActualCost <= 0 {
+func cumulativeUsageRate(current upstreamToday) (float64, bool) {
+	if current.Cost <= 0 || current.ActualCost <= 0 {
 		return 0, false
 	}
 	rate := round4(current.ActualCost / current.Cost)
@@ -63,7 +52,10 @@ func (s *Syncer) observeUsage(name string, state *RuleState, current upstreamTod
 	if usageCounterRegressed(state, current) {
 		state.resetCandidate()
 		setBaseline(state, day, current)
-		s.logger.Printf("[%s] 上游累计值下降，已重置基线并停止使用旧候选倍率；当前本地使用倍率 %.4f", name, localRate)
+		if s.observeCumulativeUsage(name, state, current, "上游累计值下降，已重置用量基线") {
+			return
+		}
+		s.logger.Printf("[%s] 上游累计值下降，已重置用量基线；当前本地使用倍率 %.4f，等待有效请求成本", name, localRate)
 		return
 	}
 
@@ -71,10 +63,16 @@ func (s *Syncer) observeUsage(name string, state *RuleState, current upstreamTod
 	deltaActual := current.ActualCost - state.ActualCost
 	setBaseline(state, day, current)
 	if deltaCost <= 1e-12 {
-		s.observeWithoutNewUsage(name, state, current, localRate)
+		if s.observeCumulativeUsage(name, state, current, "无新增用量") {
+			return
+		}
+		s.logger.Printf("[%s] 检查成功: 无新增用量，当前本地使用倍率 %.4f，等待有效请求成本", name, localRate)
 		return
 	}
 	if deltaActual <= 0 {
+		if s.observeCumulativeUsage(name, state, current, "新增用量尚未产生实际成本") {
+			return
+		}
 		state.resetCandidate()
 		s.logger.Printf("[%s] 新用量无法计算出正倍率，本轮跳过；当前本地使用倍率 %.4f", name, localRate)
 		return
@@ -85,47 +83,36 @@ func (s *Syncer) observeUsage(name string, state *RuleState, current upstreamTod
 func (s *Syncer) initializeUsageBaseline(name string, state *RuleState, current upstreamToday, localRate float64, day string) {
 	state.resetCandidate()
 	setBaseline(state, day, current)
-	if s.usageBootstrapAllowed(localRate) {
-		if upstreamRate, ok := s.cumulativeUsageRate(current); ok {
-			s.observeRate(name, state, upstreamRate)
-			s.logger.Printf("[%s] 已建立上游用量基线，并从累计用量估算倍率 %.4f；等待再次确认", name, upstreamRate)
-			return
-		}
+	if s.observeCumulativeUsage(name, state, current, "已建立上游用量基线") {
+		return
 	}
-	s.logger.Printf("[%s] 已建立上游用量基线，当前本地使用倍率 %.4f，等待下一段新用量", name, localRate)
+	s.logger.Printf("[%s] 已建立上游用量基线，当前本地使用倍率 %.4f，等待有效请求成本", name, localRate)
 }
 
 func (s *Syncer) resetUsageBaseline(name string, state *RuleState, current upstreamToday, localRate float64, day string) {
 	state.resetCandidate()
 	setBaseline(state, day, current)
-	s.logger.Printf("[%s] 日期已变化，已重置用量基线；当前本地使用倍率 %.4f", name, localRate)
+	if s.observeCumulativeUsage(name, state, current, "日期已变化，已重置用量基线") {
+		return
+	}
+	s.logger.Printf("[%s] 日期已变化，已重置用量基线；当前本地使用倍率 %.4f，等待有效请求成本", name, localRate)
 }
 
 func usageCounterRegressed(state *RuleState, current upstreamToday) bool {
 	return current.Cost < state.Cost || current.ActualCost < state.ActualCost
 }
 
-func (s *Syncer) observeWithoutNewUsage(name string, state *RuleState, current upstreamToday, localRate float64) {
-	if s.usageBootstrapAllowed(localRate) {
-		if upstreamRate, ok := s.cumulativeUsageRate(current); ok {
-			s.observeRate(name, state, upstreamRate)
-			s.logger.Printf(
-				"[%s] 无新增用量，使用累计用量估算上游倍率 %.4f（确认 %d/%d）",
-				name, upstreamRate, state.CandidateCount, s.config.Confirmations,
-			)
-			return
-		}
+func (s *Syncer) observeCumulativeUsage(name string, state *RuleState, current upstreamToday, reason string) bool {
+	upstreamRate, ok := cumulativeUsageRate(current)
+	if !ok {
+		return false
 	}
-	if state.CandidateCount == 0 {
-		s.logger.Printf("[%s] 检查成功: 无新增用量，当前本地使用倍率 %.4f，等待可计算价格", name, localRate)
-		return
-	}
-	if state.CandidateCount < s.config.Confirmations {
-		s.logger.Printf(
-			"[%s] 检查成功: 无新增用量，当前本地使用倍率 %.4f，候选上游倍率 %.4f（确认 %d/%d）",
-			name, localRate, state.CandidateUpstreamRate, state.CandidateCount, s.config.Confirmations,
-		)
-	}
+	s.observeRate(name, state, upstreamRate)
+	s.logger.Printf(
+		"[%s] %s，使用累计请求成本计算上游倍率 %.4f（确认 %d/%d）",
+		name, reason, upstreamRate, state.CandidateCount, s.config.Confirmations,
+	)
+	return true
 }
 
 func (s *Syncer) observeDeltaRate(name string, state *RuleState, rawRate, localRate float64) {

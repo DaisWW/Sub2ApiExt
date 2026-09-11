@@ -107,6 +107,8 @@ func TestSyncerDiscoversUsageTemplateAndAppliesFactor(t *testing.T) {
 	}))
 	defer upstream.Close()
 
+	channel := testChannel(upstream.URL, 0.1)
+	source := &staticChannelSource{channels: []Channel{channel}}
 	var updated accountUpdate
 	putCount := 0
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -119,13 +121,12 @@ func TestSyncerDiscoversUsageTemplateAndAppliesFactor(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
 			t.Errorf("decode update: %v", err)
 		}
+		source.channels[0].AccountRateMultiplier = updated.RateMultiplier
 		putCount++
 		writeJSON(t, w, map[string]any{"code": 0})
 	}))
 	defer admin.Close()
 
-	channel := testChannel(upstream.URL, 0.1)
-	source := &staticChannelSource{channels: []Channel{channel}}
 	syncer := newTestSyncer(t, source, admin.URL, false, 2, upstream.URL, 0.85)
 	syncer.config.SyncTarget = "account"
 	var output bytes.Buffer
@@ -188,6 +189,7 @@ func TestAccountTargetUpdatesAccountRateWithoutUpdatingGroup(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
 				t.Errorf("decode account update: %v", err)
 			}
+			source.channels[0].AccountRateMultiplier = updated.RateMultiplier
 			accountPuts++
 		case "/api/v1/admin/groups/24":
 			groupPuts++
@@ -212,14 +214,14 @@ func TestAccountTargetUpdatesAccountRateWithoutUpdatingGroup(t *testing.T) {
 	}
 }
 
-func TestAccountTargetBootstrapsIdleUsageAccount(t *testing.T) {
+func TestAccountTargetUsesFirstValidUsageWithoutBootstrap(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/pricing":
 			w.WriteHeader(http.StatusNotFound)
 		case "/v1/usage":
 			writeJSON(t, w, map[string]any{
-				"usage": map[string]any{"today": upstreamToday{Cost: 10, ActualCost: 1}},
+				"usage": map[string]any{"today": upstreamToday{Cost: 0.001, ActualCost: 0.0001}},
 			})
 		default:
 			t.Errorf("unexpected upstream URL: %s", r.URL)
@@ -228,7 +230,7 @@ func TestAccountTargetBootstrapsIdleUsageAccount(t *testing.T) {
 	defer upstream.Close()
 
 	channel := testChannel(upstream.URL, 0.08)
-	channel.AccountRateMultiplier = 1.0
+	channel.AccountRateMultiplier = 0.25
 	source := &staticChannelSource{channels: []Channel{channel}}
 	var updated accountUpdate
 	accountPuts := 0
@@ -244,23 +246,20 @@ func TestAccountTargetBootstrapsIdleUsageAccount(t *testing.T) {
 	}))
 	defer admin.Close()
 
-	syncer := newTestSyncer(t, source, admin.URL, false, 2, upstream.URL, 0.85)
+	syncer := newTestSyncer(t, source, admin.URL, false, 1, upstream.URL, 0.85)
 	syncer.config.SyncTarget = "account"
-	syncer.config.UsageBootstrap = true
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
-	for i := 0; i < 2; i++ {
-		if err := syncer.RunOnce(context.Background(), now.Add(time.Duration(i)*15*time.Minute)); err != nil {
-			t.Fatal(err)
-		}
+	if err := syncer.RunOnce(context.Background(), now); err != nil {
+		t.Fatal(err)
 	}
 
 	if accountPuts != 1 || updated.RateMultiplier != 0.085 {
 		t.Fatalf("account puts=%d updated=%+v", accountPuts, updated)
 	}
-	if !strings.Contains(output.String(), "累计用量估算") {
-		t.Fatalf("missing cumulative bootstrap log:\n%s", output.String())
+	if !strings.Contains(output.String(), "累计请求成本计算") {
+		t.Fatalf("missing cumulative usage log:\n%s", output.String())
 	}
 }
 
@@ -311,6 +310,14 @@ func TestAccountTargetSyncsUnlistedHostsWithDefaultFactor(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decode account update: %v", err)
 			return
+		}
+		switch r.URL.Path {
+		case "/api/v1/admin/accounts/18":
+			source.channels[0].AccountRateMultiplier = payload.RateMultiplier
+		case "/api/v1/admin/accounts/19":
+			source.channels[1].AccountRateMultiplier = payload.RateMultiplier
+		default:
+			t.Errorf("unexpected admin path: %s", r.URL.Path)
 		}
 		updates <- payload.RateMultiplier
 		writeJSON(t, w, map[string]any{"code": 0})
@@ -386,8 +393,8 @@ func TestUsageTemplateLogsCurrentLocalRateWithoutNewUsage(t *testing.T) {
 	if err := syncer.RunOnce(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "无新增用量，当前本地使用倍率 0.0510") {
-		t.Fatalf("current local rate was not logged:\n%s", output.String())
+	if !strings.Contains(output.String(), "无新增用量，使用累计请求成本计算上游倍率 0.0600") {
+		t.Fatalf("cumulative usage rate was not logged:\n%s", output.String())
 	}
 }
 
@@ -839,6 +846,61 @@ func TestNewAPIPricingFailsWithoutLiveBillingLog(t *testing.T) {
 	}
 }
 
+func TestNewAPIUnavailableClearsOldConfirmation(t *testing.T) {
+	directAvailable := true
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pricing":
+			if !directAvailable {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			writeJSON(t, w, groupRatioResponse{Success: true, GroupRatio: map[string]float64{"gptplus": 0.1}})
+		case "/api/log/token":
+			writeJSON(t, w, newAPITokenLogResponse{
+				Success: true,
+				Data:    []newAPITokenLog{{ID: 1, CreatedAt: 100, Type: newAPIConsumeLogType, Group: "gptplus"}},
+			})
+		case "/v1/usage":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	putCount := 0
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		putCount++
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	channel := testChannel(upstream.URL, 0.5)
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 2, "", 1)
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	if err := syncer.RunOnce(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+
+	directAvailable = false
+	if err := syncer.RunOnce(context.Background(), now.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	state := syncer.state.Rules["account:18"]
+	if putCount != 0 || state.Template != templateNewAPIRatio || state.CandidateUpstreamRate != 0 || state.CandidateCount != 0 {
+		t.Fatalf("unavailable direct rate retained old confirmation, puts=%d state=%+v", putCount, state)
+	}
+
+	directAvailable = true
+	if err := syncer.RunOnce(context.Background(), now.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if putCount != 0 || state.CandidateUpstreamRate != 0.1 || state.CandidateCount != 1 {
+		t.Fatalf("recovered direct rate reused old confirmation, puts=%d state=%+v", putCount, state)
+	}
+}
+
 func TestAccountTemplateRefreshPreservesUsageEvidence(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1042,6 +1104,99 @@ func TestNewAPIPricingDoesNotGuessWithoutBillingLog(t *testing.T) {
 	if modelCalls != 0 || !strings.Contains(output.String(), "尚无已计费的真实请求日志") ||
 		!strings.Contains(output.String(), "检查正常=0 暂不自动=0 失败=1") {
 		t.Fatalf("unsafe fallback used, modelCalls=%d:\n%s", modelCalls, output.String())
+	}
+}
+
+func TestAccountTargetFallsBackToUsageWhenDirectRateUnavailable(t *testing.T) {
+	pricingCalls := 0
+	logCalls := 0
+	usageCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pricing":
+			pricingCalls++
+			writeJSON(t, w, groupRatioResponse{Success: true, GroupRatio: map[string]float64{"gptplus": 0.2}})
+		case "/api/log/token":
+			logCalls++
+			w.WriteHeader(http.StatusTooManyRequests)
+		case "/v1/usage":
+			usageCalls++
+			writeJSON(t, w, map[string]any{"usage": map[string]any{"today": upstreamToday{Cost: 0.001, ActualCost: 0.0001}}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	updatedRate := 0.0
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload accountUpdate
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updatedRate = payload.RateMultiplier
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	channel := testChannel(upstream.URL, 0.2)
+	channel.AccountRateMultiplier = 0.5
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, upstream.URL, 0.9)
+	var output bytes.Buffer
+	syncer.logger = log.New(&output, "", 0)
+
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	state := syncer.state.Rules["account:18"]
+	if pricingCalls != 1 || logCalls != 1 || usageCalls != 1 || updatedRate != 0.09 ||
+		state.Template != templateUsageRatio || state.CandidateUpstreamRate != 0.1 {
+		t.Fatalf("pricing=%d log=%d usage=%d rate=%.4f state=%+v", pricingCalls, logCalls, usageCalls, updatedRate, state)
+	}
+	if !strings.Contains(output.String(), "上游直接倍率不可用，改用请求成本计算") {
+		t.Fatalf("missing fallback log:\n%s", output.String())
+	}
+}
+
+func TestAccountTargetPrefersDirectRateOverUsageCalculation(t *testing.T) {
+	usageCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pricing":
+			writeJSON(t, w, groupRatioResponse{Success: true, GroupRatio: map[string]float64{"gptplus": 0.2}})
+		case "/api/log/token":
+			writeJSON(t, w, newAPITokenLogResponse{
+				Success: true,
+				Data:    []newAPITokenLog{{ID: 1, CreatedAt: 100, Type: newAPIConsumeLogType, Group: "gptplus"}},
+			})
+		case "/v1/usage":
+			usageCalls++
+			writeJSON(t, w, map[string]any{"usage": map[string]any{"today": upstreamToday{Cost: 1, ActualCost: 0.05}}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	updatedRate := 0.0
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload accountUpdate
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updatedRate = payload.RateMultiplier
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+
+	channel := testChannel(upstream.URL, 0.5)
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: []Channel{channel}}, admin.URL, false, 1, upstream.URL, 0.9)
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	state := syncer.state.Rules["account:18"]
+	if usageCalls != 0 || updatedRate != 0.18 || state.Template != templateNewAPIRatio || state.CandidateUpstreamRate != 0.2 {
+		t.Fatalf("usage=%d rate=%.4f state=%+v", usageCalls, updatedRate, state)
 	}
 }
 
@@ -1452,6 +1607,21 @@ func TestObserveDoesNotCountPastConfirmations(t *testing.T) {
 	}
 }
 
+func TestObserveUsageUsesCumulativeRateWhenNewUsageHasNoActualCost(t *testing.T) {
+	syncer := &Syncer{config: &Config{Confirmations: 2}, logger: log.New(io.Discard, "", 0)}
+	state := &RuleState{
+		Day:         "2026-07-28",
+		Cost:        10,
+		ActualCost:  1,
+		HasBaseline: true,
+	}
+
+	syncer.observeUsage("test", state, upstreamToday{Cost: 11, ActualCost: 1}, 0.1, time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC))
+	if state.Cost != 11 || state.ActualCost != 1 || state.CandidateUpstreamRate != 0.0909 || state.CandidateCount != 1 {
+		t.Fatalf("cumulative usage candidate was not retained: %+v", state)
+	}
+}
+
 func TestRateChangeSignificantUsesAbsoluteAndRelativeThresholds(t *testing.T) {
 	if rateChangeSignificant(0.2, 0.201) {
 		t.Fatal("small absolute and relative change should be ignored")
@@ -1477,8 +1647,8 @@ func TestObserveUsageDropsCandidateOnDayChange(t *testing.T) {
 
 	syncer.observeUsage("test", state, upstreamToday{Cost: 2, ActualCost: 0.2}, 0.1, time.Date(2026, 7, 29, 0, 1, 0, 0, time.UTC))
 	if state.Day != "2026-07-29" || state.Cost != 2 || state.ActualCost != 0.2 || !state.HasBaseline ||
-		state.CandidateUpstreamRate != 0 || state.CandidateCount != 0 {
-		t.Fatalf("previous-day candidate was preserved: %+v", state)
+		state.CandidateUpstreamRate != 0.1 || state.CandidateCount != 1 {
+		t.Fatalf("new-day usage candidate was not rebuilt: %+v", state)
 	}
 }
 

@@ -2,7 +2,6 @@
   "interval": "900s",
   "sync_target": "account",
   "confirmations": 1,
-  "usage_bootstrap": true,
   "upstream_factors": {
     "lucen.cc": 0.9,
     "xixiapi.io": 0.9,

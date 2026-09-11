@@ -90,7 +90,7 @@ func TestLoadConfigAllowsOptionalRuntimeSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.ProxyURL != "http://host.docker.internal:7897" || len(config.ProxyFallbackURLs) != 1 || config.ProxyFallbackURLs[0] != "http://host.docker.internal:7890" || config.Interval != 90*time.Second || config.Confirmations != 3 || !config.DryRun || config.SyncTarget != "account" || !config.UsageBootstrap {
+	if config.ProxyURL != "http://host.docker.internal:7897" || len(config.ProxyFallbackURLs) != 1 || config.ProxyFallbackURLs[0] != "http://host.docker.internal:7890" || config.Interval != 90*time.Second || config.Confirmations != 3 || !config.DryRun || config.SyncTarget != "account" {
 		t.Fatalf("unexpected config: %+v", config)
 	}
 	if !config.syncHostsConfigured {
