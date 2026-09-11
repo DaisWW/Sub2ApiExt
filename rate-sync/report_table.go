@@ -102,7 +102,6 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 		name          string
 		rate          float64
 		previousRate  float64
-		hasPrevious   bool
 		expectedRate  float64
 		hasExpected   bool
 		proxies       []string
@@ -123,7 +122,6 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 				name:         row.accountName,
 				rate:         row.accountRate,
 				previousRate: row.previousRate,
-				hasPrevious:  row.hasPrevious,
 			}
 			summaries[row.accountID] = summary
 			order = append(order, row.accountID)
@@ -147,7 +145,7 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 				tableCell(summary.name),
 				fmt.Sprintf("%.4f", summary.rate),
 				accountExpectedRateLabel(summary.expectedRate, summary.hasExpected),
-				tableCell(accountResultLabel(summary.statuses, summary.accountSource, summary.previousRate, summary.hasPrevious)),
+				tableCell(accountResultLabel(summary.statuses, summary.accountSource, summary.previousRate)),
 				tableCell(strings.Join(summary.proxies, ", ")),
 			},
 		})
@@ -162,7 +160,7 @@ func accountExpectedRateLabel(rate float64, ok bool) string {
 	return fmt.Sprintf("%.4f", rate)
 }
 
-func accountResultLabel(statuses, sources []string, previousRate float64, hasPrevious bool) string {
+func accountResultLabel(statuses, sources []string, previousRate float64) string {
 	parts := make([]string, 0, 3)
 	if result := strings.Join(statuses, "、"); result != "" {
 		parts = append(parts, result)
@@ -170,7 +168,7 @@ func accountResultLabel(statuses, sources []string, previousRate float64, hasPre
 	if len(sources) > 0 {
 		parts = append(parts, strings.Join(sources, "、"))
 	}
-	if hasPrevious && accountResultShowsPrevious(statuses) {
+	if accountResultShowsPrevious(statuses) {
 		parts = append(parts, fmt.Sprintf("原 %.4f", previousRate))
 	}
 	return strings.Join(parts, "｜")

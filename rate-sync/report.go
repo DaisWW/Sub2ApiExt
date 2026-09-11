@@ -34,7 +34,6 @@ type syncReportRow struct {
 	groupName     string
 	accountRate   float64
 	previousRate  float64
-	hasPrevious   bool
 	expectedRate  float64
 	hasExpected   bool
 	groupRate     float64
@@ -65,7 +64,6 @@ func newSyncReport(target string, channels []Channel) *syncReport {
 			groupName:    strings.TrimSpace(channel.Group.Name),
 			accountRate:  channel.AccountRateMultiplier,
 			previousRate: channel.AccountRateMultiplier,
-			hasPrevious:  true,
 			groupRate:    channel.Group.RateMultiplier,
 			proxy:        proxyLabel(channel.ProxyURL),
 			status:       reportStatusPending,
