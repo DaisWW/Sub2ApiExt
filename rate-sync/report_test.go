@@ -66,8 +66,21 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	if !strings.Contains(output, "稳定（上游同步）") || !strings.Contains(output, "已更新（请求计算）") {
 		t.Fatalf("account table should show the rate source in the result: %s", output)
 	}
-	if strings.Contains(strings.SplitN(output, "\n", 2)[0], "方式") {
-		t.Fatalf("account table should keep the source inside the result column: %s", output)
+	lines := strings.Split(output, "\n")
+	resultStart := tableColumnDisplayStart(lines[0], "结果")
+	proxyStart := tableColumnDisplayStart(lines[0], "代理")
+	for _, source := range []string{"上游同步", "请求计算"} {
+		var row string
+		for _, line := range lines[2:] {
+			if strings.Contains(line, source) {
+				row = line
+				break
+			}
+		}
+		sourceStart := tableColumnDisplayStart(row, source)
+		if resultStart < 0 || proxyStart <= resultStart || sourceStart < resultStart || sourceStart >= proxyStart {
+			t.Fatalf("rate source %q is outside the result column:\n%s", source, output)
+		}
 	}
 }
 
