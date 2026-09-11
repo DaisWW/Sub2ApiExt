@@ -29,6 +29,7 @@ type channelCheckPlan struct {
 	loggedGroups     map[int64]bool
 	loggedAccounts   map[int64]bool
 	seenAccounts     map[int64]bool
+	accountFailures  map[int64]int
 }
 
 func newChannelCheckPlan(target string, channels []Channel, handledGroups map[int64]bool) *channelCheckPlan {
@@ -40,6 +41,7 @@ func newChannelCheckPlan(target string, channels []Channel, handledGroups map[in
 		loggedGroups:     make(map[int64]bool),
 		loggedAccounts:   make(map[int64]bool),
 		seenAccounts:     make(map[int64]bool),
+		accountFailures:  make(map[int64]int),
 	}
 	for groupID, binding := range buildGroupBindings(channels) {
 		plan.groupAccountNums[groupID] = len(binding.accounts)
@@ -76,10 +78,16 @@ func (p *channelCheckPlan) admitAccountHost(s *Syncer, channel *Channel, report 
 	}
 	discount, _, err := s.config.rechargeDiscountForBaseURL(channel.BaseURL)
 	if err != nil {
+		p.accountFailures[channel.AccountID]++
 		stats.failed++
 		report.markChannel(channel, reportStatusFailed)
 		s.logger.Printf("[%s] 同步失败: %v", channelLabel(channel), err)
 		return false
+	}
+	if failures := p.accountFailures[channel.AccountID]; failures > 0 {
+		stats.failed -= failures
+		delete(p.accountFailures, channel.AccountID)
+		report.resetAccountStatus(channel.AccountID)
 	}
 	report.setAccountRechargeDiscount(channel.AccountID, discount)
 	return true

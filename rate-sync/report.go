@@ -93,6 +93,20 @@ func (r *syncReport) markAccount(accountID int64, status string) {
 	}, status)
 }
 
+func (r *syncReport) resetAccountStatus(accountID int64) {
+	if r == nil || r.target != "account" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := fmt.Sprintf("account:%d/", accountID)
+	for _, row := range r.rows {
+		if strings.HasPrefix(row.key, prefix) {
+			row.status = reportStatusPending
+		}
+	}
+}
+
 func (r *syncReport) markGroup(groupID int64, status string) {
 	suffix := fmt.Sprintf("/group:%d", groupID)
 	r.mark(func(row *syncReportRow) bool {

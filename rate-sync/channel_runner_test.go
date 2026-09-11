@@ -157,4 +157,14 @@ func TestInvalidFirstAccountChannelCanBeReplacedByValidChannel(t *testing.T) {
 	if got := report.rows["account:18/group:24"].rechargeDiscount; got != 0.9 {
 		t.Fatalf("replacement channel did not set recharge discount: %.4f", got)
 	}
+	if stats.failed != 0 {
+		t.Fatalf("replaced admission failure remained in stats: %+v", stats)
+	}
+	if got := report.rows["account:18/group:24"].status; got != reportStatusPending {
+		t.Fatalf("replaced admission failure remained in report: %q", got)
+	}
+	report.markAccount(second.AccountID, reportStatusUpdated)
+	if got := report.rows["account:18/group:24"].status; got != reportStatusUpdated {
+		t.Fatalf("replacement channel did not determine final status: %q", got)
+	}
 }
