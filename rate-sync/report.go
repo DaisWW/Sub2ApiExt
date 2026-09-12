@@ -28,24 +28,25 @@ type syncReport struct {
 }
 
 type syncReportRow struct {
-	key              string
-	accountID        int64
-	groupID          int64
-	accountName      string
-	groupName        string
-	accountRate      float64
-	previousRate     float64
-	upstreamRate     float64
-	hasUpstream      bool
-	expectedRate     float64
-	hasExpected      bool
-	rechargeDiscount float64
-	groupRate        float64
-	proxy            string
-	status           string
-	accountSource    string
-	window           string
-	detail           string
+	key                 string
+	accountID           int64
+	groupID             int64
+	accountName         string
+	groupName           string
+	accountRate         float64
+	previousRate        float64
+	upstreamRate        float64
+	hasUpstream         bool
+	expectedRate        float64
+	hasExpected         bool
+	rechargeDiscount    float64
+	hasRechargeDiscount bool
+	groupRate           float64
+	proxy               string
+	status              string
+	accountSource       string
+	window              string
+	detail              string
 }
 
 func newSyncReport(target string, channels []Channel) *syncReport {
@@ -183,6 +184,7 @@ func (r *syncReport) setAccountRechargeDiscount(accountID int64, discount float6
 	for _, row := range r.rows {
 		if strings.HasPrefix(row.key, prefix) {
 			row.rechargeDiscount = discount
+			row.hasRechargeDiscount = true
 		}
 	}
 }

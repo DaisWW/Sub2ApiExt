@@ -99,17 +99,18 @@ func (r *syncReport) groupSummaryRows(keys []string) ([]string, []reportTableRow
 
 func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableRow) {
 	type accountSummary struct {
-		name             string
-		rate             float64
-		previousRate     float64
-		upstreamRate     float64
-		hasUpstream      bool
-		expectedRate     float64
-		hasExpected      bool
-		rechargeDiscount float64
-		proxies          []string
-		statuses         []string
-		accountSource    []string
+		name                string
+		rate                float64
+		previousRate        float64
+		upstreamRate        float64
+		hasUpstream         bool
+		expectedRate        float64
+		hasExpected         bool
+		rechargeDiscount    float64
+		hasRechargeDiscount bool
+		proxies             []string
+		statuses            []string
+		accountSource       []string
 	}
 
 	summaries := make(map[int64]*accountSummary)
@@ -122,10 +123,11 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 		summary := summaries[row.accountID]
 		if summary == nil {
 			summary = &accountSummary{
-				name:             row.accountName,
-				rate:             row.accountRate,
-				previousRate:     row.previousRate,
-				rechargeDiscount: row.rechargeDiscount,
+				name:                row.accountName,
+				rate:                row.accountRate,
+				previousRate:        row.previousRate,
+				rechargeDiscount:    row.rechargeDiscount,
+				hasRechargeDiscount: row.hasRechargeDiscount,
 			}
 			summaries[row.accountID] = summary
 			order = append(order, row.accountID)
@@ -137,6 +139,10 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 		if !summary.hasUpstream && row.hasUpstream {
 			summary.upstreamRate = row.upstreamRate
 			summary.hasUpstream = true
+		}
+		if !summary.hasRechargeDiscount && row.hasRechargeDiscount {
+			summary.rechargeDiscount = row.rechargeDiscount
+			summary.hasRechargeDiscount = true
 		}
 		summary.proxies = appendUnique(summary.proxies, row.proxy)
 		summary.statuses = appendUnique(summary.statuses, row.status)
@@ -153,7 +159,7 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 				tableCell(summary.name),
 				fmt.Sprintf("%.4f", summary.rate),
 				accountRateLabel(summary.upstreamRate, summary.hasUpstream),
-				fmt.Sprintf("%.4f", summary.rechargeDiscount),
+				accountRateLabel(summary.rechargeDiscount, summary.hasRechargeDiscount),
 				accountRateLabel(summary.expectedRate, summary.hasExpected),
 				tableCell(accountResultLabel(summary.statuses, summary.accountSource, summary.previousRate)),
 				tableCell(strings.Join(summary.proxies, ", ")),

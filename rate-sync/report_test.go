@@ -145,6 +145,24 @@ func TestSyncReportAccountTableShowsDashWithoutCandidate(t *testing.T) {
 	}
 }
 
+func TestSyncReportAccountTableShowsDashForUnresolvedDiscount(t *testing.T) {
+	channel := testChannel("not-a-url", 0.1)
+	report := newSyncReport("account", []Channel{channel})
+	report.markAccount(channel.AccountID, reportStatusFailed)
+
+	lines := report.tableLines()
+	if len(lines) != 3 {
+		t.Fatalf("expected one account row: %s", strings.Join(lines, "\n"))
+	}
+	discountStart := tableColumnDisplayStart(lines[0], "充值折扣")
+	if discountStart < 0 || tableColumnDisplayStart(lines[2], "-") < 0 {
+		t.Fatalf("unresolved discount should be shown as dash: %s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(lines[2], "1.0000") {
+		t.Fatalf("unresolved discount must not look like default 1.0000: %s", lines[2])
+	}
+}
+
 func TestSyncReportAccountTableDistinguishesRateSources(t *testing.T) {
 	probe := testChannel("https://probe.example", 0.1)
 	probe.AccountName = "自动探测账号"
