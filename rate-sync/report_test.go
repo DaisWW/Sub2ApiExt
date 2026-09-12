@@ -60,10 +60,12 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	report := newSyncReport("account", []Channel{upstream, calculated})
 	report.setAccountSource(upstream.AccountID, reportAccountSourceUpstream)
 	report.setAccountSource(calculated.AccountID, reportAccountSourceUsage)
+	report.setAccountUpstreamRate(upstream.AccountID, 0.1234)
+	report.setAccountUpstreamRate(calculated.AccountID, 0.2345)
 	report.setAccountRechargeDiscount(upstream.AccountID, 0.9)
-	report.setAccountRechargeDiscount(calculated.AccountID, 1.0)
-	report.setAccountExpectedRate(upstream.AccountID, 0.1)
-	report.setAccountExpectedRate(calculated.AccountID, 0.18)
+	report.setAccountRechargeDiscount(calculated.AccountID, 0.95)
+	report.setAccountExpectedRate(upstream.AccountID, 0.1111)
+	report.setAccountExpectedRate(calculated.AccountID, 0.2228)
 	report.markAccount(upstream.AccountID, reportStatusStable)
 	report.markAccount(calculated.AccountID, reportStatusUpdated)
 	report.updateAccountRate(calculated.AccountID, 0.18)
@@ -72,8 +74,13 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	if !strings.Contains(output, "稳定｜上游同步") || !strings.Contains(output, "已更新｜请求计算｜原 0.1000") {
 		t.Fatalf("account table should show the rate source in the result: %s", output)
 	}
-	if !strings.Contains(output, "预期倍率") || !strings.Contains(output, "0.1800") {
-		t.Fatalf("account table should show the expected rate: %s", output)
+	for _, header := range []string{"当前倍率", "上游倍率", "充值折扣", "预期倍率"} {
+		if !strings.Contains(output, header) {
+			t.Fatalf("account table should show the %s column: %s", header, output)
+		}
+	}
+	if !strings.Contains(output, "0.2228") || !strings.Contains(output, "0.1234") || !strings.Contains(output, "0.2345") {
+		t.Fatalf("account table should show upstream and expected rates: %s", output)
 	}
 	if !strings.Contains(output, "充值折扣") || !strings.Contains(output, "0.9000") {
 		t.Fatalf("account table should show the configured recharge discount: %s", output)
@@ -81,20 +88,32 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 	lines := strings.Split(output, "\n")
 	resultStart := tableColumnDisplayStart(lines[0], "结果")
 	discountStart := tableColumnDisplayStart(lines[0], "充值折扣")
+	upstreamStart := tableColumnDisplayStart(lines[0], "上游倍率")
+	expectedStart := tableColumnDisplayStart(lines[0], "预期倍率")
 	proxyStart := tableColumnDisplayStart(lines[0], "代理")
-	if discountStart < 0 {
-		t.Fatalf("recharge discount column is missing: %s", output)
+	if upstreamStart < 0 || discountStart < 0 || expectedStart < 0 {
+		t.Fatalf("account rate columns are missing: %s", output)
 	}
-	for _, value := range []string{"0.9000", "1.0000"} {
+	for _, check := range []struct {
+		value string
+		start int
+	}{
+		{value: "0.1234", start: upstreamStart},
+		{value: "0.2345", start: upstreamStart},
+		{value: "0.9000", start: discountStart},
+		{value: "0.9500", start: discountStart},
+		{value: "0.1111", start: expectedStart},
+		{value: "0.2228", start: expectedStart},
+	} {
 		var row string
 		for _, line := range lines[2:] {
-			if strings.Contains(line, value) {
+			if strings.Contains(line, check.value) {
 				row = line
 				break
 			}
 		}
-		if tableColumnDisplayStart(row, value) != discountStart {
-			t.Fatalf("recharge discount %q is not aligned:\n%s", value, output)
+		if tableColumnDisplayStart(row, check.value) != check.start {
+			t.Fatalf("account value %q is not aligned:\n%s", check.value, output)
 		}
 	}
 	for _, source := range []string{"上游同步", "请求计算"} {
@@ -109,6 +128,20 @@ func TestSyncReportAccountTableShowsRateSource(t *testing.T) {
 		if resultStart < 0 || proxyStart <= resultStart || sourceStart < resultStart || sourceStart >= proxyStart {
 			t.Fatalf("rate source %q is outside the result column:\n%s", source, output)
 		}
+	}
+}
+
+func TestSyncReportAccountTableShowsDashWithoutCandidate(t *testing.T) {
+	channel := testChannel("https://upstream.example", 0.1)
+	report := newSyncReport("account", []Channel{channel})
+	report.markAccount(channel.AccountID, reportStatusChecked)
+
+	lines := report.tableLines()
+	if len(lines) != 3 {
+		t.Fatalf("expected one account row: %s", strings.Join(lines, "\n"))
+	}
+	if strings.Count(lines[2], "-") < 2 {
+		t.Fatalf("missing dash for unavailable upstream and expected rates: %s", lines[2])
 	}
 }
 

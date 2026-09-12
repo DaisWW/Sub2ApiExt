@@ -179,6 +179,7 @@ func (s *Syncer) applyCandidate(ctx context.Context, channel *Channel, state *Ru
 	if err != nil {
 		return err
 	}
+	report.setAccountUpstreamRate(channel.AccountID, state.CandidateUpstreamRate)
 	report.setAccountExpectedRate(channel.AccountID, finalRate)
 	currentRate := channel.AccountRateMultiplier
 	if almostEqual(currentRate, finalRate) {

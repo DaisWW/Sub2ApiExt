@@ -102,6 +102,8 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 		name             string
 		rate             float64
 		previousRate     float64
+		upstreamRate     float64
+		hasUpstream      bool
 		expectedRate     float64
 		hasExpected      bool
 		rechargeDiscount float64
@@ -132,6 +134,10 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 			summary.expectedRate = row.expectedRate
 			summary.hasExpected = true
 		}
+		if !summary.hasUpstream && row.hasUpstream {
+			summary.upstreamRate = row.upstreamRate
+			summary.hasUpstream = true
+		}
 		summary.proxies = appendUnique(summary.proxies, row.proxy)
 		summary.statuses = appendUnique(summary.statuses, row.status)
 		if row.accountSource != "" {
@@ -146,17 +152,18 @@ func (r *syncReport) accountSummaryRows(keys []string) ([]string, []reportTableR
 			cells: []string{
 				tableCell(summary.name),
 				fmt.Sprintf("%.4f", summary.rate),
-				accountExpectedRateLabel(summary.expectedRate, summary.hasExpected),
+				accountRateLabel(summary.upstreamRate, summary.hasUpstream),
 				fmt.Sprintf("%.4f", summary.rechargeDiscount),
+				accountRateLabel(summary.expectedRate, summary.hasExpected),
 				tableCell(accountResultLabel(summary.statuses, summary.accountSource, summary.previousRate)),
 				tableCell(strings.Join(summary.proxies, ", ")),
 			},
 		})
 	}
-	return []string{"账号", "账户倍率", "预期倍率", "充值折扣", "结果", "代理"}, rows
+	return []string{"账号", "当前倍率", "上游倍率", "充值折扣", "预期倍率", "结果", "代理"}, rows
 }
 
-func accountExpectedRateLabel(rate float64, ok bool) string {
+func accountRateLabel(rate float64, ok bool) string {
 	if !ok {
 		return "-"
 	}

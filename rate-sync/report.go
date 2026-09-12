@@ -35,6 +35,8 @@ type syncReportRow struct {
 	groupName        string
 	accountRate      float64
 	previousRate     float64
+	upstreamRate     float64
+	hasUpstream      bool
 	expectedRate     float64
 	hasExpected      bool
 	rechargeDiscount float64
@@ -152,6 +154,21 @@ func (r *syncReport) setAccountExpectedRate(accountID int64, rate float64) {
 		if strings.HasPrefix(row.key, prefix) {
 			row.expectedRate = rate
 			row.hasExpected = true
+		}
+	}
+}
+
+func (r *syncReport) setAccountUpstreamRate(accountID int64, rate float64) {
+	if r == nil || r.target != "account" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prefix := fmt.Sprintf("account:%d/", accountID)
+	for _, row := range r.rows {
+		if strings.HasPrefix(row.key, prefix) {
+			row.upstreamRate = rate
+			row.hasUpstream = true
 		}
 	}
 }

@@ -151,8 +151,9 @@ func TestSyncerDiscoversUsageTemplateAndAppliesRechargeDiscount(t *testing.T) {
 	if !strings.Contains(output.String(), "上游倍率 0.1000 × 充值折扣 0.8500 = 预期账户倍率 0.0850") {
 		t.Fatalf("missing recharge discount formula:\n%s", output.String())
 	}
-	if !strings.Contains(output.String(), "充值折扣") || !strings.Contains(output.String(), "0.8500") {
-		t.Fatalf("account table did not show recharge discount:\n%s", output.String())
+	if !strings.Contains(output.String(), "上游倍率") || !strings.Contains(output.String(), "充值折扣") ||
+		!strings.Contains(output.String(), "0.1000") || !strings.Contains(output.String(), "0.8500") {
+		t.Fatalf("account table did not show upstream rate and recharge discount:\n%s", output.String())
 	}
 }
 
@@ -1236,7 +1237,7 @@ func TestAccountTargetPrefersDirectRateOverUsageCalculation(t *testing.T) {
 		t.Fatalf("usage=%d rate=%.4f state=%+v", usageCalls, updatedRate, state)
 	}
 	if !strings.Contains(output.String(), "已更新｜上游同步｜原 0.5000") ||
-		!strings.Contains(output.String(), "预期倍率") {
+		!strings.Contains(output.String(), "上游倍率") || !strings.Contains(output.String(), "预期倍率") {
 		t.Fatalf("account table did not identify the direct upstream source:\n%s", output.String())
 	}
 }
