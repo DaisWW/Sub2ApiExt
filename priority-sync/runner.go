@@ -148,7 +148,7 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 				continue
 			}
 			recommendation.Exploration = true
-			evidence := account.SuccessfulRequests + account.TerminalFailures
+			evidence := scoringEvidence(account)
 			hardExcluded, hardReason := accountHardExcluded(account, now)
 			switch {
 			case hardExcluded:
@@ -222,7 +222,7 @@ func (r *Runner) selectExplorationCandidate(accounts []AccountMetrics, now time.
 		if accountState, ok := r.state.Accounts[account.ID]; ok && accountState.LastExploredAt != nil && now.Sub(*accountState.LastExploredAt) < explorationDuration {
 			continue
 		}
-		evidence := account.SuccessfulRequests + account.TerminalFailures
+		evidence := scoringEvidence(account)
 		hardExcluded, _ := accountHardExcluded(account, now)
 		priority := normalizedPriority(account.CurrentPriority)
 		if evidence >= int64(r.config.MinSamples) || hardExcluded || priority < priorityNeutral || priority >= priorityUnavailable {
@@ -244,7 +244,7 @@ func selectExplorationCandidate(accounts []AccountMetrics, active *explorationSt
 		if active != nil && account.ID == active.AccountID {
 			continue
 		}
-		evidence := account.SuccessfulRequests + account.TerminalFailures
+		evidence := scoringEvidence(account)
 		hardExcluded, _ := accountHardExcluded(account, now)
 		priority := normalizedPriority(account.CurrentPriority)
 		if account.ID <= 0 || evidence >= int64(minSamples) || hardExcluded || priority < priorityNeutral || priority >= priorityUnavailable {

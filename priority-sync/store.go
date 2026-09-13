@@ -541,23 +541,27 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 
 func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 	return &MetricSnapshot{
-		TotalTokens:         account.TotalTokens,
-		InputTokens:         account.InputTokens,
-		OutputTokens:        account.OutputTokens,
-		CacheCreationTokens: account.CacheCreationTokens,
-		CacheReadTokens:     account.CacheReadTokens,
-		AccountCost:         account.AccountCost,
-		ActualCost:          account.ActualCost,
-		CostP75PerMillion:   account.CostP75PerMillion,
-		InputCost:           account.InputCost,
-		OutputCost:          account.OutputCost,
-		CacheCreationCost:   account.CacheCreationCost,
-		CacheReadCost:       account.CacheReadCost,
+		SuccessfulRequests:       account.SuccessfulRequests,
+		TerminalFailures:         account.TerminalFailures,
+		RecoveredRateLimitWeight: account.RecoveredRateLimitWeight,
+		TotalTokens:              account.TotalTokens,
+		InputTokens:              account.InputTokens,
+		OutputTokens:             account.OutputTokens,
+		CacheCreationTokens:      account.CacheCreationTokens,
+		CacheReadTokens:          account.CacheReadTokens,
+		AccountCost:              account.AccountCost,
+		ActualCost:               account.ActualCost,
+		CostP75PerMillion:        account.CostP75PerMillion,
+		InputCost:                account.InputCost,
+		OutputCost:               account.OutputCost,
+		CacheCreationCost:        account.CacheCreationCost,
+		CacheReadCost:            account.CacheReadCost,
 	}
 }
 
 func poolMetricSnapshot(pool PoolMetrics) *MetricSnapshot {
 	return &MetricSnapshot{
+		SuccessfulRequests:  pool.SuccessfulRequests,
 		TotalTokens:         pool.TotalTokens,
 		InputTokens:         pool.InputTokens,
 		OutputTokens:        pool.OutputTokens,
@@ -734,7 +738,7 @@ func priorityErrorRequestsExpr(columns, sharedRequestColumns map[string]bool) st
 	} else if len(rateLimited) == 1 && rateLimited[0] == "FALSE" {
 		return "SELECT NULL::bigint AS account_id, NULL::text AS request_key, NULL::timestamptz AS error_at, FALSE AS rate_limited, 0::double precision AS retry_after_seconds WHERE FALSE"
 	} else {
-		// Without an owner/source/phase marker, only an explicit rate-limit
+		// Without an owner/source/phaseker, only an explicit rate-limit
 		// signal is safe enough to use as upstream evidence.
 		filters = append(filters, "("+strings.Join(rateLimited, " OR ")+")")
 	}

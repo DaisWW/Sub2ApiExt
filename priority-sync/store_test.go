@@ -210,9 +210,11 @@ func TestPriorityMetricsCompatUsesRequestIDSharedByBothTables(t *testing.T) {
 
 func TestAttachWindowSnapshotsKeeps24hAsPrimary(t *testing.T) {
 	primary := []AccountMetrics{{
-		ID:          1,
-		TotalTokens: 24,
-		AccountCost: 2.4,
+		ID:                 1,
+		SuccessfulRequests: 8,
+		TerminalFailures:   1,
+		TotalTokens:        24,
+		AccountCost:        2.4,
 		Pools: []PoolMetrics{{
 			Key:         "openai:gpt-4o:gpt-4o:api",
 			TotalTokens: 24,
@@ -234,6 +236,9 @@ func TestAttachWindowSnapshotsKeeps24hAsPrimary(t *testing.T) {
 	attachWindowSnapshots(primary, secondary, snapshotWindow6h)
 	if primary[0].Window24h == nil || primary[0].Window24h.TotalTokens != 24 {
 		t.Fatalf("24h snapshot missing or not primary: %+v", primary[0].Window24h)
+	}
+	if primary[0].Window24h.SuccessfulRequests != 8 || primary[0].Window24h.TerminalFailures != 1 {
+		t.Fatalf("24h snapshot dropped request outcomes: %+v", primary[0].Window24h)
 	}
 	if primary[0].Window6h == nil || primary[0].Window6h.TotalTokens != 6 {
 		t.Fatalf("6h snapshot not attached: %+v", primary[0].Window6h)

@@ -49,18 +49,21 @@ type AccountMetrics struct {
 // MetricSnapshot is an aggregate for one time window.  Costs are kept by
 // token class so a window can be normalized to a common cache mix later.
 type MetricSnapshot struct {
-	TotalTokens         int64
-	InputTokens         int64
-	OutputTokens        int64
-	CacheCreationTokens int64
-	CacheReadTokens     int64
-	AccountCost         float64
-	ActualCost          float64
-	CostP75PerMillion   float64
-	InputCost           float64
-	OutputCost          float64
-	CacheCreationCost   float64
-	CacheReadCost       float64
+	SuccessfulRequests       int64
+	TerminalFailures         int64
+	RecoveredRateLimitWeight float64
+	TotalTokens              int64
+	InputTokens              int64
+	OutputTokens             int64
+	CacheCreationTokens      int64
+	CacheReadTokens          int64
+	AccountCost              float64
+	ActualCost               float64
+	CostP75PerMillion        float64
+	InputCost                float64
+	OutputCost               float64
+	CacheCreationCost        float64
+	CacheReadCost            float64
 }
 
 // PoolMetrics 是同一平台、请求模型和实际上游模型比较池内的账户观测。

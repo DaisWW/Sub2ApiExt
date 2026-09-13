@@ -30,7 +30,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 	multiplierEligible := make([]bool, len(accounts))
 	peerSpeedValid := make([]bool, len(accounts))
 	for index, account := range accounts {
-		evidence := account.SuccessfulRequests + account.TerminalFailures
+		evidence := scoringEvidence(account)
 		hardExcluded, _ := accountHardExcluded(account, now)
 		peerEligible := evidence >= int64(minSamples) && !hardExcluded
 		observed, fallback, hitRate, tokens := accountRiskCost(account, pools)
@@ -66,7 +66,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		// Recovered 429 belongs to the same final successful request and must not
 		// increase the evidence count a second time. Its delay is already applied
 		// through RecoveredRateLimitWeight in effectiveAvailability.
-		evidence := account.SuccessfulRequests + account.TerminalFailures
+		evidence := scoringEvidence(account)
 		availability := effectiveAvailability(account)
 		availabilityScore := availability * 100
 		if evidence == 0 {
@@ -150,7 +150,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		if result[index].Confidence >= 1 && !result[index].applyImmediately {
 			result[index].RecommendedPriority = priorityForScore(result[index].Score)
 		}
-		evidence := result[index].SuccessfulRequests + result[index].TerminalFailures
+		evidence := scoringEvidence(account)
 		successRate := finalSuccessRate(account)
 		if successRate < 0.90 && evidence >= 20 {
 			if result[index].RecommendedPriority < priorityDegraded {
@@ -194,7 +194,7 @@ type poolAggregate struct {
 func aggregatePools(accounts []AccountMetrics, now time.Time, minSamples int) map[string]poolAggregate {
 	result := make(map[string]poolAggregate)
 	for _, account := range accounts {
-		evidence := account.SuccessfulRequests + account.TerminalFailures
+		evidence := scoringEvidence(account)
 		hardExcluded, _ := accountHardExcluded(account, now)
 		peerEligible := evidence >= int64(minSamples) && !hardExcluded
 		for _, pool := range account.Pools {
@@ -256,7 +256,7 @@ func aggregatePools(accounts []AccountMetrics, now time.Time, minSamples int) ma
 	for _, account := range accounts {
 		for _, pool := range account.Pools {
 			item := result[poolIdentity(pool)]
-			evidence := account.SuccessfulRequests + account.TerminalFailures
+			evidence := scoringEvidence(account)
 			hardExcluded, _ := accountHardExcluded(account, now)
 			if value := standardizedPoolCost(pool, item); value > 0 {
 				item.CostsByAccount[account.ID] = value
@@ -659,8 +659,15 @@ func accountWindowRiskCost(account AccountMetrics) (observed, fallback, hitRate 
 	}
 	c24 := snapshotCostPerMillion(*window24)
 	c6 := snapshotCostPerMillion(*window6)
+	c7 := 0.0
+	if account.Window7d != nil {
+		c7 = snapshotCostPerMillion(*account.Window7d)
+	}
 	if c24 <= 0 {
 		c24 = c6
+	}
+	if c24 <= 0 {
+		c24 = c7
 	}
 	if c6 <= 0 {
 		c6 = c24
@@ -682,7 +689,13 @@ func accountWindowRiskCost(account AccountMetrics) (observed, fallback, hitRate 
 	if tokens == 0 {
 		tokens = maxInt64(account.TotalTokens, 0)
 	}
+	if tokens == 0 && account.Window7d != nil {
+		tokens = maxInt64(account.Window7d.TotalTokens, 0)
+	}
 	hitRate = cacheHitRate(window24.InputTokens, window24.CacheReadTokens)
+	if hitRate == 0 && account.Window7d != nil {
+		hitRate = cacheHitRate(account.Window7d.InputTokens, account.Window7d.CacheReadTokens)
+	}
 	return observed, fallback, hitRate, tokens
 }
 
@@ -696,8 +709,12 @@ func poolRiskCost(pool PoolMetrics, aggregate poolAggregate, peerCosts []float64
 	}
 	c24 := poolWindowCost(pool.Window24h, aggregate.Window24h)
 	c6 := poolWindowCost(pool.Window6h, aggregate.Window6h)
+	c7 := poolWindowCost(pool.Window7d, aggregate.Window7d)
 	if c24 <= 0 {
 		c24 = current
+	}
+	if c24 <= 0 {
+		c24 = c7
 	}
 	if c6 <= 0 {
 		c6 = c24
@@ -724,7 +741,7 @@ func computeCostAdvantages(accounts []AccountMetrics, pools map[string]poolAggre
 			continue
 		}
 		hardExcluded, _ := accountHardExcluded(account, now)
-		if hardExcluded || account.SuccessfulRequests+account.TerminalFailures < int64(minSamples) {
+		if hardExcluded || scoringEvidence(account) < int64(minSamples) {
 			continue
 		}
 		peers := make([]float64, 0)
@@ -746,7 +763,7 @@ func computeCostAdvantages(accounts []AccountMetrics, pools map[string]poolAggre
 					continue
 				}
 				peerHardExcluded, _ := accountHardExcluded(peer, now)
-				if peerHardExcluded || peer.SuccessfulRequests+peer.TerminalFailures < int64(minSamples) {
+				if peerHardExcluded || scoringEvidence(peer) < int64(minSamples) {
 					continue
 				}
 				peers = append(peers, costs[peerIndex])
@@ -816,27 +833,64 @@ func otherPoolCosts(values map[int64]float64, excluded int64) []float64 {
 }
 
 func finalFailureRate(account AccountMetrics) float64 {
-	denominator := account.SuccessfulRequests + maxInt64(account.TerminalFailures, 0)
+	successes, failures, _ := scoringOutcomes(account)
+	denominator := successes + failures
 	if denominator <= 0 {
 		return 0
 	}
-	return clamp01(float64(maxInt64(account.TerminalFailures, 0)) / float64(denominator))
+	return clamp01(float64(failures) / float64(denominator))
 }
 
 func recovered429Rate(account AccountMetrics) float64 {
-	denominator := account.SuccessfulRequests + maxInt64(account.TerminalFailures, 0)
+	successes, failures, recovered := scoringOutcomes(account)
+	denominator := successes + failures
 	if denominator <= 0 {
 		return 0
 	}
-	return clamp01(maxFloat(account.RecoveredRateLimitWeight, 0) / float64(denominator))
+	return clamp01(maxFloat(recovered, 0) / float64(denominator))
 }
 
 func finalSuccessRate(account AccountMetrics) float64 {
-	denominator := account.SuccessfulRequests + maxInt64(account.TerminalFailures, 0)
+	successes, failures, _ := scoringOutcomes(account)
+	denominator := successes + failures
 	if denominator <= 0 {
 		return 1
 	}
-	return clamp01(float64(maxInt64(account.SuccessfulRequests, 0)) / float64(denominator))
+	return clamp01(float64(successes) / float64(denominator))
+}
+
+func scoringEvidence(account AccountMetrics) int64 {
+	successes, failures, _ := scoringOutcomes(account)
+	return successes + failures
+}
+
+func scoringOutcomes(account AccountMetrics) (successes, failures int64, recovered float64) {
+	successes = maxInt64(account.SuccessfulRequests, 0)
+	failures = maxInt64(account.TerminalFailures, 0)
+	recovered = maxFloat(account.RecoveredRateLimitWeight, 0)
+	if snapshot := scoringOutcomeSnapshot(account); snapshot != nil {
+		successes = maxInt64(snapshot.SuccessfulRequests, 0)
+		failures = maxInt64(snapshot.TerminalFailures, 0)
+		recovered = maxFloat(snapshot.RecoveredRateLimitWeight, 0)
+	}
+	return successes, failures, recovered
+}
+
+func scoringOutcomeSnapshot(account AccountMetrics) *MetricSnapshot {
+	if snapshotHasOutcomes(account.Window24h) {
+		return account.Window24h
+	}
+	if snapshotHasOutcomes(account.Window6h) {
+		return account.Window6h
+	}
+	if snapshotHasOutcomes(account.Window7d) {
+		return account.Window7d
+	}
+	return nil
+}
+
+func snapshotHasOutcomes(snapshot *MetricSnapshot) bool {
+	return snapshot != nil && (snapshot.SuccessfulRequests > 0 || snapshot.TerminalFailures > 0)
 }
 
 func maxPriority(left, right int) int {

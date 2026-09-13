@@ -620,6 +620,35 @@ func TestScoreAccountsUses24h6hEWMAAndP75(t *testing.T) {
 	}
 }
 
+func TestScoreAccountsUsesSevenDayEvidenceWhen24hIsEmpty(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{
+			ID: 3, Name: "cheap-7d", Status: "active", CurrentPriority: priorityNeutral, RateMultiplier: 0.1,
+			Window7d: &MetricSnapshot{SuccessfulRequests: 18000, TotalTokens: 1_800_000_000, AccountCost: 194, InputTokens: 1_800_000_000, InputCost: 194},
+		},
+		{
+			ID: 48, Name: "expensive-24h", Status: "active", CurrentPriority: priorityBest, RateMultiplier: 0.15,
+			SuccessfulRequests: 20, TotalTokens: 20_000_000, AccountCost: 5.2,
+			Window24h: &MetricSnapshot{SuccessfulRequests: 20, TotalTokens: 20_000_000, AccountCost: 5.2},
+		},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	cheap, expensive := byID[3], byID[48]
+	if cheap.Confidence < 1 {
+		t.Fatalf("7d evidence was treated as cold: %+v", cheap)
+	}
+	if cheap.CostPerMillionTokens <= 0 {
+		t.Fatalf("7d cost was not used: %+v", cheap)
+	}
+	if cheap.RecommendedPriority >= expensive.RecommendedPriority {
+		t.Fatalf("7d cheap account did not outrank 24h expensive account: cheap=%+v expensive=%+v", cheap, expensive)
+	}
+}
+
 func TestScoreAccountsUses7dPoolTrafficWeight(t *testing.T) {
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	pool := func(key string, cost float64, traffic int64) PoolMetrics {
