@@ -865,28 +865,30 @@ func scoringEvidence(account AccountMetrics) int64 {
 }
 
 func scoringOutcomes(account AccountMetrics) (successes, failures int64, recovered float64) {
-	successes = maxInt64(account.SuccessfulRequests, 0)
-	failures = maxInt64(account.TerminalFailures, 0)
-	recovered = maxFloat(account.RecoveredRateLimitWeight, 0)
 	if snapshot := scoringOutcomeSnapshot(account); snapshot != nil {
-		successes = maxInt64(snapshot.SuccessfulRequests, 0)
-		failures = maxInt64(snapshot.TerminalFailures, 0)
-		recovered = maxFloat(snapshot.RecoveredRateLimitWeight, 0)
+		return maxInt64(snapshot.SuccessfulRequests, 0), maxInt64(snapshot.TerminalFailures, 0), maxFloat(snapshot.RecoveredRateLimitWeight, 0)
 	}
-	return successes, failures, recovered
+	return maxInt64(account.SuccessfulRequests, 0), maxInt64(account.TerminalFailures, 0), maxFloat(account.RecoveredRateLimitWeight, 0)
 }
 
 func scoringOutcomeSnapshot(account AccountMetrics) *MetricSnapshot {
-	if snapshotHasOutcomes(account.Window24h) {
-		return account.Window24h
+	// Prefer a window that actually completed requests. A 24h snapshot with
+	// only terminal failures must not hide a mature 7d success history.
+	for _, snapshot := range []*MetricSnapshot{account.Window24h, account.Window6h, account.Window7d} {
+		if snapshotHasSuccesses(snapshot) {
+			return snapshot
+		}
 	}
-	if snapshotHasOutcomes(account.Window6h) {
-		return account.Window6h
-	}
-	if snapshotHasOutcomes(account.Window7d) {
-		return account.Window7d
+	for _, snapshot := range []*MetricSnapshot{account.Window24h, account.Window6h, account.Window7d} {
+		if snapshotHasOutcomes(snapshot) {
+			return snapshot
+		}
 	}
 	return nil
+}
+
+func snapshotHasSuccesses(snapshot *MetricSnapshot) bool {
+	return snapshot != nil && snapshot.SuccessfulRequests > 0
 }
 
 func snapshotHasOutcomes(snapshot *MetricSnapshot) bool {

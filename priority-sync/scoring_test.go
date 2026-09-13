@@ -625,7 +625,8 @@ func TestScoreAccountsUsesSevenDayEvidenceWhen24hIsEmpty(t *testing.T) {
 	result := scoreAccounts([]AccountMetrics{
 		{
 			ID: 3, Name: "cheap-7d", Status: "active", CurrentPriority: priorityNeutral, RateMultiplier: 0.1,
-			Window7d: &MetricSnapshot{SuccessfulRequests: 18000, TotalTokens: 1_800_000_000, AccountCost: 194, InputTokens: 1_800_000_000, InputCost: 194},
+			Window24h: &MetricSnapshot{TerminalFailures: 1},
+			Window7d:  &MetricSnapshot{SuccessfulRequests: 18000, TotalTokens: 1_800_000_000, AccountCost: 194, InputTokens: 1_800_000_000, InputCost: 194},
 		},
 		{
 			ID: 48, Name: "expensive-24h", Status: "active", CurrentPriority: priorityBest, RateMultiplier: 0.15,
@@ -646,6 +647,9 @@ func TestScoreAccountsUsesSevenDayEvidenceWhen24hIsEmpty(t *testing.T) {
 	}
 	if cheap.RecommendedPriority >= expensive.RecommendedPriority {
 		t.Fatalf("7d cheap account did not outrank 24h expensive account: cheap=%+v expensive=%+v", cheap, expensive)
+	}
+	if strings.Contains(cheap.Reason, "最终成功率低于") {
+		t.Fatalf("empty 24h failure snapshot gated a mature 7d account: %s", cheap.Reason)
 	}
 }
 
