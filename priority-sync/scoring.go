@@ -150,16 +150,25 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		if result[index].Confidence >= 1 && !result[index].applyImmediately {
 			result[index].RecommendedPriority = priorityForScore(result[index].Score)
 		}
-		evidence := scoringEvidence(account)
-		successRate := finalSuccessRate(account)
-		if successRate < 0.90 && evidence >= 20 {
-			if result[index].RecommendedPriority < priorityDegraded {
-				result[index].RecommendedPriority = priorityDegraded
+		successes, failures, _ := scoringOutcomes(account)
+		evidence := successes + failures
+		successRate := 1.0
+		if evidence > 0 {
+			successRate = clamp01(float64(successes) / float64(evidence))
+		}
+		// Hard availability gates stay on the 24h window. A 7d-only mature
+		// account can still compete on cost; it must not be frozen by a stale
+		// weekly failure mix when today had no completed requests.
+		if snapshotHasSuccesses(account.Window24h) || !snapshotHasSuccesses(account.Window7d) {
+			if successRate < 0.90 && evidence >= 20 {
+				if result[index].RecommendedPriority < priorityDegraded {
+					result[index].RecommendedPriority = priorityDegraded
+				}
+				result[index].Reason += "；最终成功率低于 90%，进入明显降级区间"
+			} else if successRate < 0.95 && result[index].RecommendedPriority < result[index].CurrentPriority {
+				result[index].RecommendedPriority = result[index].CurrentPriority
+				result[index].Reason += "；最终成功率低于 95%，禁止提升"
 			}
-			result[index].Reason += "；最终成功率低于 90%，进入明显降级区间"
-		} else if successRate < 0.95 && result[index].RecommendedPriority < result[index].CurrentPriority {
-			result[index].RecommendedPriority = result[index].CurrentPriority
-			result[index].Reason += "；最终成功率低于 95%，禁止提升"
 		}
 	}
 	sortRecommendations(result)
@@ -538,7 +547,7 @@ func accountRiskCost(account AccountMetrics, pools map[string]poolAggregate) (ob
 		trafficTokens := poolTrafficTokens(aggregate)
 		trafficWeight := 0.9*float64(maxInt64(trafficTokens, 0))/float64(allTokens) + uniformWeight
 		pool, exists := accountPools[key]
-		if exists && !poolHasRecentEvidence(pool) {
+		if exists && !poolHasCostEvidence(pool) {
 			exists = false
 		}
 		peerCosts := mapValues(aggregate.PeerCostsByAccount)
@@ -551,11 +560,17 @@ func accountRiskCost(account AccountMetrics, pools map[string]poolAggregate) (ob
 			poolTokens := pool.TotalTokens
 			if pool.Window24h != nil && pool.Window24h.TotalTokens > 0 {
 				poolTokens = pool.Window24h.TotalTokens
+			} else if pool.Window6h != nil && pool.Window6h.TotalTokens > 0 {
+				poolTokens = pool.Window6h.TotalTokens
+			} else if pool.Window7d != nil && pool.Window7d.TotalTokens > 0 {
+				poolTokens = pool.Window7d.TotalTokens
 			}
 			tokens += maxInt64(poolTokens, 0)
 			cacheInput, cacheRead := pool.InputTokens, pool.CacheReadTokens
-			if pool.Window24h != nil {
+			if pool.Window24h != nil && (pool.Window24h.InputTokens > 0 || pool.Window24h.CacheReadTokens > 0) {
 				cacheInput, cacheRead = pool.Window24h.InputTokens, pool.Window24h.CacheReadTokens
+			} else if pool.Window7d != nil {
+				cacheInput, cacheRead = pool.Window7d.InputTokens, pool.Window7d.CacheReadTokens
 			}
 			if maxInt64(cacheInput, 0)+maxInt64(cacheRead, 0) > 0 {
 				cacheTotal += cacheHitRate(cacheInput, cacheRead) * trafficWeight
@@ -614,6 +629,13 @@ func poolHasRecentEvidence(pool PoolMetrics) bool {
 		}
 	}
 	return false
+}
+
+func poolHasCostEvidence(pool PoolMetrics) bool {
+	if poolHasRecentEvidence(pool) {
+		return true
+	}
+	return pool.Window7d != nil && pool.Window7d.TotalTokens > 0
 }
 
 func poolTrafficTokens(pool poolAggregate) int64 {
@@ -701,15 +723,12 @@ func accountWindowRiskCost(account AccountMetrics) (observed, fallback, hitRate 
 
 func poolRiskCost(pool PoolMetrics, aggregate poolAggregate, peerCosts []float64) float64 {
 	current := standardizedPoolCost(pool, aggregate)
-	if pool.Window24h == nil && pool.Window6h == nil {
-		if current > 0 {
-			return current
-		}
-		return percentile(peerCosts, 0.5)
-	}
 	c24 := poolWindowCost(pool.Window24h, aggregate.Window24h)
 	c6 := poolWindowCost(pool.Window6h, aggregate.Window6h)
 	c7 := poolWindowCost(pool.Window7d, aggregate.Window7d)
+	if c24 <= 0 && c6 <= 0 && current <= 0 && c7 > 0 {
+		return c7
+	}
 	if c24 <= 0 {
 		c24 = current
 	}

@@ -653,6 +653,33 @@ func TestScoreAccountsUsesSevenDayEvidenceWhen24hIsEmpty(t *testing.T) {
 	}
 }
 
+func TestScoreAccountsUsesSevenDayPoolCostWhen24hEmpty(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	cheapPool := PoolMetrics{
+		Key:      "openai:gpt-6-astra:gpt-5.6-sol",
+		Window7d: &MetricSnapshot{SuccessfulRequests: 13000, TotalTokens: 1_800_000_000, AccountCost: 194, InputTokens: 1_800_000_000, InputCost: 194},
+	}
+	expensivePool := PoolMetrics{
+		Key: "openai:gpt-6-astra:gpt-5.6-sol", TotalTokens: 20_000_000, AccountCost: 5.2,
+		Window24h: &MetricSnapshot{SuccessfulRequests: 20, TotalTokens: 20_000_000, AccountCost: 5.2},
+	}
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 3, Name: "cheap-7d-pool", Status: "active", CurrentPriority: priorityNeutral, Platform: "openai", RateMultiplier: 0.1, Window7d: &MetricSnapshot{SuccessfulRequests: 18000, TerminalFailures: 12}, Pools: []PoolMetrics{cheapPool}},
+		{ID: 48, Name: "expensive-24h-pool", Status: "active", CurrentPriority: priorityBest, Platform: "openai", RateMultiplier: 0.15, SuccessfulRequests: 20, Pools: []PoolMetrics{expensivePool}},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	cheap, expensive := byID[3], byID[48]
+	if cheap.CostPerMillionTokens <= 0 {
+		t.Fatalf("7d pool cost was dropped from risk cost: %+v", cheap)
+	}
+	if cheap.RecommendedPriority >= expensive.RecommendedPriority {
+		t.Fatalf("7d pool cheap account did not outrank 24h expensive account: cheap=%+v expensive=%+v", cheap, expensive)
+	}
+}
+
 func TestScoreAccountsUses7dPoolTrafficWeight(t *testing.T) {
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	pool := func(key string, cost float64, traffic int64) PoolMetrics {
