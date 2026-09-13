@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -296,5 +297,412 @@ func TestEffectiveAvailabilityClampsSoftRateLimitWeight(t *testing.T) {
 	}
 	if got := effectiveAvailability(AccountMetrics{SuccessfulRequests: 5, RecoveredRateLimitWeight: 100}); got < 0 || got > 1 {
 		t.Fatalf("availability escaped bounds: %v", got)
+	}
+}
+
+func TestRiskCostUsesPoolCacheMixAndFallbackFailureCost(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	pool := func(id int64, accountCost float64) PoolMetrics {
+		return PoolMetrics{
+			Key:                "openai:gpt-test",
+			Platform:           "openai",
+			Model:              "gpt-test",
+			SuccessfulRequests: 20,
+			TotalTokens:        1_000_000,
+			InputTokens:        800_000,
+			OutputTokens:       100_000,
+			CacheReadTokens:    100_000,
+			AccountCost:        accountCost,
+			InputCost:          accountCost * 0.8,
+			OutputCost:         accountCost * 0.1,
+			CacheReadCost:      accountCost * 0.1,
+			RateMultiplier:     0.1,
+		}
+	}
+	accounts := []AccountMetrics{
+		{ID: 1, Name: "stable", Status: "active", CurrentPriority: priorityNeutral,
+			RateMultiplier: 0.1, SuccessfulRequests: 20, Pools: []PoolMetrics{pool(1, 0.10)}},
+		{ID: 2, Name: "fails", Status: "active", CurrentPriority: priorityNeutral,
+			RateMultiplier: 0.1, SuccessfulRequests: 19, TerminalFailures: 1, Pools: []PoolMetrics{pool(2, 0.10)}},
+		{ID: 3, Name: "expensive", Status: "active", CurrentPriority: priorityNeutral,
+			RateMultiplier: 0.1, SuccessfulRequests: 20, Pools: []PoolMetrics{pool(3, 0.50)}},
+	}
+	result := scoreAccounts(accounts, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	if byID[2].CostPerMillionTokens <= byID[1].CostPerMillionTokens {
+		t.Fatalf("final failure did not increase risk cost: stable=%+v failed=%+v", byID[1], byID[2])
+	}
+	if byID[1].CacheHitRate <= 0 {
+		t.Fatalf("cache mix was not reported: %+v", byID[1])
+	}
+}
+
+func TestCostDominatesSpeedWhenDifferenceExceedsFivePercent(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "cheap-slow", Status: "active", CurrentPriority: priorityNeutral,
+			SuccessfulRequests: 10, TotalTokens: 20_000_000, AccountCost: 1, LatencyP90Ms: 20_000},
+		{ID: 2, Name: "expensive-fast", Status: "active", CurrentPriority: priorityNeutral,
+			SuccessfulRequests: 10, TotalTokens: 20_000_000, AccountCost: 2, LatencyP90Ms: 10},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	if byID[1].RecommendedPriority >= byID[2].RecommendedPriority {
+		t.Fatalf("speed reversed material cost advantage: cheap=%+v expensive=%+v", byID[1], byID[2])
+	}
+}
+
+func TestPoolStandardizationUsesPeerTokenMix(t *testing.T) {
+	aggregate := poolAggregate{
+		InputTokens: 900, OutputTokens: 100, TotalTokens: 1000,
+	}
+	pool := PoolMetrics{
+		TotalTokens: 1000, InputTokens: 1000, AccountCost: 0.002,
+		InputCost: 0.001, OutputCost: 0.001,
+	}
+	got := standardizedPoolCost(pool, aggregate)
+	if got <= 0 || got >= 2.1 {
+		t.Fatalf("unexpected standardized pool cost: %v", got)
+	}
+}
+
+func TestPoolIdentityNormalizesModelFallbacks(t *testing.T) {
+	got := poolIdentity(PoolMetrics{Platform: " OpenAI ", RequestedModel: " GPT-5 ", Model: "Actual"})
+	if got != "openai:gpt-5:actual" {
+		t.Fatalf("pool identity = %q", got)
+	}
+	if got := poolIdentity(PoolMetrics{Key: " OpenAI:GPT-5:Actual "}); got != "openai:gpt-5:actual" {
+		t.Fatalf("explicit pool identity = %q", got)
+	}
+	if got := poolIdentity(PoolMetrics{Platform: " OpenAI ", RequestedModel: " GPT-5 ", UpstreamModel: "Actual", UpstreamEndpoint: " /v1/Responses "}); got != "openai:gpt-5:actual:/v1/responses" {
+		t.Fatalf("endpoint-aware pool identity = %q", got)
+	}
+}
+
+func TestCacheHitRateUsesCacheableInput(t *testing.T) {
+	if got := cacheHitRate(100, 50); math.Abs(got-1.0/3.0) > 1e-9 {
+		t.Fatalf("cache hit rate = %v, want %v", got, 1.0/3.0)
+	}
+	if got := cacheHitRate(0, 10); got != 1 {
+		t.Fatalf("cache-only hit rate = %v, want 1", got)
+	}
+	if got := cacheHitRate(-1, -1); got != 0 {
+		t.Fatalf("negative cache inputs were not clamped: %v", got)
+	}
+}
+
+func TestAccountRiskCostOnlyUsesCompatiblePlatformPools(t *testing.T) {
+	accounts := []AccountMetrics{
+		{ID: 1, Platform: "openai", Pools: []PoolMetrics{{
+			Key: "openai:gpt", Platform: "openai", TotalTokens: 1_000_000,
+			InputTokens: 1_000_000, AccountCost: 1,
+		}}},
+		{ID: 2, Platform: "anthropic", Pools: []PoolMetrics{{
+			Key: "anthropic:claude", Platform: "anthropic", TotalTokens: 1_000_000,
+			InputTokens: 1_000_000, AccountCost: 100,
+		}}},
+	}
+	observed, _, _, _ := accountRiskCost(accounts[0], aggregatePools(accounts, time.Now().UTC(), 1))
+	if math.Abs(observed-1) > 1e-9 {
+		t.Fatalf("cross-platform pool changed observed cost to %v", observed)
+	}
+}
+
+func TestAccountRiskCostRenormalizesMissingEvidenceAndCache(t *testing.T) {
+	account := AccountMetrics{ID: 1, Platform: "openai", Pools: []PoolMetrics{{
+		Key: "openai:known", Platform: "openai", TotalTokens: 1_000_000,
+		InputTokens: 500_000, CacheReadTokens: 500_000, AccountCost: 1,
+	}}}
+	accounts := []AccountMetrics{
+		account,
+		{ID: 2, Platform: "openai", Pools: []PoolMetrics{{
+			Key: "openai:unknown-cost", Platform: "openai", TotalTokens: 1_000_000,
+			InputTokens: 1_000_000,
+		}}},
+	}
+	observed, _, hitRate, _ := accountRiskCost(account, aggregatePools(accounts, time.Now().UTC(), 1))
+	if math.Abs(observed-1) > 1e-9 {
+		t.Fatalf("missing pool evidence diluted observed cost to %v", observed)
+	}
+	if math.Abs(hitRate-0.5) > 1e-9 {
+		t.Fatalf("missing pool cache evidence diluted hit rate to %v", hitRate)
+	}
+}
+
+func TestSpeedMetricCombinesAndRenormalizesLatencyEvidence(t *testing.T) {
+	if got := speedMetric(1000, 100); math.Abs(got-730) > 1e-9 {
+		t.Fatalf("combined speed metric = %v, want 730", got)
+	}
+	if got := speedMetric(1000, 0); got != 1000 {
+		t.Fatalf("duration-only speed metric = %v, want 1000", got)
+	}
+	if got := speedMetric(0, 100); got != 100 {
+		t.Fatalf("first-token-only speed metric = %v, want 100", got)
+	}
+}
+
+func TestNormalizeLowerBetterClipsOutliersToP10P90(t *testing.T) {
+	got := normalizeLowerBetter([]float64{1, 2, 3, 4, 100}, []bool{true, true, true, true, true})
+	if got[0] != 100 || got[4] != 0 {
+		t.Fatalf("outliers were not clipped to percentile bounds: %v", got)
+	}
+	if got[2] <= 90 || got[2] >= 100 {
+		t.Fatalf("central value was distorted by the outlier: %v", got)
+	}
+}
+
+func TestScoreAccountsGatesPromotionBelowNinetyFivePercentSuccess(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "unstable", Status: "active", CurrentPriority: priorityPoor,
+			SuccessfulRequests: 19, TerminalFailures: 2, TotalTokens: 20_000_000, AccountCost: 1},
+		{ID: 2, Name: "peer", Status: "active", CurrentPriority: priorityPoor,
+			SuccessfulRequests: 20, TotalTokens: 20_000_000, AccountCost: 2},
+	}, now, 5)
+	for _, item := range result {
+		if item.ID == 1 && item.RecommendedPriority < priorityPoor {
+			t.Fatalf("unstable account was promoted despite sub-95%% success: %+v", item)
+		}
+	}
+}
+
+func TestScoreAccountsGatesLowEvidencePromotionBelowNinetyFivePercentSuccess(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Name: "cold-unstable", Status: "active", CurrentPriority: priorityPoor,
+		SuccessfulRequests: 1, TerminalFailures: 1, RateMultiplier: 0.1,
+		TotalTokens: 1_000_000, AccountCost: 0.01,
+	}}, now, 5)
+	if len(result) != 1 {
+		t.Fatalf("got %d recommendations", len(result))
+	}
+	if result[0].RecommendedPriority < priorityPoor {
+		t.Fatalf("low-evidence account was promoted despite sub-95%% success: %+v", result[0])
+	}
+	if !strings.Contains(result[0].Reason, "低于 95%") {
+		t.Fatalf("missing success-rate gate reason: %+v", result[0])
+	}
+}
+
+func TestScoreAccountsThreeTerminalFailuresTriggerImmediateDowngrade(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Name: "failing", Status: "active", CurrentPriority: priorityBest,
+		SuccessfulRequests: 10, TerminalFailures: 3, TotalTokens: 10_000_000, AccountCost: 1,
+	}}, now, 5)
+	if len(result) != 1 || result[0].RecommendedPriority < priorityDegraded || !result[0].applyImmediately {
+		t.Fatalf("three terminal failures were not immediately downgraded: %+v", result)
+	}
+}
+
+func TestCostDominanceForbidsSpeedReversalAtSixPercentGap(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "cheap-slow", Status: "active", CurrentPriority: priorityNeutral,
+			SuccessfulRequests: 10, TotalTokens: 20_000_000, AccountCost: 1, LatencyP90Ms: 100_000},
+		{ID: 2, Name: "slightly-expensive-fast", Status: "active", CurrentPriority: priorityNeutral,
+			SuccessfulRequests: 10, TotalTokens: 20_000_000, AccountCost: 1.06, LatencyP90Ms: 1},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	if byID[1].RecommendedPriority >= byID[2].RecommendedPriority {
+		t.Fatalf("speed reversed a six-percent cost advantage: cheap=%+v expensive=%+v", byID[1], byID[2])
+	}
+}
+
+func TestSortRecommendationsUsesStableIDAfterCostAndLatency(t *testing.T) {
+	recommendations := []Recommendation{
+		{ID: 2, Name: "aaa", RecommendedPriority: priorityNeutral, CostPerMillionTokens: 1, LatencyP90Ms: 100},
+		{ID: 1, Name: "zzz", RecommendedPriority: priorityNeutral, CostPerMillionTokens: 1, LatencyP90Ms: 100},
+	}
+	sortRecommendations(recommendations)
+	if recommendations[0].ID != 1 || recommendations[1].ID != 2 {
+		t.Fatalf("recommendations were name-sorted instead of ID-sorted: %+v", recommendations)
+	}
+}
+
+func TestSortRecommendationsUsesCombinedSpeedMetric(t *testing.T) {
+	recommendations := []Recommendation{
+		{ID: 1, RecommendedPriority: priorityNeutral, CostPerMillionTokens: 1, LatencyP90Ms: 1000},
+		{ID: 2, RecommendedPriority: priorityNeutral, CostPerMillionTokens: 1, FirstTokenP90Ms: 100},
+	}
+	sortRecommendations(recommendations)
+	if recommendations[0].ID != 2 || recommendations[1].ID != 1 {
+		t.Fatalf("recommendations did not use first-token-only speed evidence: %+v", recommendations)
+	}
+}
+
+func TestAggregatePoolsExcludesColdAndHardExcludedAccountsFromPeerStatistics(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(time.Minute)
+	pool := func(cost float64) PoolMetrics {
+		return PoolMetrics{
+			Key:            "openai:gpt-test",
+			TotalTokens:    1_000_000,
+			InputTokens:    1_000_000,
+			AccountCost:    cost,
+			InputCost:      cost,
+			RateMultiplier: 1,
+		}
+	}
+	accounts := []AccountMetrics{
+		{ID: 1, Status: "active", SuccessfulRequests: 5, Pools: []PoolMetrics{pool(1)}},
+		{ID: 2, Status: "active", SuccessfulRequests: 5, Pools: []PoolMetrics{pool(3)}},
+		{ID: 3, Status: "active", SuccessfulRequests: 1, Pools: []PoolMetrics{pool(0.001)}},
+		{ID: 4, Status: "active", SuccessfulRequests: 5, RateLimitResetAt: &reset, Pools: []PoolMetrics{pool(100)}},
+	}
+	pools := aggregatePools(accounts, now, 5)
+	aggregate := pools["openai:gpt-test"]
+	peerCosts := mapValues(aggregate.PeerCostsByAccount)
+	if got := percentile(peerCosts, 0.5); got != 2 {
+		t.Fatalf("peer median=%v, want 2 from mature accounts only: %+v", got, aggregate.PeerCostsByAccount)
+	}
+	if got := percentile(aggregate.PeerRates, 0.5); got != 1 {
+		t.Fatalf("peer multiplier median=%v, want 1: %v", got, aggregate.PeerRates)
+	}
+	if got := percentile(mapValues(aggregate.PeerMissCostsByAccount), 0.75); got != 2.5 {
+		t.Fatalf("peer fallback P75=%v, want 2.5 from mature accounts only: %+v", got, aggregate.PeerMissCostsByAccount)
+	}
+	for _, excluded := range []int64{3, 4} {
+		if _, ok := aggregate.PeerCostsByAccount[excluded]; ok {
+			t.Fatalf("excluded account %d entered peer costs: %+v", excluded, aggregate.PeerCostsByAccount)
+		}
+	}
+}
+
+func TestAccountRiskCostFallbackIgnoresHardExcludedAccounts(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(time.Minute)
+	pool := func(cost float64) PoolMetrics {
+		return PoolMetrics{
+			Key: "openai:gpt-test", Platform: "openai", TotalTokens: 1_000_000,
+			InputTokens: 1_000_000, AccountCost: cost, InputCost: cost,
+			RateMultiplier: 1,
+		}
+	}
+	target := AccountMetrics{
+		ID: 1, Platform: "openai", SuccessfulRequests: 5,
+		Pools: []PoolMetrics{pool(1)},
+	}
+	hardExcluded := AccountMetrics{
+		ID: 2, Platform: "openai", SuccessfulRequests: 5,
+		RateLimitResetAt: &reset, Pools: []PoolMetrics{pool(100)},
+	}
+	_, fallback, _, _ := accountRiskCost(target, aggregatePools([]AccountMetrics{target, hardExcluded}, now, 5))
+	if math.Abs(fallback-1) > 1e-9 {
+		t.Fatalf("hard-excluded account polluted fallback miss cost: %v, want 1", fallback)
+	}
+}
+
+func TestScoreAccountsUses24h6hEWMAAndP75(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Name: "windowed", Status: "active", CurrentPriority: priorityNeutral,
+		SuccessfulRequests: 20,
+		Window24h:          &MetricSnapshot{TotalTokens: 1_000_000, AccountCost: 1, CostP75PerMillion: 2},
+		Window6h:           &MetricSnapshot{TotalTokens: 1_000_000, AccountCost: 3},
+	}}, now, 5)
+	if len(result) != 1 {
+		t.Fatalf("got %d recommendations", len(result))
+	}
+	if math.Abs(result[0].ObservedCostPerMillion-1.68) > 1e-9 {
+		t.Fatalf("observed window cost = %v, want 1.68", result[0].ObservedCostPerMillion)
+	}
+	if math.Abs(result[0].CostPerMillionTokens-1.68) > 1e-9 {
+		t.Fatalf("risk window cost = %v, want 1.68", result[0].CostPerMillionTokens)
+	}
+}
+
+func TestScoreAccountsUses7dPoolTrafficWeight(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	pool := func(key string, cost float64, traffic int64) PoolMetrics {
+		return PoolMetrics{
+			Key: key, TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: cost,
+			InputCost: cost, Window24h: &MetricSnapshot{TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: cost, InputCost: cost},
+			Window6h: &MetricSnapshot{TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: cost, InputCost: cost},
+			Window7d: &MetricSnapshot{TotalTokens: traffic, InputTokens: traffic, AccountCost: cost * float64(traffic) / 1_000_000, InputCost: cost * float64(traffic) / 1_000_000},
+		}
+	}
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Name: "traffic-weighted", Status: "active", CurrentPriority: priorityNeutral,
+		SuccessfulRequests: 20,
+		Pools:              []PoolMetrics{pool("pool-a", 1, 9_000_000), pool("pool-b", 9, 1_000_000)},
+	}}, now, 5)
+	if len(result) != 1 {
+		t.Fatalf("got %d recommendations", len(result))
+	}
+	if result[0].ObservedCostPerMillion < 1.8 || result[0].ObservedCostPerMillion > 2.4 {
+		t.Fatalf("7d traffic weight ignored: observed cost = %v", result[0].ObservedCostPerMillion)
+	}
+}
+
+func TestScoreAccountsUsesPool24hP75WhenProvided(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 20,
+		Pools: []PoolMetrics{{
+			Key: "pool", TotalTokens: 1_000_000, AccountCost: 1,
+			Window24h: &MetricSnapshot{TotalTokens: 1_000_000, AccountCost: 1, CostP75PerMillion: 2},
+			Window6h:  &MetricSnapshot{TotalTokens: 1_000_000, AccountCost: 1},
+		}},
+	}}, now, 5)
+	if len(result) != 1 || math.Abs(result[0].ObservedCostPerMillion-1.2) > 1e-9 {
+		t.Fatalf("pool P75 was not included: %+v", result)
+	}
+}
+
+func TestScoreAccountsFallsBackWhenFastSnapshotMissing(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Name: "missing-fast", Status: "active", CurrentPriority: priorityNeutral,
+		SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1,
+		Window24h: &MetricSnapshot{TotalTokens: 1_000_000, AccountCost: 1},
+	}}, now, 5)
+	if len(result) != 1 || math.Abs(result[0].ObservedCostPerMillion-1) > 1e-9 {
+		t.Fatalf("missing fast window did not fall back to 24h: %+v", result)
+	}
+}
+
+func TestScoreAccountsReportsRelativeCostAdvantage(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Status: "active", CurrentPriority: priorityPoor, SuccessfulRequests: 20, TotalTokens: 100_000_000, AccountCost: 100},
+		{ID: 2, Status: "active", CurrentPriority: priorityPoor, SuccessfulRequests: 20, TotalTokens: 100_000_000, AccountCost: 120},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	if byID[1].CostAdvantage < 0.16 || byID[1].CostAdvantage > 0.18 {
+		t.Fatalf("cheap account cost advantage = %v, want about 16.7%%", byID[1].CostAdvantage)
+	}
+	if byID[2].CostAdvantage != 0 {
+		t.Fatalf("expensive account reported positive advantage: %v", byID[2].CostAdvantage)
+	}
+}
+
+func TestScoreAccountsIgnoresInvalidCostAndTokenValues(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: -1, AccountCost: math.NaN(), ActualCost: math.Inf(1)},
+		{ID: 2, Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1},
+	}, now, 5)
+	if len(result) != 2 {
+		t.Fatalf("got %d recommendations", len(result))
+	}
+	for _, item := range result {
+		if !validScore(item.Score) {
+			t.Fatalf("invalid score: %+v", item)
+		}
+		if item.ID == 1 && item.CostPerMillionTokens != 0 {
+			t.Fatalf("invalid account cost was retained: %+v", item)
+		}
 	}
 }

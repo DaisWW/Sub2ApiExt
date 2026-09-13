@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -50,9 +51,26 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		return fmt.Errorf("priority runner is not configured")
 	}
 	now = now.UTC()
-	accounts, err := r.source.LoadAccountMetrics(ctx, now, r.config.Window)
+	window := r.config.Window
+	var accounts []AccountMetrics
+	var err error
+	if source, ok := r.source.(windowedMetricsSource); ok {
+		accounts, err = source.LoadAccountMetricsWindows(ctx, now)
+		window = defaultWindow
+	} else {
+		accounts, err = r.source.LoadAccountMetrics(ctx, now, window)
+	}
 	if err != nil {
 		return err
+	}
+	// A dry-run is an observation mode. Work on an isolated state snapshot so
+	// evaluating an existing confirmation or exploration lease cannot change
+	// the next cycle in memory or create a durable state file.
+	var originalState *syncState
+	if r.config.DryRun {
+		originalState = r.state
+		r.state = cloneSyncState(r.state)
+		defer func() { r.state = originalState }()
 	}
 	recommendations := scoreAccounts(accounts, now, r.config.MinSamples)
 	r.prepareExploration(accounts, recommendations, now)
@@ -64,12 +82,14 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		}
 	}
 	changed, pending := r.applyRecommendations(ctx, recommendations, apiKey, now)
-	if err := saveState(r.config.StateFile, r.state); err != nil {
-		return err
+	if !r.config.DryRun {
+		if err := saveState(r.config.StateFile, r.state); err != nil {
+			return err
+		}
 	}
 	report := PriorityReport{
 		GeneratedAt: now,
-		WindowStart: now.Add(-r.config.Window),
+		WindowStart: now.Add(-window),
 		WindowEnd:   now,
 		DryRun:      r.config.DryRun,
 		Accounts:    recommendations,
@@ -85,7 +105,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		"changed", changed,
 		"pending", pending,
 		"dry_run", r.config.DryRun,
-		"window", r.config.Window.String(),
+		"window", window.String(),
 	)
 	return nil
 }
@@ -114,9 +134,12 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 		account, exists := byID[exploration.AccountID]
 		if !exists {
 			// The account is no longer eligible for the read-only snapshot (for
-			// example it was disabled or deleted); discard the stale lease so it
-			// cannot block all other accounts forever.
-			r.state.Exploration = nil
+			// example it was disabled or deleted). Keep a bounded lease so a
+			// brief empty snapshot cannot immediately unlock a new explorer,
+			// then discard it after the exploration window.
+			if explorationExpired(exploration, now) {
+				r.state.Exploration = nil
+			}
 			return
 		}
 		for index := range recommendations {
@@ -134,11 +157,13 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 				recommendation.applyImmediately = true
 				recommendation.explorationEnd = true
 			case evidence >= int64(r.config.MinSamples):
-				targetPriority := priorityForScore(recommendation.Score)
-				recommendation.RecommendedPriority = targetPriority
+				// scoreAccounts has already applied failure and success-rate safety
+				// gates. Preserve that final target while leaving exploration.
+				targetPriority := recommendation.RecommendedPriority
 				recommendation.Reason += "；探索样本已足够，进入正式评分确认"
-				recommendation.explorationEnd = rampPriority(recommendation.CurrentPriority, targetPriority) == targetPriority
-			case exploration.StartedAt != nil && !now.Before(exploration.StartedAt.Add(explorationDuration)):
+				recommendation.explorationEnd = recommendation.applyImmediately ||
+					rampPriority(recommendation.CurrentPriority, targetPriority) == targetPriority
+			case explorationExpired(exploration, now):
 				restorePriority := recommendation.AnchorPriority
 				if restorePriority <= 0 {
 					restorePriority = normalizedPriority(exploration.OriginalPriority)
@@ -240,7 +265,6 @@ func selectExplorationCandidate(accounts []AccountMetrics, active *explorationSt
 }
 
 func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Recommendation, apiKey string, now time.Time) (changed, pending int) {
-	seen := make(map[int64]struct{}, len(recommendations))
 	activeExplorationID := int64(0)
 	if r.state.Exploration != nil {
 		activeExplorationID = r.state.Exploration.AccountID
@@ -254,8 +278,17 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 	}
 	for index := range recommendations {
 		recommendation := &recommendations[index]
-		seen[recommendation.ID] = struct{}{}
 		state := r.state.Accounts[recommendation.ID]
+		state.LastSeenAt = timePtr(now)
+		shock, frozen := updatePromotionBaseline(&state, recommendation)
+		if shock || frozen {
+			recommendation.PromotionFrozen = true
+			if shock {
+				recommendation.Reason += "；成本或缓存命中突变，冻结提升两周期"
+			} else {
+				recommendation.Reason += "；提升冻结剩余周期"
+			}
+		}
 		evidence := recommendation.SuccessfulRequests + recommendation.TerminalFailures
 		recommendation.NextPriority = recommendation.RecommendedPriority
 		if !recommendation.applyImmediately {
@@ -267,11 +300,13 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 				pending++
 			}
 			recommendation.ApplyStatus = "deferred-exploration"
+			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
 		if recommendation.explorationStart {
 			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, recommendation.RecommendedPriority, now, &state) {
 				pending++
+				r.state.Accounts[recommendation.ID] = state
 				continue
 			}
 			r.state.Accounts[recommendation.ID] = state
@@ -302,9 +337,29 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			}
 			continue
 		}
+		if !recommendation.applyImmediately && recommendation.RecommendedPriority < recommendation.CurrentPriority {
+			if recommendation.PromotionFrozen {
+				recommendation.ApplyStatus = "promotion-frozen"
+				state.CandidatePriority = 0
+				state.CandidateCount = 0
+				pending++
+				r.state.Accounts[recommendation.ID] = state
+				continue
+			}
+			if hasReliableCost(recommendation) && costAdvantageEvidence(recommendation) && recommendation.CostAdvantage < promotionCostAdvantage {
+				recommendation.ApplyStatus = "cost-advantage-gated"
+				recommendation.Reason += fmt.Sprintf("；成本优势 %.1f%% 未达到 %.0f%% 提升门槛", recommendation.CostAdvantage*100, promotionCostAdvantage*100)
+				state.CandidatePriority = 0
+				state.CandidateCount = 0
+				pending++
+				r.state.Accounts[recommendation.ID] = state
+				continue
+			}
+		}
 		if recommendation.applyImmediately {
 			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, recommendation.RecommendedPriority, now, &state) {
 				pending++
+				r.state.Accounts[recommendation.ID] = state
 				continue
 			}
 			r.state.Accounts[recommendation.ID] = state
@@ -374,12 +429,108 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		}
 		changed++
 	}
-	for id := range r.state.Accounts {
-		if _, exists := seen[id]; !exists && (r.state.Exploration == nil || id != r.state.Exploration.AccountID) {
-			delete(r.state.Accounts, id)
+	r.pruneAccountState(now)
+	return changed, pending
+}
+
+// pruneAccountState keeps retry and baseline state across short snapshot gaps,
+// while bounding entries for accounts that have been removed or disabled.
+func (r *Runner) pruneAccountState(now time.Time) {
+	if r == nil || r.state == nil || r.state.Accounts == nil {
+		return
+	}
+	activeExplorationID := int64(0)
+	if r.state.Exploration != nil {
+		activeExplorationID = r.state.Exploration.AccountID
+	}
+	for id, state := range r.state.Accounts {
+		if id == activeExplorationID && !explorationExpired(r.state.Exploration, now) {
+			continue
+		}
+		lastSeen := state.LastSeenAt
+		if lastSeen == nil {
+			// Older state files predate last_seen_at. Use the latest known
+			// activity as a conservative starting point; otherwise give the
+			// entry one retention period to be observed again.
+			lastSeen = latestStateTime(state.LastAppliedAt, state.LastExploredAt)
+			if lastSeen == nil {
+				state.LastSeenAt = timePtr(now)
+				r.state.Accounts[id] = state
+				continue
+			}
+		}
+		if now.Before(*lastSeen) || now.Sub(*lastSeen) < stateRetentionDuration {
+			continue
+		}
+		delete(r.state.Accounts, id)
+	}
+}
+
+func explorationExpired(exploration *explorationState, now time.Time) bool {
+	if exploration == nil {
+		return true
+	}
+	startedAt := exploration.StartedAt
+	if startedAt == nil {
+		return true
+	}
+	return !now.Before(startedAt.Add(explorationDuration))
+}
+
+func latestStateTime(values ...*time.Time) *time.Time {
+	var latest *time.Time
+	for _, value := range values {
+		if value == nil || (latest != nil && !value.After(*latest)) {
+			continue
+		}
+		latest = value
+	}
+	return latest
+}
+
+func hasReliableCost(recommendation *Recommendation) bool {
+	return recommendation != nil && recommendation.CostPerMillionTokens > 0 && validScore(recommendation.CostPerMillionTokens)
+}
+
+func costAdvantageEvidence(recommendation *Recommendation) bool {
+	return recommendation != nil && recommendation.costAdvantageKnown
+}
+
+func updatePromotionBaseline(state *accountState, recommendation *Recommendation) (shock, frozen bool) {
+	if state == nil {
+		return false, false
+	}
+	if !hasReliableCost(recommendation) {
+		if state.PromotionFrozenCycles > 0 {
+			frozen = true
+			state.PromotionFrozenCycles--
+		}
+		return false, frozen
+	}
+	if state.HasCostBaseline && state.LastCostPerMillion > 0 {
+		delta := math.Abs(recommendation.CostPerMillionTokens-state.LastCostPerMillion) / state.LastCostPerMillion
+		if validScore(delta) && delta > costShockThreshold {
+			shock = true
 		}
 	}
-	return changed, pending
+	if state.HasCacheBaseline && validScore(state.LastCacheHitRate) && validScore(recommendation.CacheHitRate) {
+		if math.Abs(recommendation.CacheHitRate-state.LastCacheHitRate) > cacheShockThreshold {
+			shock = true
+		}
+	}
+	if shock {
+		state.PromotionFrozenCycles = promotionFreezeCycles
+	} else if state.PromotionFrozenCycles > 0 {
+		frozen = true
+		state.PromotionFrozenCycles--
+	}
+	state.LastCostPerMillion = recommendation.CostPerMillionTokens
+	state.HasCostBaseline = true
+	if validScore(recommendation.CacheHitRate) {
+		state.LastCacheHitRate = clamp01(recommendation.CacheHitRate)
+		state.HasCacheBaseline = true
+	}
+	return shock, frozen
 }
 
 func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recommendation, apiKey string, priority int, now time.Time, state *accountState) bool {

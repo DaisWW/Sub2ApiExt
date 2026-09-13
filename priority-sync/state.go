@@ -21,11 +21,61 @@ type explorationState struct {
 }
 
 type accountState struct {
-	CandidatePriority int        `json:"candidate_priority,omitempty"`
-	CandidateCount    int        `json:"candidate_count,omitempty"`
-	LastAppliedAt     *time.Time `json:"last_applied_at,omitempty"`
-	LastApplied       int        `json:"last_applied_priority,omitempty"`
-	LastExploredAt    *time.Time `json:"last_explored_at,omitempty"`
+	CandidatePriority     int        `json:"candidate_priority,omitempty"`
+	CandidateCount        int        `json:"candidate_count,omitempty"`
+	LastSeenAt            *time.Time `json:"last_seen_at,omitempty"`
+	LastAppliedAt         *time.Time `json:"last_applied_at,omitempty"`
+	LastApplied           int        `json:"last_applied_priority,omitempty"`
+	LastExploredAt        *time.Time `json:"last_explored_at,omitempty"`
+	LastCostPerMillion    float64    `json:"last_cost_per_million,omitempty"`
+	LastCacheHitRate      float64    `json:"last_cache_hit_rate,omitempty"`
+	HasCostBaseline       bool       `json:"has_cost_baseline,omitempty"`
+	HasCacheBaseline      bool       `json:"has_cache_baseline,omitempty"`
+	PromotionFrozenCycles int        `json:"promotion_frozen_cycles,omitempty"`
+}
+
+// cloneSyncState returns an independent copy for read-only runs. The state
+// contains maps and time pointers, so a shallow struct copy would still let
+// confirmation or exploration evaluation mutate the live state.
+func cloneSyncState(source *syncState) *syncState {
+	if source == nil {
+		return &syncState{Accounts: make(map[int64]accountState)}
+	}
+	clone := &syncState{
+		Accounts:          make(map[int64]accountState, len(source.Accounts)),
+		ExplorationCursor: source.ExplorationCursor,
+	}
+	for id, account := range source.Accounts {
+		clone.Accounts[id] = accountState{
+			CandidatePriority:     account.CandidatePriority,
+			CandidateCount:        account.CandidateCount,
+			LastSeenAt:            cloneTimePtr(account.LastSeenAt),
+			LastAppliedAt:         cloneTimePtr(account.LastAppliedAt),
+			LastApplied:           account.LastApplied,
+			LastExploredAt:        cloneTimePtr(account.LastExploredAt),
+			LastCostPerMillion:    account.LastCostPerMillion,
+			LastCacheHitRate:      account.LastCacheHitRate,
+			HasCostBaseline:       account.HasCostBaseline,
+			HasCacheBaseline:      account.HasCacheBaseline,
+			PromotionFrozenCycles: account.PromotionFrozenCycles,
+		}
+	}
+	if source.Exploration != nil {
+		clone.Exploration = &explorationState{
+			AccountID:        source.Exploration.AccountID,
+			OriginalPriority: source.Exploration.OriginalPriority,
+			StartedAt:        cloneTimePtr(source.Exploration.StartedAt),
+		}
+	}
+	return clone
+}
+
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 func loadState(path string) (*syncState, error) {

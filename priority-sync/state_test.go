@@ -69,3 +69,29 @@ func TestLoadMissingStateStartsEmpty(t *testing.T) {
 		t.Fatalf("state=%+v err=%v", state, err)
 	}
 }
+
+func TestCloneSyncStateIsIndependent(t *testing.T) {
+	started := nowForTest()
+	state := &syncState{
+		Accounts: map[int64]accountState{
+			7: {
+				CandidatePriority: 30,
+				CandidateCount:    2,
+				LastAppliedAt:     timePtr(started),
+				LastExploredAt:    timePtr(started),
+			},
+		},
+		Exploration:       &explorationState{AccountID: 7, OriginalPriority: 90, StartedAt: timePtr(started)},
+		ExplorationCursor: 7,
+	}
+	clone := cloneSyncState(state)
+	clone.Accounts[7] = accountState{CandidatePriority: 10}
+	clone.Exploration.StartedAt = timePtr(started.Add(time.Hour))
+	clone.ExplorationCursor = 9
+	if state.Accounts[7].CandidatePriority != 30 || state.ExplorationCursor != 7 {
+		t.Fatalf("clone mutation changed source state: source=%+v clone=%+v", state, clone)
+	}
+	if state.Exploration.StartedAt == nil || !state.Exploration.StartedAt.Equal(started) {
+		t.Fatalf("clone mutation changed source exploration time: %+v", state.Exploration)
+	}
+}

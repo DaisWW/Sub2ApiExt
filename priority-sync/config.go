@@ -12,9 +12,14 @@ import (
 )
 
 const (
-	defaultSub2APIURL    = "http://sub2api:8080"
-	defaultInterval      = 10 * time.Minute
-	defaultWindow        = time.Hour
+	defaultSub2APIURL = "http://sub2api:8080"
+	defaultInterval   = 10 * time.Minute
+	// The primary window is deliberately long enough to smooth cache churn.
+	// The scorer also loads the fixed fast (6h) and traffic (7d) windows when
+	// the data source supports them.
+	defaultWindow        = 24 * time.Hour
+	fastWindow           = 6 * time.Hour
+	trafficWindow        = 7 * 24 * time.Hour
 	defaultCooldown      = 15 * time.Minute
 	defaultMinSamples    = 5
 	defaultConfirmations = 2
@@ -23,9 +28,17 @@ const (
 )
 
 const (
-	costWeight         = 0.70
-	speedWeight        = 0.20
-	availabilityWeight = 0.10
+	costWeight             = 0.90
+	speedWeight            = 0.10
+	durationWeight         = 0.70
+	firstTokenWeight       = 0.30
+	minimumCostAdvantage   = 0.05
+	promotionCostAdvantage = 0.08
+	costShockThreshold     = 0.30
+	cacheShockThreshold    = 0.15
+	promotionFreezeCycles  = 2
+	shrinkTokens           = 20_000_000
+	stateRetentionDuration = 24 * time.Hour
 )
 
 // 优先级数值越小越优先。正式评分细分原有的 10..90 空间，低样本账号

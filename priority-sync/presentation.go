@@ -153,6 +153,10 @@ func tableActionLabel(value string) string {
 		return "探索结束"
 	case "deferred-exploration":
 		return "等待当前探索完成"
+	case "cost-advantage-gated":
+		return "成本优势不足"
+	case "promotion-frozen":
+		return "提升冻结"
 	case "dry-run":
 		return "试运行"
 	case "missing-key":
@@ -194,7 +198,7 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 	if writer == nil {
 		return nil
 	}
-	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "成本/M", "延迟P90", "状态"}}
+	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "风险成本/M", "缓存", "延迟P90", "状态"}}
 	for _, recommendation := range recommendations {
 		samples := recommendation.SuccessfulRequests + recommendation.TerminalFailures
 		cost := "-"
@@ -206,6 +210,10 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 			p90 = formatTableLatency(recommendation.LatencyP90Ms, false)
 		} else if recommendation.FirstTokenP90Ms > 0 {
 			p90 = formatTableLatency(recommendation.FirstTokenP90Ms, true)
+		}
+		cache := "-"
+		if recommendation.PoolCount > 0 {
+			cache = fmt.Sprintf("%.1f%%", recommendation.CacheHitRate*100)
 		}
 		nextPriority := recommendation.NextPriority
 		if nextPriority <= 0 {
@@ -221,6 +229,7 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 			strconv.FormatInt(samples, 10),
 			fmt.Sprintf("%.1f%%", recommendation.Availability*100),
 			cost,
+			cache,
 			p90,
 			action,
 		})
