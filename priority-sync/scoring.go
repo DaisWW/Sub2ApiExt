@@ -872,15 +872,11 @@ func scoringOutcomes(account AccountMetrics) (successes, failures int64, recover
 }
 
 func scoringOutcomeSnapshot(account AccountMetrics) *MetricSnapshot {
-	// Prefer a window that actually completed requests. A 24h snapshot with
-	// only terminal failures must not hide a mature 7d success history.
+	// Window24h is always populated, even when it has zero completed requests.
+	// Only a snapshot that actually recorded successes may override a longer
+	// mature window; otherwise keep scanning 6h then 7d.
 	for _, snapshot := range []*MetricSnapshot{account.Window24h, account.Window6h, account.Window7d} {
 		if snapshotHasSuccesses(snapshot) {
-			return snapshot
-		}
-	}
-	for _, snapshot := range []*MetricSnapshot{account.Window24h, account.Window6h, account.Window7d} {
-		if snapshotHasOutcomes(snapshot) {
 			return snapshot
 		}
 	}

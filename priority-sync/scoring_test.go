@@ -625,8 +625,8 @@ func TestScoreAccountsUsesSevenDayEvidenceWhen24hIsEmpty(t *testing.T) {
 	result := scoreAccounts([]AccountMetrics{
 		{
 			ID: 3, Name: "cheap-7d", Status: "active", CurrentPriority: priorityNeutral, RateMultiplier: 0.1,
-			Window24h: &MetricSnapshot{TerminalFailures: 1},
-			Window7d:  &MetricSnapshot{SuccessfulRequests: 18000, TotalTokens: 1_800_000_000, AccountCost: 194, InputTokens: 1_800_000_000, InputCost: 194},
+			Window24h: &MetricSnapshot{SuccessfulRequests: 0, TerminalFailures: 0},
+			Window7d:  &MetricSnapshot{SuccessfulRequests: 18000, TerminalFailures: 12, TotalTokens: 1_800_000_000, AccountCost: 194, InputTokens: 1_800_000_000, InputCost: 194},
 		},
 		{
 			ID: 48, Name: "expensive-24h", Status: "active", CurrentPriority: priorityBest, RateMultiplier: 0.15,
