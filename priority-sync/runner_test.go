@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -144,6 +146,58 @@ func TestRunnerUsesFixedWindowSourceWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestRunnerLogsEvaluationWeights(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, nil, logger)
+	runner.tableWriter = io.Discard
+	if err := runner.RunOnce(context.Background(), nowForTest()); err != nil {
+		t.Fatal(err)
+	}
+	if output := logs.String(); !strings.Contains(output, "evaluation_weights=") || !strings.Contains(output, evaluationWeights) {
+		t.Fatalf("cycle log does not include evaluation weights: %q", output)
+	}
+}
+
+func TestRunnerResetsLegacyConfirmationOnStrategyChange(t *testing.T) {
+	updates := make(chan int, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Priority int `json:"priority"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		updates <- payload.Priority
+		_, _ = io.WriteString(w, `{"code":0}`)
+	}))
+	defer server.Close()
+
+	config := testRunnerConfig(t, server.URL, false)
+	config.Confirmations = 2
+	source := &fakeMetricsSource{accounts: []AccountMetrics{
+		{ID: 1, Status: "active", CurrentPriority: priorityPoor, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1},
+		{ID: 2, Status: "active", CurrentPriority: priorityPoor, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 2},
+	}}
+	runner := NewRunner(config, source, server.Client(), &syncState{Accounts: map[int64]accountState{
+		1: {CandidatePriority: priorityBest, CandidateCount: 1},
+	}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.tableWriter = io.Discard
+	start := nowForTest()
+	if err := runner.RunOnce(context.Background(), start); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 0 || runner.state.Accounts[1].CandidateCount != 1 || runner.state.Strategy != strategyVersion {
+		t.Fatalf("legacy confirmation was reused: state=%+v updates=%d", runner.state, len(updates))
+	}
+	if err := runner.RunOnce(context.Background(), start.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-updates; got != priorityDegraded {
+		t.Fatalf("confirmed pure-cost step = %d, want %d", got, priorityDegraded)
+	}
+}
+
 func TestRunnerDryRunDoesNotPersistExplorationOrCallAdminAPI(t *testing.T) {
 	called := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +219,7 @@ func TestRunnerDryRunDoesNotPersistExplorationOrCallAdminAPI(t *testing.T) {
 	}
 }
 
-func TestRunnerExplorationExpiresAndRestoresDefaultAnchor(t *testing.T) {
+func TestRunnerExplorationExpiresAndRestoresOriginalPriority(t *testing.T) {
 	type update struct {
 		id       string
 		priority int
@@ -212,15 +266,32 @@ func TestRunnerExplorationExpiresAndRestoresDefaultAnchor(t *testing.T) {
 	if err := runner.RunOnce(context.Background(), start.Add(2*explorationDuration)); err != nil {
 		t.Fatal(err)
 	}
-	if runner.state.Exploration != nil {
-		t.Fatalf("exploration was not cleared after anchor restoration: %+v", runner.state)
+	if runner.state.Exploration == nil {
+		t.Fatalf("exploration cleared before original priority restoration: %+v", runner.state)
 	}
-	if got := <-updates; got.id != "9" || got.priority != priorityNeutral {
+	if got := <-updates; got.id != "9" || got.priority != 60 {
+		t.Fatalf("second restoration update = %+v", got)
+	}
+	source.accounts[0].CurrentPriority = 60
+	if err := runner.RunOnce(context.Background(), start.Add(3*explorationDuration)); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-updates; got.id != "9" || got.priority != 80 {
+		t.Fatalf("third restoration update = %+v", got)
+	}
+	source.accounts[0].CurrentPriority = 80
+	if err := runner.RunOnce(context.Background(), start.Add(4*explorationDuration)); err != nil {
+		t.Fatal(err)
+	}
+	if runner.state.Exploration != nil {
+		t.Fatalf("exploration was not cleared after original priority restoration: %+v", runner.state)
+	}
+	if got := <-updates; got.id != "9" || got.priority != priorityPoor {
 		t.Fatalf("final restoration update = %+v", got)
 	}
 }
 
-func TestRunnerExplorationWithEnoughEvidenceUsesNormalConfirmation(t *testing.T) {
+func TestRunnerExplorationWithCostUsesNormalConfirmation(t *testing.T) {
 	type update struct {
 		id       string
 		priority int
@@ -252,7 +323,7 @@ func TestRunnerExplorationWithEnoughEvidenceUsesNormalConfirmation(t *testing.T)
 		t.Fatalf("start update = %+v", got)
 	}
 	source.accounts[0].CurrentPriority = priorityExplore
-	source.accounts[0].SuccessfulRequests = 5
+	source.accounts[0].SuccessfulRequests = 1
 	source.accounts[0].TotalTokens = 1_000_000
 	source.accounts[0].AccountCost = 1
 	source.accounts[0].LatencyP90Ms = 100
@@ -268,31 +339,15 @@ func TestRunnerExplorationWithEnoughEvidenceUsesNormalConfirmation(t *testing.T)
 	if err := runner.RunOnce(context.Background(), start.Add(20*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if runner.state.Exploration == nil || len(updates) != 1 {
-		t.Fatalf("exploration did not take the first confirmed step: state=%+v updates=%d", runner.state, len(updates))
+	if runner.state.Exploration != nil || len(updates) != 1 {
+		t.Fatalf("exploration did not finish at the confirmed cost target: state=%+v updates=%d", runner.state, len(updates))
 	}
-	if got := <-updates; got.id != "9" || got.priority != 40 {
-		t.Fatalf("first scored step = %+v", got)
-	}
-	source.accounts[0].CurrentPriority = 40
-	if err := runner.RunOnce(context.Background(), start.Add(30*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if runner.state.Exploration == nil || runner.state.Exploration.AccountID != 9 || len(updates) != 0 {
-		t.Fatalf("second scored step bypassed confirmation: state=%+v updates=%d", runner.state, len(updates))
-	}
-	if err := runner.RunOnce(context.Background(), start.Add(40*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if runner.state.Exploration != nil {
-		t.Fatalf("exploration did not finish at continuous target: %+v", runner.state)
-	}
-	if got := <-updates; got.id != "9" || got.priority != 50 {
-		t.Fatalf("final scored update = %+v", got)
+	if got := <-updates; got.id != "9" || got.priority != priorityBest {
+		t.Fatalf("confirmed cost update = %+v", got)
 	}
 }
 
-func TestPrepareExplorationPreservesImmediateFailureDowngrade(t *testing.T) {
+func TestPrepareExplorationDoesNotTurnFailuresIntoImmediateDowngrade(t *testing.T) {
 	now := nowForTest()
 	accounts := []AccountMetrics{{
 		ID: 9, Name: "failing-exploration", Status: "active", CurrentPriority: priorityExplore,
@@ -313,8 +368,8 @@ func TestPrepareExplorationPreservesImmediateFailureDowngrade(t *testing.T) {
 		t.Fatalf("got %d recommendations", len(recommendations))
 	}
 	got := recommendations[0]
-	if got.RecommendedPriority != priorityDegraded || !got.applyImmediately || !got.explorationEnd {
-		t.Fatalf("exploration overwrote the immediate failure downgrade: %+v", got)
+	if got.RecommendedPriority != priorityBest || got.applyImmediately || !got.explorationEnd {
+		t.Fatalf("failure history changed the measured cost target: %+v", got)
 	}
 }
 
@@ -341,7 +396,7 @@ func TestRunnerExplorationExpiryUsesMeasuredTargetWhenEvidenceIsReady(t *testing
 			break
 		}
 	}
-	if measured.RecommendedPriority != 14 || !measured.explorationEnd {
+	if measured.RecommendedPriority != priorityBest || !measured.explorationEnd {
 		t.Fatalf("expiry ignored measured target: %+v", measured)
 	}
 }
@@ -681,7 +736,7 @@ func TestRunnerPrunesStateAfterRetentionPeriod(t *testing.T) {
 	}
 }
 
-func TestRunnerGatesPromotionBelowEightPercentCostAdvantage(t *testing.T) {
+func TestRunnerDoesNotGateCostPromotionOnLegacySignals(t *testing.T) {
 	updates := make(chan int, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -694,44 +749,25 @@ func TestRunnerGatesPromotionBelowEightPercentCostAdvantage(t *testing.T) {
 		_, _ = io.WriteString(w, `{"code":0}`)
 	}))
 	defer server.Close()
-	config := testRunnerConfig(t, server.URL, false)
-	config.Confirmations = 1
-	runner := NewRunner(config, &fakeMetricsSource{}, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	runner.tableWriter = io.Discard
-	recommendation := Recommendation{ID: 1, Name: "slightly-cheaper", CurrentPriority: priorityPoor, RecommendedPriority: priorityBest,
-		CostPerMillionTokens: 1, CostAdvantage: 0.05, PoolCount: 1, costAdvantageKnown: true}
-	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", nowForTest()); changed != 0 || pending != 1 {
-		t.Fatalf("promotion below eight percent was not gated: changed=%d pending=%d", changed, pending)
-	}
-	if len(updates) != 0 {
-		t.Fatal("promotion below eight percent cost advantage was applied")
-	}
-}
 
-func TestRunnerGatesPromotionWithoutPeerCostEvidence(t *testing.T) {
-	updates := make(chan int, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload struct {
-			Priority int `json:"priority"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		updates <- payload.Priority
-		_, _ = io.WriteString(w, `{"code":0}`)
-	}))
-	defer server.Close()
 	config := testRunnerConfig(t, server.URL, false)
 	config.Confirmations = 1
-	runner := NewRunner(config, &fakeMetricsSource{}, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner := NewRunner(config, &fakeMetricsSource{}, server.Client(), &syncState{
+		Accounts: map[int64]accountState{1: {
+			LastCostPerMillion: 1, HasCostBaseline: true,
+			LastCacheHitRate: 0.1, HasCacheBaseline: true,
+		}},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runner.tableWriter = io.Discard
-	recommendation := Recommendation{ID: 1, Name: "single-pool", CurrentPriority: priorityPoor, RecommendedPriority: priorityBest,
-		CostPerMillionTokens: 1, CostAdvantage: 0, PoolCount: 1}
-	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", nowForTest()); changed != 0 || pending != 1 {
-		t.Fatalf("promotion without peer evidence was not gated: changed=%d pending=%d", changed, pending)
+	recommendation := Recommendation{
+		ID: 1, Name: "cheap", CurrentPriority: priorityPoor, RecommendedPriority: priorityBest,
+		CostPerMillionTokens: 2, CacheHitRate: 0.9, CacheHitRateKnown: true,
 	}
-	if len(updates) != 0 {
-		t.Fatal("promotion without peer evidence was applied")
+	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", nowForTest()); changed != 1 || pending != 0 {
+		t.Fatalf("legacy signals gated pure-cost promotion: changed=%d pending=%d", changed, pending)
+	}
+	if got := <-updates; got != priorityDegraded {
+		t.Fatalf("promotion step = %d, want %d", got, priorityDegraded)
 	}
 }
 
@@ -766,50 +802,6 @@ func TestRunnerRequiresTwoQualifyingCyclesBeforePromotion(t *testing.T) {
 	}
 	if len(updates) != 1 {
 		t.Fatalf("promotion was not applied after two qualifying cycles: %d", len(updates))
-	}
-}
-
-func TestRunnerFreezesPromotionOnCostAndCacheShock(t *testing.T) {
-	updates := make(chan int, 4)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var payload struct {
-			Priority int `json:"priority"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Fatal(err)
-		}
-		updates <- payload.Priority
-		_, _ = io.WriteString(w, `{"code":0}`)
-	}))
-	defer server.Close()
-	config := testRunnerConfig(t, server.URL, false)
-	config.Confirmations = 1
-	runner := NewRunner(config, &fakeMetricsSource{}, server.Client(), &syncState{
-		Accounts: map[int64]accountState{1: {
-			LastCostPerMillion: 1, HasCostBaseline: true,
-			LastCacheHitRate: 0.20, HasCacheBaseline: true,
-		}},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	runner.tableWriter = io.Discard
-	now := nowForTest()
-	recommendation := Recommendation{ID: 1, Name: "shock", CurrentPriority: priorityPoor, RecommendedPriority: priorityBest,
-		CostPerMillionTokens: 1.4, CostAdvantage: 0.5, CacheHitRate: 0.50, CacheHitRateKnown: true, PoolCount: 1, costAdvantageKnown: true}
-	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", now); changed != 0 || pending != 1 {
-		t.Fatalf("cost/cache shock was not frozen: changed=%d pending=%d", changed, pending)
-	}
-	if runner.state.Accounts[1].PromotionFrozenCycles != promotionFreezeCycles {
-		t.Fatalf("freeze cycles = %d, want %d", runner.state.Accounts[1].PromotionFrozenCycles, promotionFreezeCycles)
-	}
-	for cycle := 1; cycle <= promotionFreezeCycles; cycle++ {
-		if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", now.Add(time.Duration(cycle)*10*time.Minute)); changed != 0 || pending != 1 {
-			t.Fatalf("freeze cycle %d changed=%d pending=%d", cycle, changed, pending)
-		}
-	}
-	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", now.Add(30*time.Minute)); changed != 1 || pending != 0 {
-		t.Fatalf("promotion did not resume after two freeze cycles: changed=%d pending=%d", changed, pending)
-	}
-	if got := <-updates; got != priorityDegraded {
-		t.Fatalf("promotion step = %d, want %d", got, priorityDegraded)
 	}
 }
 

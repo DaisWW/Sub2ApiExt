@@ -8,72 +8,46 @@ import (
 	"time"
 )
 
-// scoreAccounts 将账户在各模型池的实际风险成本汇总为全局排序。
-// 成本是目标；速度只在成本接近时提供很小的区分，硬故障直接排除。
+// scoreAccounts ranks schedulable accounts only by their direct cost per
+// million tokens. Other metrics remain in the report for observation.
 func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []Recommendation {
 	if minSamples < 1 {
 		minSamples = defaultMinSamples
 	}
-	pools := aggregatePools(accounts, now, minSamples)
-	groupAwarePools := metricsContainGroupData(accounts, pools)
 	costValues := make([]float64, len(accounts))
-	observedValues := make([]float64, len(accounts))
-	fallbackValues := make([]float64, len(accounts))
-	cacheHitRates := make([]float64, len(accounts))
-	cacheHitRateKnown := make([]bool, len(accounts))
-	comparablePoolCounts := make([]int, len(accounts))
+	costEvidence := make([]directCostEvidence, len(accounts))
+	rankingValid := make([]bool, len(accounts))
 	multiplierValues := make([]float64, len(accounts))
 	speedValues := make([]float64, len(accounts))
-	costValid := make([]bool, len(accounts))
-	costAdvantages := make([]float64, len(accounts))
-	costAdvantageKnown := make([]bool, len(accounts))
 	multiplierValid := make([]bool, len(accounts))
 	speedValid := make([]bool, len(accounts))
-	peerCostValid := make([]bool, len(accounts))
-	multiplierEligible := make([]bool, len(accounts))
-	peerSpeedValid := make([]bool, len(accounts))
 	for index, account := range accounts {
-		evidence := scoringEvidence(account, minSamples)
 		hardExcluded, _ := accountHardExcluded(account, now)
-		peerEligible := evidence >= int64(minSamples) && !hardExcluded
-		observed, fallback, hitRate, tokens, comparablePools, cacheKnown := accountRiskCost(account, pools)
-		observedValues[index] = observed
-		fallbackValues[index] = fallback
-		cacheHitRates[index] = hitRate
-		cacheHitRateKnown[index] = cacheKnown
-		comparablePoolCounts[index] = comparablePools
-		if tokens > 0 && observed > 0 && validScore(observed) {
-			lambda := float64(tokens) / float64(tokens+shrinkTokens)
-			anchor := multiplierAnchorCost(account, pools)
-			if anchor > 0 {
-				observed = lambda*observed + (1-lambda)*anchor
-			}
-			failureRate := finalFailureRate(account, minSamples)
-			softRate := recovered429Rate(account, minSamples)
-			costValues[index] = observed + failureRate*maxFloat(fallback-observed, 0) + 0.02*softRate*observed
-			costValid[index] = validScore(costValues[index]) && costValues[index] > 0
-			peerCostValid[index] = costValid[index] && peerEligible
-		}
+		costEvidence[index] = directAccountCost(account)
+		costValues[index] = costEvidence[index].CostPerMillion
+		rankingValid[index] = costEvidence[index].Valid && !hardExcluded
 		multiplierValues[index] = account.RateMultiplier
-		multiplierValid[index] = multiplierValues[index] > 0 && validScore(multiplierValues[index])
-		multiplierEligible[index] = multiplierValid[index] && !hardExcluded
+		multiplierValid[index] = multiplierValues[index] > 0 && validScore(multiplierValues[index]) && !hardExcluded
 		speedValues[index] = speedMetric(account.LatencyP90Ms, account.FirstTokenP90Ms)
-		speedValid[index] = speedValues[index] > 0 && validScore(speedValues[index])
-		peerSpeedValid[index] = speedValid[index] && peerEligible
+		speedValid[index] = speedValues[index] > 0 && validScore(speedValues[index]) && !hardExcluded
 	}
-	components := comparisonComponents(accounts, pools, now)
-	costAdvantages, costAdvantageKnown = computeCostAdvantages(accounts, costValues, costValid, components, now, minSamples)
-	costScores := normalizeLowerBetterByComponent(costValues, peerCostValid, components)
-	multiplierScores := normalizeLowerBetterByComponent(multiplierValues, multiplierEligible, components)
-	speedScores := normalizeLowerBetterByComponent(speedValues, peerSpeedValid, components)
+	costScores := rankLowerBetter(costValues, rankingValid)
+	multiplierScores := normalizeLowerBetter(multiplierValues, multiplierValid)
+	speedScores := normalizeLowerBetter(speedValues, speedValid)
 
 	result := make([]Recommendation, 0, len(accounts))
 	for index, account := range accounts {
-		// Recovered 429 belongs to the same final successful request and must not
-		// increase the evidence count a second time. Its delay is already applied
-		// through RecoveredRateLimitWeight in effectiveAvailability.
-		scoringWindow, _ := scoringOutcomeSnapshot(account, minSamples)
+		scoringWindow, scoringSnapshot := scoringOutcomeSnapshot(account, minSamples)
+		if costEvidence[index].Valid {
+			scoringWindow = costEvidence[index].Window
+			scoringSnapshot = &costEvidence[index].Snapshot
+		}
 		scoringSuccesses, scoringFailures, scoringRecovered := scoringOutcomes(account, minSamples)
+		if scoringSnapshot != nil {
+			scoringSuccesses = maxInt64(scoringSnapshot.SuccessfulRequests, 0)
+			scoringFailures = maxInt64(scoringSnapshot.TerminalFailures, 0)
+			scoringRecovered = maxFloat(scoringSnapshot.RecoveredRateLimitWeight, 0)
+		}
 		evidence := scoringSuccesses + scoringFailures
 		availability := effectiveAvailability(account)
 		scoringAvailability := availabilityForOutcomes(scoringSuccesses, scoringFailures, scoringRecovered)
@@ -82,33 +56,19 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			availabilityScore = 50
 		}
 		confidence := math.Min(1, float64(evidence)/float64(minSamples))
-		rawScore := costWeight*costScores[index] + speedWeight*speedScores[index]
-		score := rawScore*confidence + 50*(1-confidence)
+		score := costWeight*costScores[index] + speedWeight*speedScores[index]
 
 		hardExcluded, hardReason := accountHardExcluded(account, now)
 		currentPriority := normalizedPriority(account.CurrentPriority)
 		recommended := currentPriority
-		reason := "证据不足，保持当前优先级"
-		anchorPriority := coldAnchorPriority(multiplierScores[index])
+		reason := "无有效成本证据，保持当前优先级"
 		applyImmediately := hardExcluded
 		if hardExcluded {
 			recommended = priorityUnavailable
 			reason = hardReason
-		} else if trailingFailureCount(account) >= 3 {
-			recommended = maxPriority(currentPriority, priorityDegraded)
-			reason = "连续 3 次最终失败，立即降级"
-			applyImmediately = true
-		} else if evidence >= int64(minSamples) && costValid[index] {
+		} else if costEvidence[index].Valid {
 			recommended = priorityForScore(score)
-			reason = fmt.Sprintf("风险成本 %.4f/M、实测 %.4f/M、后备 %.4f/M、可比池 %d、缓存命中 %.1f%%", costValues[index], observedValues[index], fallbackValues[index], comparablePoolCounts[index], cacheHitRates[index]*100)
-		} else if evidence >= int64(minSamples) {
-			reason = "无同档可比成本证据，保持当前优先级"
-		} else if (!groupAwarePools || comparablePoolCounts[index] > 0) && anchorPriority != currentPriority {
-			recommended = anchorPriority
-			reason = fmt.Sprintf("证据不足，向倍率锚点优先级 %d 缓慢靠近", anchorPriority)
-		}
-		if account.RecoveredRateLimited > 0 && !hardExcluded {
-			reason += fmt.Sprintf("；恢复性 429 %d 次按软惩罚计入", account.RecoveredRateLimited)
+			reason = fmt.Sprintf("综合成本 %.4f/M（%s），按成本 100%% 排序", costValues[index], costEvidence[index].Window)
 		}
 
 		recommendation := Recommendation{
@@ -138,55 +98,74 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			AvailabilityScore:         availabilityScore,
 			Score:                     score,
 			HardExcluded:              hardExcluded,
-			AnchorPriority:            anchorPriority,
 			Reason:                    reason,
 			applyImmediately:          applyImmediately,
-			costAdvantageKnown:        costAdvantageKnown[index],
 		}
-		if costValid[index] {
+		if costEvidence[index].Valid {
 			recommendation.CostPerMillionTokens = costValues[index]
-			recommendation.ObservedCostPerMillion = observedValues[index]
-			recommendation.FallbackMissCostPerMillion = fallbackValues[index]
-			recommendation.CostAdvantage = costAdvantages[index]
-			recommendation.CacheHitRate = cacheHitRates[index]
-			recommendation.CacheHitRateKnown = cacheHitRateKnown[index]
-			recommendation.PoolCount = comparablePoolCounts[index]
+			recommendation.ObservedCostPerMillion = costValues[index]
+			recommendation.CacheHitRate = costEvidence[index].CacheHitRate
+			recommendation.CacheHitRateKnown = costEvidence[index].CacheHitRateKnown
 		}
 		result = append(result, recommendation)
 	}
-	enforceCostDominance(result, costValues, peerCostValid, components)
-	for index := range result {
-		if result[index].HardExcluded {
-			continue
-		}
-		account := accounts[index]
-		if result[index].Confidence >= 1 && costValid[index] && !result[index].applyImmediately {
-			result[index].RecommendedPriority = priorityForScore(result[index].Score)
-		}
-		successes, failures, hasSafetyEvidence := promotionSafetyOutcomes(account, minSamples)
-		evidence := successes + failures
-		successRate := 1.0
-		if evidence > 0 {
-			successRate = clamp01(float64(successes) / float64(evidence))
-		}
-		// Hard availability gates stay on the 24h window. A 7d-only mature
-		// account can still compete on cost; it must not be frozen by a stale
-		// weekly failure mix when today had no completed requests.
-		if hasSafetyEvidence {
-			if successRate < 0.90 && evidence >= 20 {
-				minimumPriority := maxPriority(result[index].CurrentPriority, priorityDegraded)
-				if result[index].RecommendedPriority < minimumPriority {
-					result[index].RecommendedPriority = minimumPriority
-				}
-				result[index].Reason += "；最终成功率低于 90%，进入明显降级区间"
-			} else if successRate < 0.95 && result[index].RecommendedPriority < result[index].CurrentPriority {
-				result[index].RecommendedPriority = result[index].CurrentPriority
-				result[index].Reason += "；最终成功率低于 95%，禁止提升"
-			}
-		}
-	}
 	sortRecommendations(result)
 	return result
+}
+
+type directCostEvidence struct {
+	CostPerMillion    float64
+	Window            string
+	Snapshot          MetricSnapshot
+	CacheHitRate      float64
+	CacheHitRateKnown bool
+	Valid             bool
+}
+
+func directAccountCost(account AccountMetrics) directCostEvidence {
+	current := MetricSnapshot{
+		SuccessfulRequests:       account.SuccessfulRequests,
+		TerminalFailures:         account.TerminalFailures,
+		RecoveredRateLimitWeight: account.RecoveredRateLimitWeight,
+		TotalTokens:              account.TotalTokens,
+		InputTokens:              account.InputTokens,
+		OutputTokens:             account.OutputTokens,
+		CacheCreationTokens:      account.CacheCreationTokens,
+		CacheReadTokens:          account.CacheReadTokens,
+		AccountCost:              account.AccountCost,
+		ActualCost:               account.ActualCost,
+		TrailingTerminalFailures: account.TrailingTerminalFailures,
+	}
+	candidates := []struct {
+		window   string
+		snapshot *MetricSnapshot
+	}{
+		{"24h", account.Window24h},
+		{"6h", account.Window6h},
+		{"7d", account.Window7d},
+	}
+	if account.Window24h == nil {
+		candidates[0].snapshot = &current
+	}
+	for _, candidate := range candidates {
+		if candidate.snapshot == nil {
+			continue
+		}
+		cost := snapshotCostPerMillion(*candidate.snapshot)
+		if cost <= 0 || !validScore(cost) {
+			continue
+		}
+		cacheKnown := snapshotHasCacheEvidence(candidate.snapshot)
+		return directCostEvidence{
+			CostPerMillion:    cost,
+			Window:            candidate.window,
+			Snapshot:          *candidate.snapshot,
+			CacheHitRate:      cacheHitRate(candidate.snapshot.InputTokens, candidate.snapshot.CacheCreationTokens, candidate.snapshot.CacheReadTokens),
+			CacheHitRateKnown: cacheKnown,
+			Valid:             true,
+		}
+	}
+	return directCostEvidence{}
 }
 
 type poolAggregate struct {
@@ -1213,16 +1192,6 @@ func sortRecommendations(recommendations []Recommendation) {
 		if iHasCost && recommendations[i].CostPerMillionTokens != recommendations[j].CostPerMillionTokens {
 			return recommendations[i].CostPerMillionTokens < recommendations[j].CostPerMillionTokens
 		}
-		iSpeed := speedMetric(recommendations[i].LatencyP90Ms, recommendations[i].FirstTokenP90Ms)
-		jSpeed := speedMetric(recommendations[j].LatencyP90Ms, recommendations[j].FirstTokenP90Ms)
-		iHasSpeed := iSpeed > 0 && validScore(iSpeed)
-		jHasSpeed := jSpeed > 0 && validScore(jSpeed)
-		if iHasSpeed != jHasSpeed {
-			return iHasSpeed
-		}
-		if iHasSpeed && iSpeed != jSpeed {
-			return iSpeed < jSpeed
-		}
 		return recommendations[i].ID < recommendations[j].ID
 	})
 }
@@ -1302,6 +1271,44 @@ func normalizedPriority(value int) int {
 		return priorityUnavailable
 	}
 	return value
+}
+
+// rankLowerBetter assigns an even global rank while preserving ties. Invalid
+// values stay neutral and do not affect valid accounts.
+func rankLowerBetter(values []float64, valid []bool) []float64 {
+	indices := make([]int, 0, len(values))
+	for index, value := range values {
+		if index < len(valid) && valid[index] && value > 0 && validScore(value) {
+			indices = append(indices, index)
+		}
+	}
+	result := make([]float64, len(values))
+	for index := range result {
+		result[index] = 50
+	}
+	if len(indices) == 0 {
+		return result
+	}
+	if len(indices) == 1 {
+		result[indices[0]] = 100
+		return result
+	}
+	sort.SliceStable(indices, func(i, j int) bool {
+		return values[indices[i]] < values[indices[j]]
+	})
+	for start := 0; start < len(indices); {
+		end := start + 1
+		for end < len(indices) && values[indices[end]] == values[indices[start]] {
+			end++
+		}
+		rank := float64(start+end-1) / 2
+		score := 100 * (float64(len(indices)-1) - rank) / float64(len(indices)-1)
+		for position := start; position < end; position++ {
+			result[indices[position]] = score
+		}
+		start = end
+	}
+	return result
 }
 
 // normalizeLowerBetter 对越小越好的指标做稳健的 0..100 反向归一化。

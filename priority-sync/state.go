@@ -9,6 +9,7 @@ import (
 )
 
 type syncState struct {
+	Strategy          string                 `json:"strategy,omitempty"`
 	Accounts          map[int64]accountState `json:"accounts"`
 	Exploration       *explorationState      `json:"exploration,omitempty"`
 	ExplorationCursor int64                  `json:"exploration_cursor,omitempty"`
@@ -42,6 +43,7 @@ func cloneSyncState(source *syncState) *syncState {
 		return &syncState{Accounts: make(map[int64]accountState)}
 	}
 	clone := &syncState{
+		Strategy:          source.Strategy,
 		Accounts:          make(map[int64]accountState, len(source.Accounts)),
 		ExplorationCursor: source.ExplorationCursor,
 	}

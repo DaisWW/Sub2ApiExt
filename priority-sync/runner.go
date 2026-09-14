@@ -72,6 +72,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		r.state = cloneSyncState(r.state)
 		defer func() { r.state = originalState }()
 	}
+	r.prepareStrategyState()
 	recommendations := scoreAccounts(accounts, now, r.config.MinSamples)
 	r.prepareExploration(accounts, recommendations, now)
 	apiKey := r.config.AdminAPIKey
@@ -106,8 +107,22 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		"pending", pending,
 		"dry_run", r.config.DryRun,
 		"window", window.String(),
+		"evaluation_weights", evaluationWeights,
 	)
 	return nil
+}
+
+func (r *Runner) prepareStrategyState() {
+	if r == nil || r.state == nil || r.state.Strategy == strategyVersion {
+		return
+	}
+	for id, state := range r.state.Accounts {
+		state.CandidatePriority = 0
+		state.CandidateCount = 0
+		state.PromotionFrozenCycles = 0
+		r.state.Accounts[id] = state
+	}
+	r.state.Strategy = strategyVersion
 }
 
 func hasPendingChanges(recommendations []Recommendation) bool {
@@ -161,11 +176,13 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 				recommendation.Reason = "自动探索已关闭，恢复探索前优先级"
 				recommendation.applyImmediately = true
 				recommendation.explorationEnd = true
-			case evidence >= int64(r.config.MinSamples):
-				// scoreAccounts has already applied failure and success-rate safety
-				// gates. Preserve that final target while leaving exploration.
+			case hasReliableCost(recommendation):
 				targetPriority := recommendation.RecommendedPriority
-				recommendation.Reason += "；探索样本已足够，进入正式评分确认"
+				recommendation.Reason += "；已有成本证据，结束探索"
+				recommendation.explorationEnd = rampPriority(recommendation.CurrentPriority, targetPriority) == targetPriority
+			case evidence >= int64(r.config.MinSamples):
+				targetPriority := recommendation.RecommendedPriority
+				recommendation.Reason += "；探索样本已足够但无成本，结束探索"
 				recommendation.explorationEnd = recommendation.applyImmediately ||
 					rampPriority(recommendation.CurrentPriority, targetPriority) == targetPriority
 			case explorationExpired(exploration, now):
@@ -191,17 +208,6 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 		return
 	}
 	if !r.config.ExplorationEnabled {
-		for index := range recommendations {
-			recommendation := &recommendations[index]
-			account, ok := byID[recommendation.ID]
-			if !ok || scoringEvidence(account, r.config.MinSamples) >= int64(r.config.MinSamples) ||
-				recommendation.RecommendedPriority >= recommendation.CurrentPriority || recommendation.applyImmediately {
-				continue
-			}
-			recommendation.RecommendedPriority = recommendation.CurrentPriority
-			recommendation.Reason = "自动探索已关闭，低样本账户保持当前优先级"
-		}
-		sortRecommendations(recommendations)
 		return
 	}
 	if r.config.DryRun {
@@ -239,6 +245,9 @@ func (r *Runner) selectExplorationCandidate(accounts []AccountMetrics, now time.
 	eligible := make([]AccountMetrics, 0, len(accounts))
 	for _, account := range accounts {
 		if accountState, ok := r.state.Accounts[account.ID]; ok && accountState.LastExploredAt != nil && now.Sub(*accountState.LastExploredAt) < explorationDuration {
+			continue
+		}
+		if directAccountCost(account).Valid {
 			continue
 		}
 		evidence := scoringEvidence(account, r.config.MinSamples)
@@ -299,21 +308,13 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		recommendation := &recommendations[index]
 		state := r.state.Accounts[recommendation.ID]
 		state.LastSeenAt = timePtr(now)
-		shock, frozen := updatePromotionBaseline(&state, recommendation)
-		if shock || frozen {
-			recommendation.PromotionFrozen = true
-			if shock {
-				recommendation.Reason += "；成本或缓存命中突变，冻结提升两周期"
-			} else {
-				recommendation.Reason += "；提升冻结剩余周期"
-			}
-		}
+		state.PromotionFrozenCycles = 0
 		evidence := recommendation.SuccessfulRequests + recommendation.TerminalFailures
 		recommendation.NextPriority = recommendation.RecommendedPriority
 		if !recommendation.applyImmediately {
 			recommendation.NextPriority = rampPriority(recommendation.CurrentPriority, recommendation.RecommendedPriority)
 		}
-		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately &&
+		if activeExplorationID != 0 && recommendation.ID != activeExplorationID && !recommendation.applyImmediately && !hasReliableCost(recommendation) &&
 			evidence < int64(r.config.MinSamples) && recommendation.RecommendedPriority < recommendation.CurrentPriority {
 			if recommendation.RecommendedPriority != recommendation.CurrentPriority {
 				pending++
@@ -355,34 +356,6 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 				recommendation.ApplyStatus = "unchanged"
 			}
 			continue
-		}
-		if !recommendation.applyImmediately && recommendation.RecommendedPriority < recommendation.CurrentPriority {
-			if recommendation.PromotionFrozen {
-				recommendation.ApplyStatus = "promotion-frozen"
-				state.CandidatePriority = 0
-				state.CandidateCount = 0
-				pending++
-				r.state.Accounts[recommendation.ID] = state
-				continue
-			}
-			if hasReliableCost(recommendation) && !costAdvantageEvidence(recommendation) {
-				recommendation.ApplyStatus = "cost-evidence-gated"
-				recommendation.Reason += "；缺少同域对照成本，禁止提升"
-				state.CandidatePriority = 0
-				state.CandidateCount = 0
-				pending++
-				r.state.Accounts[recommendation.ID] = state
-				continue
-			}
-			if hasReliableCost(recommendation) && recommendation.CostAdvantage < promotionCostAdvantage {
-				recommendation.ApplyStatus = "cost-advantage-gated"
-				recommendation.Reason += fmt.Sprintf("；成本优势 %.1f%% 未达到 %.0f%% 提升门槛", recommendation.CostAdvantage*100, promotionCostAdvantage*100)
-				state.CandidatePriority = 0
-				state.CandidateCount = 0
-				pending++
-				r.state.Accounts[recommendation.ID] = state
-				continue
-			}
 		}
 		if recommendation.applyImmediately {
 			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, recommendation.RecommendedPriority, now, &state) {

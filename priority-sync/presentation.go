@@ -198,7 +198,7 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 	if writer == nil {
 		return nil
 	}
-	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "风险成本/M", "缓存", "延迟P90", "状态"}}
+	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "综合成本/M", "缓存", "延迟P90", "状态"}}
 	for _, recommendation := range recommendations {
 		samples := recommendation.SuccessfulRequests + recommendation.TerminalFailures
 		availability := recommendation.Availability

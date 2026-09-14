@@ -28,8 +28,10 @@ const (
 )
 
 const (
-	costWeight             = 0.90
-	speedWeight            = 0.10
+	costWeight             = 1.00
+	speedWeight            = 0.00
+	evaluationWeights      = "成本=100%,速度=0%,可用性=0%,失败/429=0%"
+	strategyVersion        = "direct-cost-v1"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
 	minimumCostAdvantage   = 0.05
@@ -41,8 +43,8 @@ const (
 	stateRetentionDuration = 24 * time.Hour
 )
 
-// 优先级数值越小越优先。正式评分细分原有的 10..90 空间，低样本账号
-// 的倍率锚点从 30 开始，探索档位 20 与正式评分档位分开。
+// 优先级数值越小越优先。正式评分使用 10..90，探索档位 20 保留给
+// 显式启用的无成本账户探索。
 const (
 	priorityBest         = 10
 	priorityExplore      = 20

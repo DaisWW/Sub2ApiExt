@@ -457,20 +457,6 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close priority metrics rows: %w", err)
 	}
-	if err := s.loadGroupPriorities(ctx, metrics); err != nil {
-		return nil, err
-	}
-	if err := s.loadPoolMetrics(ctx, start, end, metrics, usageColumns); err != nil {
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("load priority model pools: %w", ctx.Err())
-		}
-		if usageColumns["group_id"] {
-			return nil, fmt.Errorf("load priority grouped model pools: %w", err)
-		}
-		// Model pools are enrichment data. Keep the account-level snapshot
-		// usable when an optional/diagnostic pool query is temporarily broken.
-		slog.Default().Warn("模型池指标不可用，继续使用账户级指标", "error", err)
-	}
 	return metrics, nil
 }
 
