@@ -37,6 +37,8 @@ type AccountMetrics struct {
 	RateLimitedRequests      int64
 	RecoveredRateLimited     int64
 	RecoveredRateLimitWeight float64
+	GroupDataAvailable       bool
+	GroupPriorities          map[int64]int
 	Pools                    []PoolMetrics
 	// The primary fields above represent the configured reporting window.
 	// These optional snapshots let scoring use the fixed 24h/6h/7d policy
@@ -70,13 +72,17 @@ type MetricSnapshot struct {
 	TrailingTerminalFailures int64
 }
 
-// PoolMetrics 是同一平台、请求模型和实际上游模型比较池内的账户观测。
+// PoolMetrics 是同一分组档位、平台、模型、端点和上下文类型内的账户观测。
 type PoolMetrics struct {
 	Key                 string
 	Platform            string
 	RequestedModel      string
 	UpstreamModel       string
 	UpstreamEndpoint    string
+	GroupID             int64
+	GroupPriority       int
+	GroupDataAvailable  bool
+	LongContext         bool
 	Model               string
 	SuccessfulRequests  int64
 	TotalTokens         int64

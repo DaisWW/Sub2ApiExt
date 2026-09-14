@@ -149,6 +149,8 @@ WITH usage_candidates AS (
           LOWER(BTRIM(COALESCE(oe.error_owner, ''))) = 'provider'
           OR LOWER(BTRIM(COALESCE(oe.error_source, ''))) IN ('upstream_http', 'upstream_network')
           OR LOWER(BTRIM(COALESCE(oe.error_phase, ''))) IN ('account_auth', 'network', 'upstream')
+          OR oe.upstream_status_code = 429
+          OR oe.upstream_status_code >= 500
       )
     GROUP BY oe.account_id,
              LOWER(REGEXP_REPLACE(
@@ -347,6 +349,15 @@ type MetricsStore struct {
 	db *sql.DB
 }
 
+const priorityAccountGroupsQuery = `
+SELECT ag.account_id, ag.group_id, COALESCE(ag.priority, 0)
+FROM account_groups ag
+JOIN accounts a ON a.id = ag.account_id
+WHERE a.deleted_at IS NULL
+  AND a.schedulable = TRUE
+  AND LOWER(TRIM(a.status)) IN ('active', 'error')
+ORDER BY ag.account_id, ag.group_id`
+
 // windowedMetricsSource is an optional source capability. Callers can keep
 // using metricsSource when this method is unavailable; the 24h snapshot is
 // always the primary account and pool result.
@@ -437,6 +448,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 			item.CostP75PerMillion = costP75.Float64
 		}
 		item.HasCacheReadCost = usageColumns["cache_read_cost"]
+		item.GroupDataAvailable = usageColumns["group_id"]
 		metrics = append(metrics, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -445,15 +457,51 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close priority metrics rows: %w", err)
 	}
+	if err := s.loadGroupPriorities(ctx, metrics); err != nil {
+		return nil, err
+	}
 	if err := s.loadPoolMetrics(ctx, start, end, metrics, usageColumns); err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("load priority model pools: %w", ctx.Err())
+		}
+		if usageColumns["group_id"] {
+			return nil, fmt.Errorf("load priority grouped model pools: %w", err)
 		}
 		// Model pools are enrichment data. Keep the account-level snapshot
 		// usable when an optional/diagnostic pool query is temporarily broken.
 		slog.Default().Warn("模型池指标不可用，继续使用账户级指标", "error", err)
 	}
 	return metrics, nil
+}
+
+func (s *MetricsStore) loadGroupPriorities(ctx context.Context, accounts []AccountMetrics) error {
+	rows, err := s.db.QueryContext(ctx, priorityAccountGroupsQuery)
+	if err != nil {
+		return fmt.Errorf("load priority account groups: %w", err)
+	}
+	defer rows.Close()
+	byID := make(map[int64]int, len(accounts))
+	for index := range accounts {
+		byID[accounts[index].ID] = index
+		accounts[index].GroupPriorities = make(map[int64]int)
+	}
+	for rows.Next() {
+		var accountID, groupID int64
+		var priority int
+		if err := rows.Scan(&accountID, &groupID, &priority); err != nil {
+			return fmt.Errorf("scan priority account group: %w", err)
+		}
+		if index, ok := byID[accountID]; ok {
+			accounts[index].GroupPriorities[groupID] = priority
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate priority account groups: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close priority account group rows: %w", err)
+	}
+	return nil
 }
 
 // LoadAccountMetricsWindows loads the fixed policy windows. The 24h result is
@@ -547,14 +595,18 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 				// Keep a 7d-only pool available for traffic weighting, but do not
 				// let its long-window aggregates masquerade as current evidence.
 				primary[index].Pools = append(primary[index].Pools, PoolMetrics{
-					Key:              pool.Key,
-					Platform:         pool.Platform,
-					RequestedModel:   pool.RequestedModel,
-					UpstreamModel:    pool.UpstreamModel,
-					UpstreamEndpoint: pool.UpstreamEndpoint,
-					Model:            pool.Model,
-					RateMultiplier:   pool.RateMultiplier,
-					Window7d:         poolMetricSnapshot(pool),
+					Key:                pool.Key,
+					Platform:           pool.Platform,
+					RequestedModel:     pool.RequestedModel,
+					UpstreamModel:      pool.UpstreamModel,
+					UpstreamEndpoint:   pool.UpstreamEndpoint,
+					GroupID:            pool.GroupID,
+					GroupPriority:      pool.GroupPriority,
+					GroupDataAvailable: pool.GroupDataAvailable,
+					LongContext:        pool.LongContext,
+					Model:              pool.Model,
+					RateMultiplier:     pool.RateMultiplier,
+					Window7d:           poolMetricSnapshot(pool),
 				})
 			}
 		}
@@ -763,15 +815,15 @@ func priorityErrorRequestsExpr(columns, sharedRequestColumns map[string]bool) st
 	if columns["error_phase"] {
 		ownerFilters = append(ownerFilters, "LOWER(BTRIM(COALESCE(oe.error_phase, ''))) IN ('account_auth', 'network', 'upstream')")
 	}
-	if len(ownerFilters) > 0 {
-		filters = append(filters, "("+strings.Join(ownerFilters, " OR ")+")")
-	} else if len(rateLimited) == 1 && rateLimited[0] == "FALSE" {
-		return "SELECT NULL::bigint AS account_id, NULL::text AS request_key, NULL::timestamptz AS error_at, FALSE AS rate_limited, 0::double precision AS retry_after_seconds WHERE FALSE"
-	} else {
-		// Without an owner/source/phaseker, only an explicit rate-limit
-		// signal is safe enough to use as upstream evidence.
-		filters = append(filters, "("+strings.Join(rateLimited, " OR ")+")")
+	upstreamEvidence := append([]string{}, ownerFilters...)
+	if columns["upstream_status_code"] {
+		upstreamEvidence = append(upstreamEvidence, "oe.upstream_status_code = 429")
+		upstreamEvidence = append(upstreamEvidence, "oe.upstream_status_code >= 500")
 	}
+	if len(upstreamEvidence) == 0 {
+		return "SELECT NULL::bigint AS account_id, NULL::text AS request_key, NULL::timestamptz AS error_at, FALSE AS rate_limited, 0::double precision AS retry_after_seconds WHERE FALSE"
+	}
+	filters = append(filters, "("+strings.Join(upstreamEvidence, " OR ")+")")
 	requestColumns := cloneColumns(sharedRequestColumns)
 	requestColumns["id"] = columns["id"]
 	requestKey := priorityRequestKeyExpr("oe", requestColumns, "error")
@@ -810,6 +862,9 @@ SELECT ul.account_id,
        LOWER(BTRIM(__REQUESTED_MODEL__)),
        LOWER(BTRIM(__UPSTREAM_MODEL__)),
        LOWER(BTRIM(__UPSTREAM_ENDPOINT__)),
+       __GROUP_ID__,
+       __GROUP_PRIORITY__,
+       __LONG_CONTEXT__,
        COUNT(*)::bigint,
        COALESCE(SUM(__INPUT_TOKENS__::bigint +
                     __OUTPUT_TOKENS__::bigint +
@@ -850,6 +905,7 @@ SELECT ul.account_id,
          FILTER (WHERE __FIRST_TOKEN__ IS NOT NULL AND __FIRST_TOKEN__ > 0)
 FROM usage_rows ul
 JOIN accounts a ON a.id = ul.account_id
+__ACCOUNT_GROUP_JOIN__
 WHERE a.deleted_at IS NULL
   AND a.schedulable = TRUE
   AND LOWER(TRIM(a.status)) IN ('active', 'error')
@@ -857,8 +913,11 @@ GROUP BY ul.account_id,
          LOWER(BTRIM(COALESCE(NULLIF(a.platform, ''), 'unknown'))),
          LOWER(BTRIM(__REQUESTED_MODEL__)),
          LOWER(BTRIM(__UPSTREAM_MODEL__)),
-         LOWER(BTRIM(__UPSTREAM_ENDPOINT__))
-ORDER BY ul.account_id, 2, 3, 4, 5`
+         LOWER(BTRIM(__UPSTREAM_ENDPOINT__)),
+         __GROUP_ID__,
+         __GROUP_PRIORITY__,
+         __LONG_CONTEXT__
+ORDER BY ul.account_id, 2, 3, 4, 5, 6, 7, 8`
 
 var priorityPoolMetricsQuery = priorityPoolMetricsQueryForColumns(priorityPoolColumns(
 	"id",
@@ -878,6 +937,8 @@ var priorityPoolMetricsQuery = priorityPoolMetricsQueryForColumns(priorityPoolCo
 	"upstream_response_model",
 	"upstream_model",
 	"upstream_endpoint",
+	"group_id",
+	"long_context_billing_applied",
 	"input_cost",
 	"output_cost",
 	"cache_creation_cost",
@@ -901,6 +962,10 @@ func priorityPoolMetricsQueryForColumns(columns map[string]bool) string {
 		"__REQUESTED_MODEL__", priorityPoolModelExpr(columns, "requested_model", "model"),
 		"__UPSTREAM_MODEL__", priorityPoolModelExpr(columns, "upstream_response_model", "upstream_model", "model"),
 		"__UPSTREAM_ENDPOINT__", priorityPoolModelExpr(columns, "upstream_endpoint"),
+		"__GROUP_ID__", priorityPoolGroupIDExpr(columns),
+		"__GROUP_PRIORITY__", priorityPoolGroupPriorityExpr(columns),
+		"__LONG_CONTEXT__", priorityPoolLongContextExpr(columns),
+		"__ACCOUNT_GROUP_JOIN__", priorityPoolAccountGroupJoin(columns),
 		"__INPUT_TOKENS__", priorityPoolValueExpr(columns, "input_tokens"),
 		"__OUTPUT_TOKENS__", priorityPoolValueExpr(columns, "output_tokens"),
 		"__CACHE_CREATION_TOKENS__", priorityPoolValueExpr(columns, "cache_creation_tokens"),
@@ -916,6 +981,34 @@ func priorityPoolMetricsQueryForColumns(columns map[string]bool) string {
 		"__DURATION__", priorityPoolNullableExpr(columns, "duration_ms"),
 		"__FIRST_TOKEN__", priorityPoolNullableExpr(columns, "first_token_ms"),
 	).Replace(priorityPoolMetricsQueryTemplate)
+}
+
+func priorityPoolGroupIDExpr(columns map[string]bool) string {
+	if columns["group_id"] {
+		return "COALESCE(ul.group_id, 0)::bigint"
+	}
+	return "0::bigint"
+}
+
+func priorityPoolGroupPriorityExpr(columns map[string]bool) string {
+	if columns["group_id"] {
+		return "COALESCE(ag.priority, 0)"
+	}
+	return "0"
+}
+
+func priorityPoolLongContextExpr(columns map[string]bool) string {
+	if columns["long_context_billing_applied"] {
+		return "COALESCE(ul.long_context_billing_applied, FALSE)"
+	}
+	return "FALSE"
+}
+
+func priorityPoolAccountGroupJoin(columns map[string]bool) string {
+	if columns["group_id"] {
+		return "LEFT JOIN account_groups ag ON ag.account_id = ul.account_id AND ag.group_id = ul.group_id"
+	}
+	return ""
 }
 
 func priorityPoolModelExpr(columns map[string]bool, names ...string) string {
@@ -989,7 +1082,7 @@ func (s *MetricsStore) loadPoolMetrics(ctx context.Context, start, end time.Time
 		var costP75, latencyP90, firstTokenP90 sql.NullFloat64
 		if err := rows.Scan(
 			&accountID, &pool.Platform, &pool.RequestedModel, &pool.UpstreamModel,
-			&pool.UpstreamEndpoint,
+			&pool.UpstreamEndpoint, &pool.GroupID, &pool.GroupPriority, &pool.LongContext,
 			&pool.SuccessfulRequests, &pool.TotalTokens,
 			&pool.InputTokens, &pool.OutputTokens, &pool.CacheCreationTokens, &pool.CacheReadTokens,
 			&pool.AccountCost, &pool.ActualCost,
@@ -1009,6 +1102,7 @@ func (s *MetricsStore) loadPoolMetrics(ctx context.Context, start, end time.Time
 			pool.CostP75PerMillion = costP75.Float64
 		}
 		pool.HasCacheReadCost = columns["cache_read_cost"]
+		pool.GroupDataAvailable = columns["group_id"]
 		pool.Model = pool.UpstreamModel
 		pool.Key = poolIdentity(pool)
 		if index, ok := byID[accountID]; ok {

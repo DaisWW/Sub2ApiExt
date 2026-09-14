@@ -42,7 +42,7 @@ func TestPriorityMetricsQueryUsesRawEvidenceAndCooldowns(t *testing.T) {
 			t.Errorf("query missing %q", marker)
 		}
 	}
-	for _, marker := range []string{"requested_model", "upstream_response_model", "upstream_model", "upstream_endpoint", "input_tokens", "cache_read_tokens", "GROUP BY ul.account_id"} {
+	for _, marker := range []string{"requested_model", "upstream_response_model", "upstream_model", "upstream_endpoint", "ul.group_id", "ag.priority", "long_context_billing_applied", "LEFT JOIN account_groups", "input_tokens", "cache_read_tokens", "GROUP BY ul.account_id"} {
 		if !strings.Contains(priorityPoolMetricsQuery, marker) {
 			t.Errorf("pool query missing %q", marker)
 		}
@@ -60,6 +60,7 @@ func TestPriorityPoolQueryFallsBackForMissingEnhancementColumns(t *testing.T) {
 	))
 	for _, forbidden := range []string{
 		"ul.requested_model", "ul.upstream_response_model", "ul.upstream_model", "ul.upstream_endpoint", "ul.inbound_endpoint",
+		"ul.group_id", "ul.long_context_billing_applied", "account_groups ag",
 		"ul.cache_creation_tokens", "ul.cache_read_tokens",
 		"ul.input_cost", "ul.output_cost", "ul.cache_creation_cost", "ul.cache_read_cost",
 	} {
@@ -67,7 +68,7 @@ func TestPriorityPoolQueryFallsBackForMissingEnhancementColumns(t *testing.T) {
 			t.Errorf("fallback query still references missing column %q", forbidden)
 		}
 	}
-	if !strings.Contains(query, "'unknown'") || !strings.Contains(query, "SUM(0)") {
+	if !strings.Contains(query, "'unknown'") || !strings.Contains(query, "SUM(0)") || !strings.Contains(query, "0::bigint") || !strings.Contains(query, "FALSE") {
 		t.Fatalf("fallback query did not emit safe defaults: %s", query)
 	}
 }
@@ -193,10 +194,35 @@ func TestPriorityErrorQueryDisablesUndeduplicableSchema(t *testing.T) {
 	}
 }
 
+func TestPriorityErrorQueryKeepsExplicitUpstreamFailuresWithoutOwnerMetadata(t *testing.T) {
+	query := priorityErrorRequestsExpr(
+		priorityPoolColumns("id", "account_id", "created_at", "client_request_id", "status_code", "upstream_status_code"),
+		priorityPoolColumns("client_request_id"),
+	)
+	for _, required := range []string{"oe.upstream_status_code = 429", "oe.upstream_status_code >= 500"} {
+		if !strings.Contains(query, required) {
+			t.Fatalf("explicit upstream evidence missing %q from %s", required, query)
+		}
+		if !strings.Contains(priorityMetricsQuery, required) {
+			t.Fatalf("full query missing explicit upstream evidence %q", required)
+		}
+	}
+}
+
+func TestPriorityErrorQueryRejectsAmbiguousRateLimitsWithoutUpstreamEvidence(t *testing.T) {
+	query := priorityErrorRequestsExpr(
+		priorityPoolColumns("id", "account_id", "created_at", "client_request_id", "status_code", "error_type"),
+		priorityPoolColumns("client_request_id"),
+	)
+	if !strings.Contains(query, "WHERE FALSE") || strings.Contains(query, "FROM ops_error_logs") {
+		t.Fatalf("ambiguous rate limit schema was treated as upstream evidence: %s", query)
+	}
+}
+
 func TestPriorityMetricsCompatUsesRequestIDSharedByBothTables(t *testing.T) {
 	query := priorityMetricsQueryForColumns(
 		priorityPoolColumns("id", "account_id", "created_at", "request_id", "client_request_id"),
-		priorityPoolColumns("id", "account_id", "created_at", "client_request_id", "status_code"),
+		priorityPoolColumns("id", "account_id", "created_at", "client_request_id", "status_code", "error_owner"),
 	)
 	usagePrefix, _, ok := strings.Cut(query, "), usage_rows AS MATERIALIZED")
 	if !ok {
@@ -213,7 +239,7 @@ func TestPriorityMetricsCompatUsesRequestIDSharedByBothTables(t *testing.T) {
 func TestPriorityMetricsCompatCorrelatesUsageRequestToErrorClientRequest(t *testing.T) {
 	query := priorityMetricsQueryForColumns(
 		priorityPoolColumns("id", "account_id", "created_at", "request_id"),
-		priorityPoolColumns("id", "account_id", "created_at", "request_id", "client_request_id", "status_code"),
+		priorityPoolColumns("id", "account_id", "created_at", "request_id", "client_request_id", "status_code", "error_owner"),
 	)
 	usagePrefix, _, ok := strings.Cut(query, "), usage_rows AS MATERIALIZED")
 	if !ok {

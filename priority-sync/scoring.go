@@ -15,11 +15,13 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		minSamples = defaultMinSamples
 	}
 	pools := aggregatePools(accounts, now, minSamples)
+	groupAwarePools := metricsContainGroupData(accounts, pools)
 	costValues := make([]float64, len(accounts))
 	observedValues := make([]float64, len(accounts))
 	fallbackValues := make([]float64, len(accounts))
 	cacheHitRates := make([]float64, len(accounts))
 	cacheHitRateKnown := make([]bool, len(accounts))
+	comparablePoolCounts := make([]int, len(accounts))
 	multiplierValues := make([]float64, len(accounts))
 	speedValues := make([]float64, len(accounts))
 	costValid := make([]bool, len(accounts))
@@ -34,11 +36,12 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		evidence := scoringEvidence(account, minSamples)
 		hardExcluded, _ := accountHardExcluded(account, now)
 		peerEligible := evidence >= int64(minSamples) && !hardExcluded
-		observed, fallback, hitRate, tokens := accountRiskCost(account, pools)
+		observed, fallback, hitRate, tokens, comparablePools, cacheKnown := accountRiskCost(account, pools)
 		observedValues[index] = observed
 		fallbackValues[index] = fallback
 		cacheHitRates[index] = hitRate
-		cacheHitRateKnown[index] = accountHasCacheEvidence(account)
+		cacheHitRateKnown[index] = cacheKnown
+		comparablePoolCounts[index] = comparablePools
 		if tokens > 0 && observed > 0 && validScore(observed) {
 			lambda := float64(tokens) / float64(tokens+shrinkTokens)
 			anchor := multiplierAnchorCost(account, pools)
@@ -58,10 +61,11 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		speedValid[index] = speedValues[index] > 0 && validScore(speedValues[index])
 		peerSpeedValid[index] = speedValid[index] && peerEligible
 	}
-	costAdvantages, costAdvantageKnown = computeCostAdvantages(accounts, pools, costValues, costValid, now, minSamples)
-	costScores := normalizeLowerBetter(costValues, peerCostValid)
-	multiplierScores := normalizeLowerBetter(multiplierValues, multiplierEligible)
-	speedScores := normalizeLowerBetter(speedValues, peerSpeedValid)
+	components := comparisonComponents(accounts, pools, now)
+	costAdvantages, costAdvantageKnown = computeCostAdvantages(accounts, costValues, costValid, components, now, minSamples)
+	costScores := normalizeLowerBetterByComponent(costValues, peerCostValid, components)
+	multiplierScores := normalizeLowerBetterByComponent(multiplierValues, multiplierEligible, components)
+	speedScores := normalizeLowerBetterByComponent(speedValues, peerSpeedValid, components)
 
 	result := make([]Recommendation, 0, len(accounts))
 	for index, account := range accounts {
@@ -94,10 +98,12 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			recommended = maxPriority(currentPriority, priorityDegraded)
 			reason = "连续 3 次最终失败，立即降级"
 			applyImmediately = true
-		} else if evidence >= int64(minSamples) {
+		} else if evidence >= int64(minSamples) && costValid[index] {
 			recommended = priorityForScore(score)
-			reason = fmt.Sprintf("风险成本 %.4f/M、实测 %.4f/M、后备 %.4f/M、模型池 %d、缓存命中 %.1f%%", costValues[index], observedValues[index], fallbackValues[index], len(account.Pools), cacheHitRates[index]*100)
-		} else if anchorPriority != currentPriority {
+			reason = fmt.Sprintf("风险成本 %.4f/M、实测 %.4f/M、后备 %.4f/M、可比池 %d、缓存命中 %.1f%%", costValues[index], observedValues[index], fallbackValues[index], comparablePoolCounts[index], cacheHitRates[index]*100)
+		} else if evidence >= int64(minSamples) {
+			reason = "无同档可比成本证据，保持当前优先级"
+		} else if (!groupAwarePools || comparablePoolCounts[index] > 0) && anchorPriority != currentPriority {
 			recommended = anchorPriority
 			reason = fmt.Sprintf("证据不足，向倍率锚点优先级 %d 缓慢靠近", anchorPriority)
 		}
@@ -144,17 +150,17 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			recommendation.CostAdvantage = costAdvantages[index]
 			recommendation.CacheHitRate = cacheHitRates[index]
 			recommendation.CacheHitRateKnown = cacheHitRateKnown[index]
-			recommendation.PoolCount = len(account.Pools)
+			recommendation.PoolCount = comparablePoolCounts[index]
 		}
 		result = append(result, recommendation)
 	}
-	enforceCostDominance(result, costValues, peerCostValid)
+	enforceCostDominance(result, costValues, peerCostValid, components)
 	for index := range result {
 		if result[index].HardExcluded {
 			continue
 		}
 		account := accounts[index]
-		if result[index].Confidence >= 1 && !result[index].applyImmediately {
+		if result[index].Confidence >= 1 && costValid[index] && !result[index].applyImmediately {
 			result[index].RecommendedPriority = priorityForScore(result[index].Score)
 		}
 		successes, failures, hasSafetyEvidence := promotionSafetyOutcomes(account, minSamples)
@@ -168,8 +174,9 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		// weekly failure mix when today had no completed requests.
 		if hasSafetyEvidence {
 			if successRate < 0.90 && evidence >= 20 {
-				if result[index].RecommendedPriority < priorityDegraded {
-					result[index].RecommendedPriority = priorityDegraded
+				minimumPriority := maxPriority(result[index].CurrentPriority, priorityDegraded)
+				if result[index].RecommendedPriority < minimumPriority {
+					result[index].RecommendedPriority = minimumPriority
 				}
 				result[index].Reason += "；最终成功率低于 90%，进入明显降级区间"
 			} else if successRate < 0.95 && result[index].RecommendedPriority < result[index].CurrentPriority {
@@ -184,6 +191,11 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 
 type poolAggregate struct {
 	Platform                  string
+	GroupID                   int64
+	GroupPriority             int
+	GroupDataAvailable        bool
+	LongContext               bool
+	CandidateCount            int
 	InputTokens               int64
 	OutputTokens              int64
 	CacheCreationTokens       int64
@@ -218,6 +230,10 @@ func aggregatePools(accounts []AccountMetrics, now time.Time, minSamples int) ma
 			item := result[key]
 			if item.Platform == "" {
 				item.Platform = poolPlatform(pool)
+				item.GroupID = pool.GroupID
+				item.GroupPriority = pool.GroupPriority
+				item.GroupDataAvailable = pool.GroupDataAvailable
+				item.LongContext = pool.LongContext
 			}
 			item.InputTokens += maxInt64(pool.InputTokens, 0)
 			item.OutputTokens += maxInt64(pool.OutputTokens, 0)
@@ -303,11 +319,22 @@ func aggregatePools(accounts []AccountMetrics, now time.Time, minSamples int) ma
 			result[poolIdentity(pool)] = item
 		}
 	}
+	for key, item := range result {
+		if item.GroupID > 0 {
+			for _, account := range accounts {
+				hardExcluded, _ := accountHardExcluded(account, now)
+				if !hardExcluded && accountCanCompeteInPool(account, item) {
+					item.CandidateCount++
+				}
+			}
+		}
+		result[key] = item
+	}
 	return result
 }
 
 func poolIdentity(pool PoolMetrics) string {
-	if key := strings.TrimSpace(pool.Key); key != "" {
+	if key := strings.TrimSpace(pool.Key); key != "" && pool.GroupID <= 0 {
 		return strings.ToLower(key)
 	}
 	platform := normalizePoolPart(pool.Platform)
@@ -328,11 +355,120 @@ func poolIdentity(pool PoolMetrics) string {
 	if upstream == "" {
 		upstream = "unknown"
 	}
-	identity := platform + ":" + requested + ":" + upstream
+	identity := platform
+	if pool.GroupID > 0 {
+		identity += fmt.Sprintf(":group=%d:tier=%d", pool.GroupID, pool.GroupPriority)
+	}
+	identity += ":" + requested + ":" + upstream
 	if endpoint := normalizePoolPart(pool.UpstreamEndpoint); endpoint != "" {
 		identity += ":" + endpoint
 	}
+	if pool.LongContext {
+		identity += ":long-context"
+	}
 	return identity
+}
+
+func accountCanCompeteInPool(account AccountMetrics, pool poolAggregate) bool {
+	if pool.GroupID <= 0 {
+		return true
+	}
+	priority, ok := account.GroupPriorities[pool.GroupID]
+	if !ok || priority != pool.GroupPriority {
+		return false
+	}
+	platform := normalizePoolPart(account.Platform)
+	return platform == "" || platform == pool.Platform
+}
+
+func poolsContainGroupData(pools map[string]poolAggregate) bool {
+	for _, pool := range pools {
+		if pool.GroupDataAvailable || pool.GroupID > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func metricsContainGroupData(accounts []AccountMetrics, pools map[string]poolAggregate) bool {
+	if poolsContainGroupData(pools) {
+		return true
+	}
+	for _, account := range accounts {
+		if account.GroupDataAvailable {
+			return true
+		}
+	}
+	return false
+}
+
+func accountMatchesPoolPlatform(account AccountMetrics, pool poolAggregate) bool {
+	if platform := normalizePoolPart(account.Platform); platform != "" {
+		return platform == pool.Platform
+	}
+	for _, accountPool := range account.Pools {
+		if poolPlatform(accountPool) == pool.Platform {
+			return true
+		}
+	}
+	return pool.Platform == "unknown"
+}
+
+func poolComparableForAccount(account AccountMetrics, pool poolAggregate, groupAware bool) bool {
+	if !accountMatchesPoolPlatform(account, pool) {
+		return false
+	}
+	if !groupAware {
+		return true
+	}
+	return pool.GroupID > 0 && pool.CandidateCount >= 2 && accountCanCompeteInPool(account, pool)
+}
+
+func comparisonComponents(accounts []AccountMetrics, pools map[string]poolAggregate, now time.Time) []int {
+	// A shared candidate pool connects account rankings transitively because
+	// each account can receive only one global priority across all groups.
+	parents := make([]int, len(accounts))
+	for index := range parents {
+		parents[index] = index
+	}
+	find := func(index int) int {
+		for parents[index] != index {
+			parents[index] = parents[parents[index]]
+			index = parents[index]
+		}
+		return index
+	}
+	join := func(left, right int) {
+		leftRoot, rightRoot := find(left), find(right)
+		if leftRoot != rightRoot {
+			parents[rightRoot] = leftRoot
+		}
+	}
+	if len(pools) == 0 {
+		for index := 1; index < len(accounts); index++ {
+			join(0, index)
+		}
+	} else {
+		groupAware := metricsContainGroupData(accounts, pools)
+		for _, pool := range pools {
+			first := -1
+			for index, account := range accounts {
+				hardExcluded, _ := accountHardExcluded(account, now)
+				if hardExcluded || !poolComparableForAccount(account, pool, groupAware) {
+					continue
+				}
+				if first < 0 {
+					first = index
+					continue
+				}
+				join(first, index)
+			}
+		}
+	}
+	for index := range parents {
+		parents[index] = find(index)
+	}
+	return parents
 }
 
 func normalizePoolPart(value string) string {
@@ -518,43 +654,49 @@ func poolMissCostPerMillion(pool PoolMetrics) float64 {
 	return (pool.AccountCost - pool.CacheReadCost) * 1_000_000 / float64(nonCacheTokens)
 }
 
-func accountRiskCost(account AccountMetrics, pools map[string]poolAggregate) (observed, fallback, hitRate float64, tokens int64) {
+func accountRiskCost(account AccountMetrics, pools map[string]poolAggregate) (observed, fallback, hitRate float64, tokens int64, comparablePools int, cacheKnown bool) {
 	if len(pools) == 0 {
-		return accountWindowRiskCost(account)
+		if account.GroupDataAvailable {
+			return 0, 0, 0, 0, 0, false
+		}
+		observed, fallback, hitRate, tokens = accountWindowRiskCost(account)
+		return observed, fallback, hitRate, tokens, 0, accountHasCacheEvidence(account)
 	}
+	groupAware := account.GroupDataAvailable || poolsContainGroupData(pools)
 	accountPools := make(map[string]PoolMetrics, len(account.Pools))
 	for _, pool := range account.Pools {
 		accountPools[poolIdentity(pool)] = pool
 	}
-	platforms := map[string]struct{}{}
-	if platform := normalizePoolPart(account.Platform); platform != "" {
-		platforms[platform] = struct{}{}
-	}
-	for _, pool := range account.Pools {
-		platforms[poolPlatform(pool)] = struct{}{}
-	}
-	if len(platforms) == 0 {
-		platforms["unknown"] = struct{}{}
-	}
 	allTokens := int64(0)
 	poolCount := 0
 	for _, pool := range pools {
-		if _, eligible := platforms[pool.Platform]; !eligible {
+		if !poolComparableForAccount(account, pool, groupAware) {
 			continue
 		}
-		allTokens += poolTrafficTokens(pool)
+		trafficTokens := poolTrafficTokens(pool)
+		if trafficTokens <= 0 {
+			continue
+		}
+		allTokens += trafficTokens
 		poolCount++
 	}
 	if allTokens <= 0 || poolCount == 0 {
-		return accountWindowRiskCost(account)
+		if groupAware {
+			return 0, 0, 0, 0, 0, false
+		}
+		observed, fallback, hitRate, tokens = accountWindowRiskCost(account)
+		return observed, fallback, hitRate, tokens, 0, accountHasCacheEvidence(account)
 	}
 	uniformWeight := 0.1 / float64(poolCount)
 	var fallbackTotal, observedTotal, costWeightUsed, cacheTotal, cacheWeightUsed float64
 	for key, aggregate := range pools {
-		if _, eligible := platforms[aggregate.Platform]; !eligible {
+		if !poolComparableForAccount(account, aggregate, groupAware) {
 			continue
 		}
 		trafficTokens := poolTrafficTokens(aggregate)
+		if trafficTokens <= 0 {
+			continue
+		}
 		trafficWeight := 0.9*float64(maxInt64(trafficTokens, 0))/float64(allTokens) + uniformWeight
 		pool, exists := accountPools[key]
 		if exists && !poolHasCostEvidence(pool) {
@@ -621,14 +763,18 @@ func accountRiskCost(account AccountMetrics, pools map[string]poolAggregate) (ob
 		costWeightUsed += trafficWeight
 	}
 	if costWeightUsed <= 0 {
-		return accountWindowRiskCost(account)
+		if groupAware {
+			return 0, 0, 0, 0, poolCount, false
+		}
+		observed, fallback, hitRate, tokens = accountWindowRiskCost(account)
+		return observed, fallback, hitRate, tokens, 0, accountHasCacheEvidence(account)
 	}
 	observedTotal /= costWeightUsed
 	fallbackTotal /= costWeightUsed
 	if cacheWeightUsed > 0 {
 		cacheTotal /= cacheWeightUsed
 	}
-	return observedTotal, fallbackTotal, cacheTotal, tokens
+	return observedTotal, fallbackTotal, cacheTotal, tokens, poolCount, cacheWeightUsed > 0
 }
 
 func poolHasRecentEvidence(pool PoolMetrics) bool {
@@ -762,11 +908,11 @@ func poolRiskCost(pool PoolMetrics, aggregate poolAggregate, peerCosts []float64
 	return recent
 }
 
-func computeCostAdvantages(accounts []AccountMetrics, pools map[string]poolAggregate, costs []float64, valid []bool, now time.Time, minSamples int) ([]float64, []bool) {
+func computeCostAdvantages(accounts []AccountMetrics, costs []float64, valid []bool, components []int, now time.Time, minSamples int) ([]float64, []bool) {
 	result := make([]float64, len(accounts))
 	known := make([]bool, len(accounts))
 	for index, account := range accounts {
-		if index >= len(costs) || index >= len(valid) || !valid[index] || costs[index] <= 0 {
+		if index >= len(costs) || index >= len(valid) || index >= len(components) || !valid[index] || costs[index] <= 0 {
 			continue
 		}
 		hardExcluded, _ := accountHardExcluded(account, now)
@@ -774,29 +920,16 @@ func computeCostAdvantages(accounts []AccountMetrics, pools map[string]poolAggre
 			continue
 		}
 		peers := make([]float64, 0)
-		for _, pool := range account.Pools {
-			aggregate := pools[poolIdentity(pool)]
-			values := aggregate.PeerCosts24hByAccount
-			if len(values) == 0 {
-				values = aggregate.PeerCostsByAccount
+		for peerIndex, peer := range accounts {
+			if peerIndex == index || peerIndex >= len(costs) || peerIndex >= len(valid) || peerIndex >= len(components) ||
+				components[peerIndex] != components[index] || !valid[peerIndex] || costs[peerIndex] <= 0 {
+				continue
 			}
-			for peerID, value := range values {
-				if peerID != account.ID && value > 0 && validScore(value) {
-					peers = append(peers, value)
-				}
+			peerHardExcluded, _ := accountHardExcluded(peer, now)
+			if peerHardExcluded || scoringEvidence(peer, minSamples) < int64(minSamples) {
+				continue
 			}
-		}
-		if len(peers) == 0 && len(pools) == 0 {
-			for peerIndex, peer := range accounts {
-				if peerIndex == index || peerIndex >= len(costs) || peerIndex >= len(valid) || !valid[peerIndex] || costs[peerIndex] <= 0 {
-					continue
-				}
-				peerHardExcluded, _ := accountHardExcluded(peer, now)
-				if peerHardExcluded || scoringEvidence(peer, minSamples) < int64(minSamples) {
-					continue
-				}
-				peers = append(peers, costs[peerIndex])
-			}
+			peers = append(peers, costs[peerIndex])
 		}
 		peerMedian := percentile(peers, 0.5)
 		if peerMedian > 0 && validScore(peerMedian) {
@@ -813,9 +946,13 @@ func multiplierAnchorCost(account AccountMetrics, pools map[string]poolAggregate
 	if account.RateMultiplier <= 0 || !validScore(account.RateMultiplier) {
 		return 0
 	}
+	groupAware := account.GroupDataAvailable || poolsContainGroupData(pools)
 	var anchor, weight float64
 	for _, pool := range account.Pools {
 		aggregate := pools[poolIdentity(pool)]
+		if !poolComparableForAccount(account, aggregate, groupAware) {
+			continue
+		}
 		peerCosts := mapValues(aggregate.PeerCostsByAccount)
 		if len(peerCosts) == 0 {
 			peerCosts = mapValues(aggregate.CostsByAccount)
@@ -929,10 +1066,11 @@ func scoringOutcomeSnapshot(account AccountMetrics, minSamples int) (string, *Me
 
 func promotionSafetyOutcomes(account AccountMetrics, minSamples int) (successes, failures int64, ok bool) {
 	if account.Window24h != nil {
-		if !snapshotHasOutcomes(account.Window24h) {
-			return 0, 0, false
+		successes = maxInt64(account.Window24h.SuccessfulRequests, 0)
+		failures = maxInt64(account.Window24h.TerminalFailures, 0)
+		if successes+failures >= int64(minSamples) || failures > 0 {
+			return successes, failures, true
 		}
-		return maxInt64(account.Window24h.SuccessfulRequests, 0), maxInt64(account.Window24h.TerminalFailures, 0), true
 	}
 	successes, failures, _ = scoringOutcomes(account, minSamples)
 	return successes, failures, successes+failures > 0
@@ -1032,7 +1170,7 @@ func percentile(values []float64, quantile float64) float64 {
 	return copyValues[low] + (copyValues[high]-copyValues[low])*(position-float64(low))
 }
 
-func enforceCostDominance(recommendations []Recommendation, costs []float64, valid []bool) {
+func enforceCostDominance(recommendations []Recommendation, costs []float64, valid []bool, components []int) {
 	indices := make([]int, 0, len(recommendations))
 	for index := range recommendations {
 		if index < len(costs) && index < len(valid) && valid[index] && costs[index] > 0 {
@@ -1044,6 +1182,9 @@ func enforceCostDominance(recommendations []Recommendation, costs []float64, val
 		current := indices[i]
 		for j := 0; j < i; j++ {
 			previous := indices[j]
+			if current >= len(components) || previous >= len(components) || components[current] != components[previous] {
+				continue
+			}
 			if costs[current] <= costs[previous]*(1+minimumCostAdvantage) {
 				continue
 			}
@@ -1188,6 +1329,33 @@ func normalizeLowerBetter(values []float64, valid []bool) []float64 {
 			continue
 		}
 		result[index] = 100 * (upper - clamp(value, lower, upper)) / (upper - lower)
+	}
+	return result
+}
+
+func normalizeLowerBetterByComponent(values []float64, valid []bool, components []int) []float64 {
+	if len(components) != len(values) {
+		return normalizeLowerBetter(values, valid)
+	}
+	result := make([]float64, len(values))
+	for index := range result {
+		result[index] = 50
+	}
+	groups := make(map[int][]int)
+	for index, component := range components {
+		groups[component] = append(groups[component], index)
+	}
+	for _, indices := range groups {
+		componentValid := make([]bool, len(values))
+		for _, index := range indices {
+			if index < len(valid) {
+				componentValid[index] = valid[index]
+			}
+		}
+		scores := normalizeLowerBetter(values, componentValid)
+		for _, index := range indices {
+			result[index] = scores[index]
+		}
 	}
 	return result
 }

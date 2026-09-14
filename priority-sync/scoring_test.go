@@ -382,6 +382,190 @@ func TestPoolIdentityNormalizesModelFallbacks(t *testing.T) {
 	if got := poolIdentity(PoolMetrics{Platform: " OpenAI ", RequestedModel: " GPT-5 ", UpstreamModel: "Actual", UpstreamEndpoint: " /v1/Responses "}); got != "openai:gpt-5:actual:/v1/responses" {
 		t.Fatalf("endpoint-aware pool identity = %q", got)
 	}
+	if got := poolIdentity(PoolMetrics{Platform: "openai", RequestedModel: "gpt-5", UpstreamModel: "actual", GroupID: 7, GroupPriority: 2, LongContext: true}); got != "openai:group=7:tier=2:gpt-5:actual:long-context" {
+		t.Fatalf("group- and context-aware pool identity = %q", got)
+	}
+}
+
+func TestScoreAccountsOnlyComparesSameGroupAndTier(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	pool := func(groupID int64, groupPriority int, cost float64) PoolMetrics {
+		return PoolMetrics{
+			Platform: "openai", RequestedModel: "gpt-test", UpstreamModel: "gpt-test",
+			GroupID: groupID, GroupPriority: groupPriority, SuccessfulRequests: 20,
+			TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: cost, InputCost: cost,
+		}
+	}
+	tests := []struct {
+		name   string
+		first  AccountMetrics
+		second AccountMetrics
+	}{
+		{
+			name: "different groups",
+			first: AccountMetrics{ID: 1, Name: "cheap", Platform: "openai", Status: "active", CurrentPriority: 90, SuccessfulRequests: 20,
+				GroupPriorities: map[int64]int{10: 0}, Pools: []PoolMetrics{pool(10, 0, 1)}},
+			second: AccountMetrics{ID: 2, Name: "expensive", Platform: "openai", Status: "active", CurrentPriority: 10, SuccessfulRequests: 20,
+				GroupPriorities: map[int64]int{20: 0}, Pools: []PoolMetrics{pool(20, 0, 10)}},
+		},
+		{
+			name: "different group tiers",
+			first: AccountMetrics{ID: 1, Name: "cheap", Platform: "openai", Status: "active", CurrentPriority: 90, SuccessfulRequests: 20,
+				GroupPriorities: map[int64]int{10: 0}, Pools: []PoolMetrics{pool(10, 0, 1)}},
+			second: AccountMetrics{ID: 2, Name: "expensive", Platform: "openai", Status: "active", CurrentPriority: 10, SuccessfulRequests: 20,
+				GroupPriorities: map[int64]int{10: 1}, Pools: []PoolMetrics{pool(10, 1, 10)}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := scoreAccounts([]AccountMetrics{test.first, test.second}, now, 5)
+			byID := make(map[int64]Recommendation, len(result))
+			for _, recommendation := range result {
+				byID[recommendation.ID] = recommendation
+			}
+			for _, account := range []AccountMetrics{test.first, test.second} {
+				got := byID[account.ID]
+				if got.RecommendedPriority != account.CurrentPriority || got.CostPerMillionTokens != 0 || got.PoolCount != 0 {
+					t.Fatalf("unreachable peer changed account %d: %+v", account.ID, got)
+				}
+			}
+		})
+	}
+}
+
+func TestScoreAccountsUsesSameGroupTierCompetition(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	pool := func(cost float64) PoolMetrics {
+		return PoolMetrics{
+			Platform: "openai", RequestedModel: "gpt-test", UpstreamModel: "gpt-test",
+			GroupID: 10, GroupPriority: 3, SuccessfulRequests: 20,
+			TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: cost, InputCost: cost,
+		}
+	}
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Name: "cheap", Platform: "openai", Status: "active", CurrentPriority: 90, SuccessfulRequests: 20,
+			GroupPriorities: map[int64]int{10: 3}, Pools: []PoolMetrics{pool(1)}},
+		{ID: 2, Name: "expensive", Platform: "openai", Status: "active", CurrentPriority: 10, SuccessfulRequests: 20,
+			GroupPriorities: map[int64]int{10: 3}, Pools: []PoolMetrics{pool(10)}},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, recommendation := range result {
+		byID[recommendation.ID] = recommendation
+	}
+	if byID[1].RecommendedPriority >= byID[2].RecommendedPriority {
+		t.Fatalf("same-tier cheaper account did not win: cheap=%+v expensive=%+v", byID[1], byID[2])
+	}
+	if byID[1].PoolCount != 1 || byID[2].PoolCount != 1 {
+		t.Fatalf("same-tier pool was not counted once: cheap=%+v expensive=%+v", byID[1], byID[2])
+	}
+}
+
+func TestScoreAccountsNormalizesIndependentCompetitionDomainsSeparately(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	account := func(id, groupID int64, cost float64) AccountMetrics {
+		return AccountMetrics{
+			ID: id, Platform: "openai", Status: "active", CurrentPriority: 50, RateMultiplier: 1, SuccessfulRequests: 20,
+			GroupPriorities: map[int64]int{groupID: 0},
+			Pools: []PoolMetrics{{
+				Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: groupID,
+				SuccessfulRequests: 20, TotalTokens: 100_000_000, InputTokens: 100_000_000,
+				AccountCost: cost, InputCost: cost, RateMultiplier: 1,
+			}},
+		}
+	}
+	result := scoreAccounts([]AccountMetrics{
+		account(1, 10, 1), account(2, 10, 2),
+		account(3, 20, 100), account(4, 20, 200),
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, recommendation := range result {
+		byID[recommendation.ID] = recommendation
+	}
+	if byID[1].RecommendedPriority != byID[3].RecommendedPriority || byID[2].RecommendedPriority != byID[4].RecommendedPriority {
+		t.Fatalf("independent price scales changed relative scores: %+v", byID)
+	}
+	if byID[1].RecommendedPriority >= byID[2].RecommendedPriority || byID[3].RecommendedPriority >= byID[4].RecommendedPriority {
+		t.Fatalf("cheaper account did not win inside its competition domain: %+v", byID)
+	}
+}
+
+func TestAggregatePoolsKeepsLongContextCostsSeparate(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	account := AccountMetrics{
+		ID: 1, Platform: "openai", Status: "active", SuccessfulRequests: 20,
+		GroupPriorities: map[int64]int{10: 0},
+		Pools: []PoolMetrics{
+			{Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: 10, TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: 1},
+			{Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: 10, LongContext: true, TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: 10},
+		},
+	}
+	pools := aggregatePools([]AccountMetrics{account}, now, 5)
+	if len(pools) != 2 {
+		t.Fatalf("long-context and regular costs were merged: %+v", pools)
+	}
+	regular := pools["openai:group=10:tier=0:gpt:gpt"]
+	longContext := pools["openai:group=10:tier=0:gpt:gpt:long-context"]
+	if regular.CostsByAccount[1] != 1 || longContext.CostsByAccount[1] != 10 {
+		t.Fatalf("context costs crossed pools: regular=%+v long=%+v", regular, longContext)
+	}
+}
+
+func TestGroupedPoolsExcludeUnmappedHistoricalTraffic(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	account := AccountMetrics{
+		ID: 1, Platform: "openai", Status: "active", CurrentPriority: 50, SuccessfulRequests: 20,
+		GroupPriorities: map[int64]int{10: 0},
+		Pools: []PoolMetrics{
+			{Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: 10, TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: 1},
+			{Key: "openai:legacy", Platform: "openai", TotalTokens: 100_000_000, InputTokens: 100_000_000, AccountCost: 1000},
+		},
+	}
+	peer := AccountMetrics{
+		ID: 2, Platform: "openai", Status: "active", CurrentPriority: 50, SuccessfulRequests: 20,
+		GroupPriorities: map[int64]int{10: 0},
+		Pools:           []PoolMetrics{{Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: 10, TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: 2}},
+	}
+	observed, _, _, _, count, _ := accountRiskCost(account, aggregatePools([]AccountMetrics{account, peer}, now, 5))
+	if math.Abs(observed-1) > 1e-9 || count != 1 {
+		t.Fatalf("unmapped traffic affected grouped cost: observed=%v pools=%d", observed, count)
+	}
+}
+
+func TestGroupAwareSourceDoesNotFallBackToAccountWideCost(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Platform: "openai", Status: "active", CurrentPriority: 37,
+		SuccessfulRequests: 20, TotalTokens: 1_000_000, AccountCost: 1,
+		GroupDataAvailable: true, GroupPriorities: map[int64]int{10: 0},
+	}}, now, 5)
+	if len(result) != 1 || result[0].RecommendedPriority != 37 || result[0].CostPerMillionTokens != 0 {
+		t.Fatalf("group-aware source silently used account-wide cost: %+v", result)
+	}
+}
+
+func TestGroupedPoolsIgnoreUnmappedCacheEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	accounts := []AccountMetrics{
+		{
+			ID: 1, Platform: "openai", Status: "active", CurrentPriority: 50, SuccessfulRequests: 20,
+			GroupDataAvailable: true, GroupPriorities: map[int64]int{10: 0},
+			Pools: []PoolMetrics{
+				{Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: 10, GroupDataAvailable: true, TotalTokens: 1_000_000, OutputTokens: 1_000_000, AccountCost: 1},
+				{Key: "openai:legacy", Platform: "openai", GroupDataAvailable: true, TotalTokens: 10_000_000, CacheReadTokens: 10_000_000, AccountCost: 1},
+			},
+		},
+		{
+			ID: 2, Platform: "openai", Status: "active", CurrentPriority: 50, SuccessfulRequests: 20,
+			GroupDataAvailable: true, GroupPriorities: map[int64]int{10: 0},
+			Pools: []PoolMetrics{{Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: 10, GroupDataAvailable: true, TotalTokens: 1_000_000, OutputTokens: 1_000_000, AccountCost: 2}},
+		},
+	}
+	result := scoreAccounts(accounts, now, 5)
+	for _, recommendation := range result {
+		if recommendation.ID == 1 && (recommendation.CacheHitRateKnown || recommendation.CacheHitRate != 0) {
+			t.Fatalf("unmapped cache evidence affected grouped result: %+v", recommendation)
+		}
+	}
 }
 
 func TestCacheHitRateUsesCacheableInput(t *testing.T) {
@@ -436,7 +620,7 @@ func TestAccountRiskCostOnlyUsesCompatiblePlatformPools(t *testing.T) {
 			InputTokens: 1_000_000, AccountCost: 100,
 		}}},
 	}
-	observed, _, _, _ := accountRiskCost(accounts[0], aggregatePools(accounts, time.Now().UTC(), 1))
+	observed, _, _, _, _, _ := accountRiskCost(accounts[0], aggregatePools(accounts, time.Now().UTC(), 1))
 	if math.Abs(observed-1) > 1e-9 {
 		t.Fatalf("cross-platform pool changed observed cost to %v", observed)
 	}
@@ -454,7 +638,7 @@ func TestAccountRiskCostRenormalizesMissingEvidenceAndCache(t *testing.T) {
 			InputTokens: 1_000_000,
 		}}},
 	}
-	observed, _, hitRate, _ := accountRiskCost(account, aggregatePools(accounts, time.Now().UTC(), 1))
+	observed, _, hitRate, _, _, _ := accountRiskCost(account, aggregatePools(accounts, time.Now().UTC(), 1))
 	if math.Abs(observed-1) > 1e-9 {
 		t.Fatalf("missing pool evidence diluted observed cost to %v", observed)
 	}
@@ -625,7 +809,7 @@ func TestAccountRiskCostFallbackIgnoresHardExcludedAccounts(t *testing.T) {
 		ID: 2, Platform: "openai", SuccessfulRequests: 5,
 		RateLimitResetAt: &reset, Pools: []PoolMetrics{pool(100)},
 	}
-	_, fallback, _, _ := accountRiskCost(target, aggregatePools([]AccountMetrics{target, hardExcluded}, now, 5))
+	_, fallback, _, _, _, _ := accountRiskCost(target, aggregatePools([]AccountMetrics{target, hardExcluded}, now, 5))
 	if math.Abs(fallback-1) > 1e-9 {
 		t.Fatalf("hard-excluded account polluted fallback miss cost: %v, want 1", fallback)
 	}
@@ -716,6 +900,29 @@ func TestScoreAccountsUsesRecentFailureAsPromotionGate(t *testing.T) {
 	if cheap.ScoringWindow != "7d" || cheap.RecommendedPriority < cheap.CurrentPriority ||
 		!strings.Contains(cheap.Reason, "最终成功率低于 95%") {
 		t.Fatalf("recent failure did not block promotion based on stale 7d success: %+v", cheap)
+	}
+}
+
+func TestScoreAccountsRequiresRecentRecoveryBeforePromotingUnstableSevenDayAccount(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{
+			ID: 1, Status: "active", CurrentPriority: priorityPoor,
+			Window24h: &MetricSnapshot{SuccessfulRequests: 1, TotalTokens: 1_000_000, AccountCost: 0.1},
+			Window7d:  &MetricSnapshot{SuccessfulRequests: 80, TerminalFailures: 20, TotalTokens: 100_000_000, AccountCost: 10},
+		},
+		{
+			ID: 2, Status: "active", CurrentPriority: priorityPoor,
+			Window24h: &MetricSnapshot{SuccessfulRequests: 20, TotalTokens: 20_000_000, AccountCost: 4},
+		},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, recommendation := range result {
+		byID[recommendation.ID] = recommendation
+	}
+	unstable := byID[1]
+	if unstable.RecommendedPriority < unstable.CurrentPriority || !strings.Contains(unstable.Reason, "低于 90%") {
+		t.Fatalf("insufficient recent recovery bypassed seven-day safety gate: %+v", unstable)
 	}
 }
 
@@ -831,6 +1038,34 @@ func TestScoreAccountsReportsRelativeCostAdvantage(t *testing.T) {
 	}
 	if byID[2].CostAdvantage != 0 {
 		t.Fatalf("expensive account reported positive advantage: %v", byID[2].CostAdvantage)
+	}
+}
+
+func TestCostAdvantageUsesWeightedGlobalRiskCost(t *testing.T) {
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	pool := func(key string, tokens int64, costPerMillion float64) PoolMetrics {
+		cost := costPerMillion * float64(tokens) / 1_000_000
+		return PoolMetrics{Key: key, TotalTokens: tokens, InputTokens: tokens, AccountCost: cost, InputCost: cost, RateMultiplier: 1}
+	}
+	result := scoreAccounts([]AccountMetrics{
+		{ID: 1, Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 1, SuccessfulRequests: 20, Pools: []PoolMetrics{
+			pool("openai:main", 1_000_000_000, 9.5),
+			pool("openai:small-a", 1_000_000, 100),
+			pool("openai:small-b", 1_000_000, 100),
+		}},
+		{ID: 2, Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 1, SuccessfulRequests: 20, Pools: []PoolMetrics{
+			pool("openai:main", 1_000_000_000, 10),
+			pool("openai:small-a", 1_000_000, 100),
+			pool("openai:small-b", 1_000_000, 100),
+		}},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, recommendation := range result {
+		byID[recommendation.ID] = recommendation
+	}
+	cheap := byID[1]
+	if !cheap.costAdvantageKnown || cheap.CostAdvantage <= 0 || cheap.CostAdvantage >= promotionCostAdvantage {
+		t.Fatalf("weighted global advantage = %v, want a known value below %.0f%%: %+v", cheap.CostAdvantage, promotionCostAdvantage*100, cheap)
 	}
 }
 
