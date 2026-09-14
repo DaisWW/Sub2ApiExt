@@ -32,9 +32,11 @@ func TestPriorityMetricsQueryUsesRawEvidenceAndCooldowns(t *testing.T) {
 		"REGEXP_REPLACE",
 		"LOWER(REGEXP_REPLACE",
 		"created_at AS success_at",
+		"latest_success AS",
 		"ORDER BY account_id, request_key, created_at DESC, id DESC",
 		"MAX(oe.created_at) AS error_at",
 		"s.success_at >= e.error_at",
+		"trailing_terminal_failures",
 	} {
 		if !strings.Contains(priorityMetricsQuery, marker) {
 			t.Errorf("query missing %q", marker)
@@ -208,6 +210,23 @@ func TestPriorityMetricsCompatUsesRequestIDSharedByBothTables(t *testing.T) {
 	}
 }
 
+func TestPriorityMetricsCompatCorrelatesUsageRequestToErrorClientRequest(t *testing.T) {
+	query := priorityMetricsQueryForColumns(
+		priorityPoolColumns("id", "account_id", "created_at", "request_id"),
+		priorityPoolColumns("id", "account_id", "created_at", "request_id", "client_request_id", "status_code"),
+	)
+	usagePrefix, _, ok := strings.Cut(query, "), usage_rows AS MATERIALIZED")
+	if !ok {
+		t.Fatal("compat query has no usage candidate boundary")
+	}
+	if !strings.Contains(usagePrefix, "ul.request_id") || strings.Contains(usagePrefix, "ul.client_request_id") {
+		t.Fatalf("usage side did not use request_id: %s", usagePrefix)
+	}
+	if !strings.Contains(query, "oe.client_request_id") || strings.Contains(query, "NULLIF(BTRIM(oe.request_id") {
+		t.Fatalf("error side did not use client_request_id: %s", query)
+	}
+}
+
 func TestAttachWindowSnapshotsKeeps24hAsPrimary(t *testing.T) {
 	primary := []AccountMetrics{{
 		ID:                 1,
@@ -265,26 +284,28 @@ func TestAttachWindowSnapshotsIncludesSevenDayOnlyPools(t *testing.T) {
 
 func TestAccountMetricSnapshotPreservesCacheAndCostDetails(t *testing.T) {
 	account := AccountMetrics{
-		ID:                  1,
-		TotalTokens:         100,
-		InputTokens:         70,
-		OutputTokens:        10,
-		CacheCreationTokens: 5,
-		CacheReadTokens:     15,
-		AccountCost:         10,
-		ActualCost:          9,
-		CostP75PerMillion:   100000,
-		InputCost:           7,
-		OutputCost:          1,
-		CacheCreationCost:   0.5,
-		CacheReadCost:       1.5,
+		ID:                       1,
+		TotalTokens:              100,
+		InputTokens:              70,
+		OutputTokens:             10,
+		CacheCreationTokens:      5,
+		CacheReadTokens:          15,
+		AccountCost:              10,
+		ActualCost:               9,
+		CostP75PerMillion:        100000,
+		InputCost:                7,
+		OutputCost:               1,
+		CacheCreationCost:        0.5,
+		CacheReadCost:            1.5,
+		HasCacheReadCost:         true,
+		TrailingTerminalFailures: 2,
 	}
 	_, fallback, hitRate, tokens := accountWindowRiskCost(account)
 	if tokens != account.TotalTokens {
 		t.Fatalf("legacy risk cost used %d tokens, want %d", tokens, account.TotalTokens)
 	}
-	if math.Abs(hitRate-15.0/85.0) > 1e-9 {
-		t.Fatalf("legacy cache hit rate = %v, want %v", hitRate, 15.0/85.0)
+	if math.Abs(hitRate-15.0/90.0) > 1e-9 {
+		t.Fatalf("legacy cache hit rate = %v, want %v", hitRate, 15.0/90.0)
 	}
 	if math.Abs(fallback-100000) > 1e-9 {
 		t.Fatalf("legacy fallback miss cost = %v, want 100000", fallback)
@@ -303,12 +324,15 @@ func TestAccountMetricSnapshotPreservesCacheAndCostDetails(t *testing.T) {
 		snapshot.CacheCreationCost != account.CacheCreationCost || snapshot.CacheReadCost != account.CacheReadCost {
 		t.Fatalf("account snapshot lost cost details: %+v", snapshot)
 	}
+	if !snapshot.HasCacheReadCost || snapshot.TrailingTerminalFailures != 2 {
+		t.Fatalf("account snapshot lost cache-cost provenance or failure streak: %+v", snapshot)
+	}
 	_, fallback, hitRate, tokens = accountWindowRiskCost(primary[0])
 	if tokens != account.TotalTokens {
 		t.Fatalf("risk cost used %d tokens, want %d", tokens, account.TotalTokens)
 	}
-	if math.Abs(hitRate-15.0/85.0) > 1e-9 {
-		t.Fatalf("cache hit rate = %v, want %v", hitRate, 15.0/85.0)
+	if math.Abs(hitRate-15.0/90.0) > 1e-9 {
+		t.Fatalf("cache hit rate = %v, want %v", hitRate, 15.0/90.0)
 	}
 	if math.Abs(fallback-100000) > 1e-9 {
 		t.Fatalf("fallback miss cost = %v, want 100000", fallback)

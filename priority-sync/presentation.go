@@ -201,6 +201,15 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "风险成本/M", "缓存", "延迟P90", "状态"}}
 	for _, recommendation := range recommendations {
 		samples := recommendation.SuccessfulRequests + recommendation.TerminalFailures
+		availability := recommendation.Availability
+		if recommendation.ScoringWindow != "" {
+			samples = recommendation.ScoringSuccessfulRequests + recommendation.ScoringTerminalFailures
+			availability = recommendation.ScoringAvailability
+		}
+		sampleLabel := strconv.FormatInt(samples, 10)
+		if recommendation.ScoringWindow != "" {
+			sampleLabel += "(" + recommendation.ScoringWindow + ")"
+		}
 		cost := "-"
 		if recommendation.CostPerMillionTokens > 0 {
 			cost = fmt.Sprintf("%.4f", recommendation.CostPerMillionTokens)
@@ -212,7 +221,7 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 			p90 = formatTableLatency(recommendation.FirstTokenP90Ms, true)
 		}
 		cache := "-"
-		if recommendation.PoolCount > 0 {
+		if recommendation.CacheHitRateKnown {
 			cache = fmt.Sprintf("%.1f%%", recommendation.CacheHitRate*100)
 		}
 		nextPriority := recommendation.NextPriority
@@ -226,8 +235,8 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 			strconv.Itoa(recommendation.RecommendedPriority),
 			strconv.Itoa(nextPriority),
 			strconv.Itoa(recommendation.CurrentPriority),
-			strconv.FormatInt(samples, 10),
-			fmt.Sprintf("%.1f%%", recommendation.Availability*100),
+			sampleLabel,
+			fmt.Sprintf("%.1f%%", availability*100),
 			cost,
 			cache,
 			p90,

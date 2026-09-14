@@ -148,7 +148,7 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 				continue
 			}
 			recommendation.Exploration = true
-			evidence := scoringEvidence(account)
+			evidence := scoringEvidence(account, r.config.MinSamples)
 			hardExcluded, hardReason := accountHardExcluded(account, now)
 			switch {
 			case hardExcluded:
@@ -222,7 +222,7 @@ func (r *Runner) selectExplorationCandidate(accounts []AccountMetrics, now time.
 		if accountState, ok := r.state.Accounts[account.ID]; ok && accountState.LastExploredAt != nil && now.Sub(*accountState.LastExploredAt) < explorationDuration {
 			continue
 		}
-		evidence := scoringEvidence(account)
+		evidence := scoringEvidence(account, r.config.MinSamples)
 		hardExcluded, _ := accountHardExcluded(account, now)
 		priority := normalizedPriority(account.CurrentPriority)
 		if evidence >= int64(r.config.MinSamples) || hardExcluded || priority < priorityNeutral || priority >= priorityUnavailable {
@@ -244,7 +244,7 @@ func selectExplorationCandidate(accounts []AccountMetrics, active *explorationSt
 		if active != nil && account.ID == active.AccountID {
 			continue
 		}
-		evidence := scoringEvidence(account)
+		evidence := scoringEvidence(account, minSamples)
 		hardExcluded, _ := accountHardExcluded(account, now)
 		priority := normalizedPriority(account.CurrentPriority)
 		if account.ID <= 0 || evidence >= int64(minSamples) || hardExcluded || priority < priorityNeutral || priority >= priorityUnavailable {
@@ -513,7 +513,7 @@ func updatePromotionBaseline(state *accountState, recommendation *Recommendation
 			shock = true
 		}
 	}
-	if state.HasCacheBaseline && validScore(state.LastCacheHitRate) && validScore(recommendation.CacheHitRate) {
+	if state.HasCacheBaseline && recommendation.CacheHitRateKnown && validScore(state.LastCacheHitRate) && validScore(recommendation.CacheHitRate) {
 		if math.Abs(recommendation.CacheHitRate-state.LastCacheHitRate) > cacheShockThreshold {
 			shock = true
 		}
@@ -526,7 +526,7 @@ func updatePromotionBaseline(state *accountState, recommendation *Recommendation
 	}
 	state.LastCostPerMillion = recommendation.CostPerMillionTokens
 	state.HasCostBaseline = true
-	if validScore(recommendation.CacheHitRate) {
+	if recommendation.CacheHitRateKnown && validScore(recommendation.CacheHitRate) {
 		state.LastCacheHitRate = clamp01(recommendation.CacheHitRate)
 		state.HasCacheBaseline = true
 	}

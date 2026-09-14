@@ -265,7 +265,8 @@ func TestPrepareExplorationPreservesImmediateFailureDowngrade(t *testing.T) {
 	now := nowForTest()
 	accounts := []AccountMetrics{{
 		ID: 9, Name: "failing-exploration", Status: "active", CurrentPriority: priorityExplore,
-		SuccessfulRequests: 2, TerminalFailures: 3, TotalTokens: 1_000_000, AccountCost: 1,
+		SuccessfulRequests: 2, TerminalFailures: 3, TrailingTerminalFailures: 3,
+		TotalTokens: 1_000_000, AccountCost: 1,
 	}}
 	recommendations := scoreAccounts(accounts, now, 5)
 	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", false), &fakeMetricsSource{}, http.DefaultClient, &syncState{
@@ -754,7 +755,7 @@ func TestRunnerFreezesPromotionOnCostAndCacheShock(t *testing.T) {
 	runner.tableWriter = io.Discard
 	now := nowForTest()
 	recommendation := Recommendation{ID: 1, Name: "shock", CurrentPriority: priorityPoor, RecommendedPriority: priorityBest,
-		CostPerMillionTokens: 1.4, CostAdvantage: 0.5, CacheHitRate: 0.50, PoolCount: 1}
+		CostPerMillionTokens: 1.4, CostAdvantage: 0.5, CacheHitRate: 0.50, CacheHitRateKnown: true, PoolCount: 1}
 	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", now); changed != 0 || pending != 1 {
 		t.Fatalf("cost/cache shock was not frozen: changed=%d pending=%d", changed, pending)
 	}

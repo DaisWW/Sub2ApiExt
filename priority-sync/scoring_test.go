@@ -385,14 +385,43 @@ func TestPoolIdentityNormalizesModelFallbacks(t *testing.T) {
 }
 
 func TestCacheHitRateUsesCacheableInput(t *testing.T) {
-	if got := cacheHitRate(100, 50); math.Abs(got-1.0/3.0) > 1e-9 {
+	if got := cacheHitRate(100, 0, 50); math.Abs(got-1.0/3.0) > 1e-9 {
 		t.Fatalf("cache hit rate = %v, want %v", got, 1.0/3.0)
 	}
-	if got := cacheHitRate(0, 10); got != 1 {
+	if got := cacheHitRate(0, 0, 10); got != 1 {
 		t.Fatalf("cache-only hit rate = %v, want 1", got)
 	}
-	if got := cacheHitRate(-1, -1); got != 0 {
+	if got := cacheHitRate(100, 50, 50); math.Abs(got-0.25) > 1e-9 {
+		t.Fatalf("cache creation was omitted from hit-rate denominator: %v", got)
+	}
+	if got := cacheHitRate(-1, -1, -1); got != 0 {
 		t.Fatalf("negative cache inputs were not clamped: %v", got)
+	}
+}
+
+func TestKnownZeroCacheReadCostProducesMissCost(t *testing.T) {
+	known := PoolMetrics{
+		TotalTokens: 1_000_000, InputTokens: 500_000, CacheReadTokens: 500_000,
+		AccountCost: 1, CacheReadCost: 0, HasCacheReadCost: true,
+	}
+	if got := poolMissCostPerMillion(known); math.Abs(got-2) > 1e-9 {
+		t.Fatalf("known zero cache-read cost produced miss cost %v, want 2", got)
+	}
+	known.HasCacheReadCost = false
+	if got := poolMissCostPerMillion(known); math.Abs(got-1) > 1e-9 {
+		t.Fatalf("unknown cache-read cost did not fall back to blended cost: %v", got)
+	}
+}
+
+func TestAccountCacheHitRateFallsBackToSixHourWindow(t *testing.T) {
+	account := AccountMetrics{
+		Window24h: &MetricSnapshot{TotalTokens: 100, OutputTokens: 100, AccountCost: 1},
+		Window6h:  &MetricSnapshot{TotalTokens: 100, InputTokens: 10, CacheReadTokens: 90, AccountCost: 1},
+		Window7d:  &MetricSnapshot{TotalTokens: 100, InputTokens: 100, AccountCost: 1},
+	}
+	_, _, hitRate, _ := accountWindowRiskCost(account)
+	if math.Abs(hitRate-0.9) > 1e-9 {
+		t.Fatalf("cache hit rate = %v, want 0.9 from 6h window", hitRate)
 	}
 }
 
@@ -489,11 +518,12 @@ func TestScoreAccountsGatesLowEvidencePromotionBelowNinetyFivePercentSuccess(t *
 	}
 }
 
-func TestScoreAccountsThreeTerminalFailuresTriggerImmediateDowngrade(t *testing.T) {
+func TestScoreAccountsThreeTrailingFailuresTriggerImmediateDowngrade(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	result := scoreAccounts([]AccountMetrics{{
 		ID: 1, Name: "failing", Status: "active", CurrentPriority: priorityBest,
-		SuccessfulRequests: 10, TerminalFailures: 3, TotalTokens: 10_000_000, AccountCost: 1,
+		SuccessfulRequests: 10, TerminalFailures: 3, TrailingTerminalFailures: 3,
+		TotalTokens: 10_000_000, AccountCost: 1,
 	}}, now, 5)
 	if len(result) != 1 || result[0].RecommendedPriority < priorityDegraded || !result[0].applyImmediately {
 		t.Fatalf("three terminal failures were not immediately downgraded: %+v", result)
@@ -653,6 +683,62 @@ func TestScoreAccountsUsesSevenDayEvidenceWhen24hIsEmpty(t *testing.T) {
 	}
 }
 
+func TestScoreAccountsFallsBackWhen24hHasTooFewOutcomes(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{{
+		ID: 1, Status: "active", CurrentPriority: priorityNeutral,
+		Window24h: &MetricSnapshot{SuccessfulRequests: 1, TotalTokens: 1_000_000, AccountCost: 1},
+		Window7d:  &MetricSnapshot{SuccessfulRequests: 100, TotalTokens: 100_000_000, AccountCost: 100},
+	}}, now, 5)
+	if len(result) != 1 || result[0].ScoringWindow != "7d" || result[0].Confidence != 1 {
+		t.Fatalf("small 24h window masked mature 7d evidence: %+v", result)
+	}
+}
+
+func TestScoreAccountsUsesRecentFailureAsPromotionGate(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	result := scoreAccounts([]AccountMetrics{
+		{
+			ID: 1, Status: "active", CurrentPriority: priorityNeutral,
+			Window24h: &MetricSnapshot{TerminalFailures: 1},
+			Window7d:  &MetricSnapshot{SuccessfulRequests: 100, TerminalFailures: 1, TotalTokens: 100_000_000, AccountCost: 10},
+		},
+		{
+			ID: 2, Status: "active", CurrentPriority: priorityNeutral,
+			Window24h: &MetricSnapshot{SuccessfulRequests: 20, TotalTokens: 20_000_000, AccountCost: 4},
+		},
+	}, now, 5)
+	byID := make(map[int64]Recommendation, len(result))
+	for _, item := range result {
+		byID[item.ID] = item
+	}
+	cheap := byID[1]
+	if cheap.ScoringWindow != "7d" || cheap.RecommendedPriority < cheap.CurrentPriority ||
+		!strings.Contains(cheap.Reason, "最终成功率低于 95%") {
+		t.Fatalf("recent failure did not block promotion based on stale 7d success: %+v", cheap)
+	}
+}
+
+func TestScoreAccountsOnlyImmediatelyDegradesTrailingFailures(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	base := AccountMetrics{
+		ID: 1, Status: "active", CurrentPriority: priorityBest,
+		Window7d: &MetricSnapshot{
+			SuccessfulRequests: 636, TerminalFailures: 3,
+			TotalTokens: 100_000_000, AccountCost: 10,
+		},
+	}
+	withoutStreak := scoreAccounts([]AccountMetrics{base}, now, 5)[0]
+	if withoutStreak.applyImmediately || strings.Contains(withoutStreak.Reason, "连续 3 次") {
+		t.Fatalf("cumulative failures were treated as a trailing streak: %+v", withoutStreak)
+	}
+	base.Window7d.TrailingTerminalFailures = 3
+	withStreak := scoreAccounts([]AccountMetrics{base}, now, 5)[0]
+	if !withStreak.applyImmediately || withStreak.RecommendedPriority < priorityDegraded {
+		t.Fatalf("trailing failure streak did not trigger immediate degradation: %+v", withStreak)
+	}
+}
+
 func TestScoreAccountsUsesSevenDayPoolCostWhen24hEmpty(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
 	cheapPool := PoolMetrics{
@@ -703,7 +789,7 @@ func TestScoreAccountsUses7dPoolTrafficWeight(t *testing.T) {
 	}
 }
 
-func TestScoreAccountsUsesPool24hP75WhenProvided(t *testing.T) {
+func TestScoreAccountsDoesNotMixRawP75IntoStandardizedPoolCost(t *testing.T) {
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
 	result := scoreAccounts([]AccountMetrics{{
 		ID: 1, Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 20,
@@ -713,8 +799,8 @@ func TestScoreAccountsUsesPool24hP75WhenProvided(t *testing.T) {
 			Window6h:  &MetricSnapshot{TotalTokens: 1_000_000, AccountCost: 1},
 		}},
 	}}, now, 5)
-	if len(result) != 1 || math.Abs(result[0].ObservedCostPerMillion-1.2) > 1e-9 {
-		t.Fatalf("pool P75 was not included: %+v", result)
+	if len(result) != 1 || math.Abs(result[0].ObservedCostPerMillion-1) > 1e-9 {
+		t.Fatalf("raw request P75 biased standardized pool cost: %+v", result)
 	}
 }
 

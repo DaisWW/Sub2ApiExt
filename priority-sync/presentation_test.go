@@ -50,6 +50,24 @@ func TestRecommendationTableIncludesAccountLabel(t *testing.T) {
 	}
 }
 
+func TestRecommendationTableUsesScoringWindowEvidence(t *testing.T) {
+	var output strings.Builder
+	err := writeRecommendationTable(&output, "2026-09-09T00:00:00Z", []Recommendation{{
+		ID: 3, Name: "windowed", RecommendedPriority: 10, CurrentPriority: 50,
+		SuccessfulRequests: 0, Availability: 0,
+		ScoringWindow: "7d", ScoringSuccessfulRequests: 99, ScoringTerminalFailures: 1,
+		ScoringAvailability: 0.99,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"100(7d)", "99.0%"} {
+		if !strings.Contains(output.String(), marker) {
+			t.Fatalf("table missing scoring evidence %q: %s", marker, output.String())
+		}
+	}
+}
+
 func TestTableActionLabelAndLatency(t *testing.T) {
 	if got := tableActionLabel("deferred-exploration"); got != "等待当前探索完成" {
 		t.Fatalf("action label = %q", got)

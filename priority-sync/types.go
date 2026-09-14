@@ -27,11 +27,13 @@ type AccountMetrics struct {
 	OutputCost               float64
 	CacheCreationCost        float64
 	CacheReadCost            float64
+	HasCacheReadCost         bool
 	CostP75PerMillion        float64
 	LatencyP90Ms             float64
 	FirstTokenP90Ms          float64
 	ErrorRequests            int64
 	TerminalFailures         int64
+	TrailingTerminalFailures int64
 	RateLimitedRequests      int64
 	RecoveredRateLimited     int64
 	RecoveredRateLimitWeight float64
@@ -64,6 +66,8 @@ type MetricSnapshot struct {
 	OutputCost               float64
 	CacheCreationCost        float64
 	CacheReadCost            float64
+	HasCacheReadCost         bool
+	TrailingTerminalFailures int64
 }
 
 // PoolMetrics 是同一平台、请求模型和实际上游模型比较池内的账户观测。
@@ -87,6 +91,7 @@ type PoolMetrics struct {
 	OutputCost          float64
 	CacheCreationCost   float64
 	CacheReadCost       float64
+	HasCacheReadCost    bool
 	LatencyP90Ms        float64
 	FirstTokenP90Ms     float64
 	RateMultiplier      float64
@@ -107,6 +112,7 @@ type Recommendation struct {
 	FallbackMissCostPerMillion float64 `json:"fallback_miss_cost_per_million_tokens,omitempty"`
 	CostAdvantage              float64 `json:"cost_advantage,omitempty"`
 	CacheHitRate               float64 `json:"cache_hit_rate,omitempty"`
+	CacheHitRateKnown          bool    `json:"cache_hit_rate_known"`
 	PoolCount                  int     `json:"pool_count,omitempty"`
 	LatencyP90Ms               float64 `json:"latency_p90_ms,omitempty"`
 	FirstTokenP90Ms            float64 `json:"first_token_p90_ms,omitempty"`
@@ -116,6 +122,11 @@ type Recommendation struct {
 	RecoveredRateLimited       int64   `json:"recovered_rate_limited"`
 	RecoveredRateLimitWeight   float64 `json:"recovered_rate_limit_weight"`
 	Availability               float64 `json:"availability"`
+	ScoringWindow              string  `json:"scoring_window,omitempty"`
+	ScoringSuccessfulRequests  int64   `json:"scoring_successful_requests"`
+	ScoringTerminalFailures    int64   `json:"scoring_terminal_failures"`
+	TrailingTerminalFailures   int64   `json:"trailing_terminal_failures"`
+	ScoringAvailability        float64 `json:"scoring_availability"`
 	Confidence                 float64 `json:"confidence"`
 	CostScore                  float64 `json:"cost_score"`
 	MultiplierScore            float64 `json:"multiplier_score"`

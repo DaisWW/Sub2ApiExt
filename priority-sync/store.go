@@ -10,7 +10,7 @@ import (
 )
 
 // priorityMetricsQuery 只读取 Sub2API 原始账户、用量和错误表。
-// 成功请求按 (account_id, request_id/client_request_id) 去重，并统一使用每个请求键最新的
+// 成功请求按 (account_id, client_request_id/request_id) 去重，并统一使用每个请求键最新的
 // 最终用量记录计算成本、Token 和延迟；同一账户的错误后有成功记录时，
 // 该错误只作为软 429 证据，不把整次请求判为失败。retry_after_seconds
 // 会把短暂恢复和长等待区分开，避免固定惩罚过重或过轻。
@@ -19,8 +19,8 @@ WITH usage_candidates AS (
     SELECT ul.*,
            LOWER(REGEXP_REPLACE(
                BTRIM(COALESCE(
-                   NULLIF(BTRIM(ul.request_id::text), ''),
                    NULLIF(BTRIM(ul.client_request_id::text), ''),
+                   NULLIF(BTRIM(ul.request_id::text), ''),
                    'usage:' || ul.id::text
                )),
                '^client:', '', 'i'
@@ -57,6 +57,10 @@ WITH usage_candidates AS (
 ), successful_keys AS (
     SELECT account_id, request_key, created_at AS success_at
     FROM usage_rows
+), latest_success AS (
+    SELECT account_id, MAX(success_at) AS success_at
+    FROM successful_keys
+    GROUP BY account_id
 ), usage AS (
     SELECT ul.account_id,
            COUNT(*)::bigint AS successful_requests,
@@ -123,8 +127,8 @@ WITH usage_candidates AS (
     SELECT oe.account_id,
             LOWER(REGEXP_REPLACE(
                BTRIM(COALESCE(
-                   NULLIF(BTRIM(oe.request_id::text), ''),
                    NULLIF(BTRIM(oe.client_request_id::text), ''),
+                   NULLIF(BTRIM(oe.request_id::text), ''),
                    'error:' || oe.id::text
                )),
                '^client:', '', 'i'
@@ -149,8 +153,8 @@ WITH usage_candidates AS (
     GROUP BY oe.account_id,
              LOWER(REGEXP_REPLACE(
                  BTRIM(COALESCE(
-                     NULLIF(BTRIM(oe.request_id::text), ''),
                      NULLIF(BTRIM(oe.client_request_id::text), ''),
+                     NULLIF(BTRIM(oe.request_id::text), ''),
                      'error:' || oe.id::text
                  )),
                  '^client:', '', 'i'
@@ -163,12 +167,17 @@ WITH usage_candidates AS (
            COALESCE(SUM(CASE WHEN e.rate_limited AND s.success_at IS NOT NULL
                              THEN GREATEST(0.25, LEAST(1.0, e.retry_after_seconds / 30.0))
                              ELSE 0 END), 0)::double precision AS recovered_rate_limit_weight,
-           COUNT(*) FILTER (WHERE s.success_at IS NULL)::bigint AS terminal_failures
+           COUNT(*) FILTER (WHERE s.success_at IS NULL)::bigint AS terminal_failures,
+           COUNT(*) FILTER (
+               WHERE s.success_at IS NULL
+                 AND (latest.success_at IS NULL OR e.error_at > latest.success_at)
+           )::bigint AS trailing_terminal_failures
     FROM error_requests e
     LEFT JOIN successful_keys s
       ON s.account_id = e.account_id
      AND s.request_key = e.request_key
      AND s.success_at >= e.error_at
+    LEFT JOIN latest_success latest ON latest.account_id = e.account_id
     GROUP BY e.account_id
 )
 SELECT a.id,
@@ -199,7 +208,8 @@ SELECT a.id,
        COALESCE(e.rate_limited_requests, 0),
        COALESCE(e.recovered_rate_limited, 0),
        COALESCE(e.recovered_rate_limit_weight, 0),
-       COALESCE(e.terminal_failures, 0)
+       COALESCE(e.terminal_failures, 0),
+       COALESCE(e.trailing_terminal_failures, 0)
 FROM accounts a
 LEFT JOIN usage u ON u.account_id = a.id
 LEFT JOIN errors e ON e.account_id = a.id
@@ -227,6 +237,10 @@ WITH usage_candidates AS (
 ), successful_keys AS (
     SELECT account_id, request_key, created_at AS success_at
     FROM usage_rows
+), latest_success AS (
+    SELECT account_id, MAX(success_at) AS success_at
+    FROM successful_keys
+    GROUP BY account_id
 ), usage AS (
     SELECT ul.account_id,
            COUNT(*)::bigint AS successful_requests,
@@ -278,12 +292,17 @@ WITH usage_candidates AS (
            COALESCE(SUM(CASE WHEN e.rate_limited AND s.success_at IS NOT NULL
                              THEN GREATEST(0.25, LEAST(1.0, e.retry_after_seconds / 30.0))
                              ELSE 0 END), 0)::double precision AS recovered_rate_limit_weight,
-           COUNT(*) FILTER (WHERE s.success_at IS NULL)::bigint AS terminal_failures
+           COUNT(*) FILTER (WHERE s.success_at IS NULL)::bigint AS terminal_failures,
+           COUNT(*) FILTER (
+               WHERE s.success_at IS NULL
+                 AND (latest.success_at IS NULL OR e.error_at > latest.success_at)
+           )::bigint AS trailing_terminal_failures
     FROM error_requests e
     LEFT JOIN successful_keys s
       ON s.account_id = e.account_id
      AND s.request_key = e.request_key
      AND s.success_at >= e.error_at
+    LEFT JOIN latest_success latest ON latest.account_id = e.account_id
     GROUP BY e.account_id
 )
 SELECT a.id,
@@ -314,7 +333,8 @@ SELECT a.id,
        COALESCE(e.rate_limited_requests, 0),
        COALESCE(e.recovered_rate_limited, 0),
        COALESCE(e.recovered_rate_limit_weight, 0),
-       COALESCE(e.terminal_failures, 0)
+       COALESCE(e.terminal_failures, 0),
+       COALESCE(e.trailing_terminal_failures, 0)
 FROM accounts a
 LEFT JOIN usage u ON u.account_id = a.id
 LEFT JOIN errors e ON e.account_id = a.id
@@ -395,6 +415,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 			&item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost,
 			&costP75, &latencyP90, &firstTokenP90, &item.ErrorRequests,
 			&item.RateLimitedRequests, &item.RecoveredRateLimited, &item.RecoveredRateLimitWeight, &item.TerminalFailures,
+			&item.TrailingTerminalFailures,
 		); err != nil {
 			return nil, fmt.Errorf("scan priority metrics: %w", err)
 		}
@@ -415,6 +436,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		if costP75.Valid {
 			item.CostP75PerMillion = costP75.Float64
 		}
+		item.HasCacheReadCost = usageColumns["cache_read_cost"]
 		metrics = append(metrics, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -556,6 +578,8 @@ func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 		OutputCost:               account.OutputCost,
 		CacheCreationCost:        account.CacheCreationCost,
 		CacheReadCost:            account.CacheReadCost,
+		HasCacheReadCost:         account.HasCacheReadCost,
+		TrailingTerminalFailures: account.TrailingTerminalFailures,
 	}
 }
 
@@ -574,6 +598,7 @@ func poolMetricSnapshot(pool PoolMetrics) *MetricSnapshot {
 		OutputCost:          pool.OutputCost,
 		CacheCreationCost:   pool.CacheCreationCost,
 		CacheReadCost:       pool.CacheReadCost,
+		HasCacheReadCost:    pool.HasCacheReadCost,
 	}
 }
 
@@ -597,10 +622,10 @@ func missingColumns(columns map[string]bool, required []string) []string {
 }
 
 func priorityMetricsQueryForColumns(usageColumns, errorColumns map[string]bool) string {
-	sharedRequestColumns := prioritySharedRequestColumns(usageColumns, errorColumns)
+	correlationUsageColumns, errorRequestColumns := priorityCorrelationColumns(usageColumns, errorColumns)
 	usageRequestColumns := usageColumns
-	if len(sharedRequestColumns) > 0 {
-		usageRequestColumns = cloneColumns(sharedRequestColumns)
+	if len(correlationUsageColumns) > 0 {
+		usageRequestColumns = cloneColumns(correlationUsageColumns)
 		usageRequestColumns["id"] = usageColumns["id"]
 	}
 	return strings.NewReplacer(
@@ -620,18 +645,23 @@ func priorityMetricsQueryForColumns(usageColumns, errorColumns map[string]bool) 
 		"__CACHE_READ_COST__", priorityMetricsCostExpr(usageColumns, "cache_read_cost"),
 		"__DURATION__", priorityMetricsNullableExpr(usageColumns, "duration_ms"),
 		"__FIRST_TOKEN__", priorityMetricsNullableExpr(usageColumns, "first_token_ms"),
-		"__ERROR_REQUESTS_BODY__", priorityErrorRequestsExpr(errorColumns, sharedRequestColumns),
+		"__ERROR_REQUESTS_BODY__", priorityErrorRequestsExpr(errorColumns, errorRequestColumns),
 	).Replace(priorityMetricsCompatQueryTemplate)
 }
 
-func prioritySharedRequestColumns(usageColumns, errorColumns map[string]bool) map[string]bool {
-	shared := make(map[string]bool, 2)
-	for _, name := range []string{"request_id", "client_request_id"} {
-		if usageColumns[name] && errorColumns[name] {
-			shared[name] = true
+func priorityCorrelationColumns(usageColumns, errorColumns map[string]bool) (map[string]bool, map[string]bool) {
+	pairs := [][2]string{
+		{"client_request_id", "client_request_id"},
+		{"request_id", "client_request_id"},
+		{"request_id", "request_id"},
+		{"client_request_id", "request_id"},
+	}
+	for _, pair := range pairs {
+		if usageColumns[pair[0]] && errorColumns[pair[1]] {
+			return map[string]bool{pair[0]: true}, map[string]bool{pair[1]: true}
 		}
 	}
-	return shared
+	return nil, nil
 }
 
 func cloneColumns(columns map[string]bool) map[string]bool {
@@ -978,6 +1008,7 @@ func (s *MetricsStore) loadPoolMetrics(ctx context.Context, start, end time.Time
 		if costP75.Valid {
 			pool.CostP75PerMillion = costP75.Float64
 		}
+		pool.HasCacheReadCost = columns["cache_read_cost"]
 		pool.Model = pool.UpstreamModel
 		pool.Key = poolIdentity(pool)
 		if index, ok := byID[accountID]; ok {
