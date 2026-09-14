@@ -37,16 +37,33 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 
 	result := make([]Recommendation, 0, len(accounts))
 	for index, account := range accounts {
-		scoringWindow, scoringSnapshot := scoringOutcomeSnapshot(account, minSamples)
+		scoringWindow := ""
+		var scoringSnapshot *MetricSnapshot
+		if !usesDecisionWindows(account) {
+			scoringWindow, scoringSnapshot = scoringOutcomeSnapshot(account, minSamples)
+		}
 		if costEvidence[index].Valid {
 			scoringWindow = costEvidence[index].Window
 			scoringSnapshot = &costEvidence[index].Snapshot
 		}
-		scoringSuccesses, scoringFailures, scoringRecovered := scoringOutcomes(account, minSamples)
+		scoringSuccesses := maxInt64(account.SuccessfulRequests, 0)
+		scoringFailures := maxInt64(account.TerminalFailures, 0)
+		scoringRecovered := maxFloat(account.RecoveredRateLimitWeight, 0)
+		scoringPricedRequests := maxInt64(account.PricedRequests, 0)
+		scoringTokens := maxInt64(account.PricedTokens, 0)
 		if scoringSnapshot != nil {
 			scoringSuccesses = maxInt64(scoringSnapshot.SuccessfulRequests, 0)
 			scoringFailures = maxInt64(scoringSnapshot.TerminalFailures, 0)
 			scoringRecovered = maxFloat(scoringSnapshot.RecoveredRateLimitWeight, 0)
+			scoringPricedRequests = maxInt64(scoringSnapshot.PricedRequests, 0)
+			scoringTokens = maxInt64(scoringSnapshot.PricedTokens, 0)
+		}
+		if usesDecisionWindows(account) && !costEvidence[index].Valid {
+			scoringSuccesses = 0
+			scoringFailures = 0
+			scoringRecovered = 0
+			scoringPricedRequests = 0
+			scoringTokens = 0
 		}
 		evidence := scoringSuccesses + scoringFailures
 		availability := effectiveAvailability(account)
@@ -87,6 +104,8 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			RecoveredRateLimitWeight:  account.RecoveredRateLimitWeight,
 			Availability:              availability,
 			ScoringWindow:             scoringWindow,
+			ScoringPricedRequests:     scoringPricedRequests,
+			ScoringTokens:             scoringTokens,
 			ScoringSuccessfulRequests: scoringSuccesses,
 			ScoringTerminalFailures:   scoringFailures,
 			TrailingTerminalFailures:  trailingFailureCount(account),
@@ -98,6 +117,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			AvailabilityScore:         availabilityScore,
 			Score:                     score,
 			HardExcluded:              hardExcluded,
+			CostWindows:               costWindowObservations(account),
 			Reason:                    reason,
 			applyImmediately:          applyImmediately,
 		}
@@ -123,49 +143,92 @@ type directCostEvidence struct {
 }
 
 func directAccountCost(account AccountMetrics) directCostEvidence {
-	current := MetricSnapshot{
-		SuccessfulRequests:       account.SuccessfulRequests,
-		TerminalFailures:         account.TerminalFailures,
-		RecoveredRateLimitWeight: account.RecoveredRateLimitWeight,
-		TotalTokens:              account.TotalTokens,
-		InputTokens:              account.InputTokens,
-		OutputTokens:             account.OutputTokens,
-		CacheCreationTokens:      account.CacheCreationTokens,
-		CacheReadTokens:          account.CacheReadTokens,
-		AccountCost:              account.AccountCost,
-		ActualCost:               account.ActualCost,
-		TrailingTerminalFailures: account.TrailingTerminalFailures,
-	}
-	candidates := []struct {
+	decisionCandidates := []struct {
 		window   string
 		snapshot *MetricSnapshot
+		requests int64
+		tokens   int64
 	}{
-		{"24h", account.Window24h},
-		{"6h", account.Window6h},
-		{"7d", account.Window7d},
+		{"30m", account.Window30m, fastWindowMinPricedRequests, fastWindowMinPricedTokens},
+		{"2h", account.Window2h, mainWindowMinPricedRequests, mainWindowMinPricedTokens},
 	}
-	if account.Window24h == nil {
-		candidates[0].snapshot = &current
-	}
-	for _, candidate := range candidates {
-		if candidate.snapshot == nil {
+	for _, candidate := range decisionCandidates {
+		if !snapshotMeetsCostEvidence(candidate.snapshot, candidate.requests, candidate.tokens) {
 			continue
 		}
-		cost := snapshotCostPerMillion(*candidate.snapshot)
-		if cost <= 0 || !validScore(cost) {
-			continue
-		}
-		cacheKnown := snapshotHasCacheEvidence(candidate.snapshot)
-		return directCostEvidence{
-			CostPerMillion:    cost,
-			Window:            candidate.window,
-			Snapshot:          *candidate.snapshot,
-			CacheHitRate:      cacheHitRate(candidate.snapshot.InputTokens, candidate.snapshot.CacheCreationTokens, candidate.snapshot.CacheReadTokens),
-			CacheHitRateKnown: cacheKnown,
-			Valid:             true,
+		if evidence := directCostFromSnapshot(candidate.window, candidate.snapshot); evidence.Valid {
+			return evidence
 		}
 	}
 	return directCostEvidence{}
+}
+
+func usesDecisionWindows(account AccountMetrics) bool {
+	return account.DecisionWindowsAvailable || account.Window30m != nil || account.Window2h != nil
+}
+
+func costWindowObservations(account AccountMetrics) []CostWindowObservation {
+	specs := []struct {
+		name            string
+		snapshot        *MetricSnapshot
+		minimumRequests int64
+		minimumTokens   int64
+		formal          bool
+	}{
+		{"30m", account.Window30m, fastWindowMinPricedRequests, fastWindowMinPricedTokens, true},
+		{"2h", account.Window2h, mainWindowMinPricedRequests, mainWindowMinPricedTokens, true},
+		{"24h", account.Window24h, 0, 0, false},
+		{"7d", account.Window7d, 0, 0, false},
+	}
+	result := make([]CostWindowObservation, 0, len(specs))
+	for _, spec := range specs {
+		if spec.snapshot == nil {
+			continue
+		}
+		evidence := directCostFromSnapshot(spec.name, spec.snapshot)
+		result = append(result, CostWindowObservation{
+			Window:         spec.name,
+			PricedRequests: maxInt64(spec.snapshot.PricedRequests, 0),
+			PricedTokens:   maxInt64(spec.snapshot.PricedTokens, 0),
+			TotalTokens:    maxInt64(spec.snapshot.TotalTokens, 0),
+			CostPerMillion: evidence.CostPerMillion,
+			FormalEligible: spec.formal && evidence.Valid && snapshotMeetsCostEvidence(spec.snapshot, spec.minimumRequests, spec.minimumTokens),
+		})
+	}
+	return result
+}
+
+func snapshotMeetsCostEvidence(snapshot *MetricSnapshot, minimumRequests, minimumTokens int64) bool {
+	return snapshot != nil && snapshot.PricedRequests >= minimumRequests && snapshot.PricedTokens >= minimumTokens
+}
+
+func directCostFromSnapshot(window string, snapshot *MetricSnapshot) directCostEvidence {
+	if snapshot == nil {
+		return directCostEvidence{}
+	}
+	tokens := snapshot.PricedTokens
+	if tokens <= 0 {
+		tokens = snapshot.TotalTokens
+	}
+	value := positiveMetric(snapshot.AccountCost)
+	if value <= 0 {
+		value = positiveMetric(snapshot.ActualCost)
+	}
+	if tokens <= 0 || value <= 0 {
+		return directCostEvidence{}
+	}
+	cost := value * 1_000_000 / float64(tokens)
+	if cost <= 0 || !validScore(cost) {
+		return directCostEvidence{}
+	}
+	return directCostEvidence{
+		CostPerMillion:    cost,
+		Window:            window,
+		Snapshot:          *snapshot,
+		CacheHitRate:      cacheHitRate(snapshot.InputTokens, snapshot.CacheCreationTokens, snapshot.CacheReadTokens),
+		CacheHitRateKnown: snapshotHasCacheEvidence(snapshot),
+		Valid:             true,
+	}
 }
 
 type poolAggregate struct {
@@ -1024,7 +1087,13 @@ func scoringOutcomeSnapshot(account AccountMetrics, minSamples int) (string, *Me
 	candidates := []struct {
 		name     string
 		snapshot *MetricSnapshot
-	}{{"24h", account.Window24h}, {"6h", account.Window6h}, {"7d", account.Window7d}}
+	}{{"30m", account.Window30m}, {"2h", account.Window2h}}
+	if !usesDecisionWindows(account) {
+		candidates = []struct {
+			name     string
+			snapshot *MetricSnapshot
+		}{{"24h", account.Window24h}, {"6h", account.Window6h}, {"7d", account.Window7d}}
+	}
 	bestName := ""
 	var best *MetricSnapshot
 	bestEvidence := int64(0)

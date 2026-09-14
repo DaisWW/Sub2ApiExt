@@ -151,6 +151,14 @@ func tableActionLabel(value string) string {
 		return "开始探索"
 	case "exploration-ended":
 		return "探索结束"
+	case "recovery-testing":
+		return "恢复试跑中"
+	case "recovery-started":
+		return "开始恢复试跑"
+	case "recovery-ended":
+		return "恢复试跑结束"
+	case "recovery-account-removed":
+		return "账户已移除"
 	case "deferred-exploration":
 		return "等待当前探索完成"
 	case "cost-advantage-gated":
@@ -208,7 +216,11 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 		}
 		sampleLabel := strconv.FormatInt(samples, 10)
 		if recommendation.ScoringWindow != "" {
-			sampleLabel += "(" + recommendation.ScoringWindow + ")"
+			if recommendation.ScoringPricedRequests > 0 || recommendation.ScoringTokens > 0 {
+				sampleLabel = fmt.Sprintf("%d/%.2fM(%s)", recommendation.ScoringPricedRequests, float64(recommendation.ScoringTokens)/1_000_000, recommendation.ScoringWindow)
+			} else {
+				sampleLabel += "(" + recommendation.ScoringWindow + ")"
+			}
 		}
 		cost := "-"
 		if recommendation.CostPerMillionTokens > 0 {

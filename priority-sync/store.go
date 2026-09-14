@@ -64,6 +64,13 @@ WITH usage_candidates AS (
 ), usage AS (
     SELECT ul.account_id,
            COUNT(*)::bigint AS successful_requests,
+           COUNT(*) FILTER (WHERE ul.unit_cost IS NOT NULL AND ul.unit_cost > 0)::bigint AS priced_requests,
+           COALESCE(SUM(
+               GREATEST(COALESCE(ul.input_tokens, 0), 0)::bigint +
+               GREATEST(COALESCE(ul.output_tokens, 0), 0)::bigint +
+               GREATEST(COALESCE(ul.cache_creation_tokens, 0), 0)::bigint +
+               GREATEST(COALESCE(ul.cache_read_tokens, 0), 0)::bigint
+           ) FILTER (WHERE ul.unit_cost IS NOT NULL AND ul.unit_cost > 0), 0)::bigint AS priced_tokens,
            COALESCE(SUM(GREATEST(COALESCE(ul.input_tokens, 0), 0)::bigint +
                         GREATEST(COALESCE(ul.output_tokens, 0), 0)::bigint +
                         GREATEST(COALESCE(ul.cache_creation_tokens, 0), 0)::bigint +
@@ -192,6 +199,8 @@ SELECT a.id,
        a.temp_unschedulable_until,
        a.overload_until,
        COALESCE(u.successful_requests, 0),
+       COALESCE(u.priced_requests, 0),
+       COALESCE(u.priced_tokens, 0),
        COALESCE(u.total_tokens, 0),
        COALESCE(u.input_tokens, 0),
        COALESCE(u.output_tokens, 0),
@@ -246,6 +255,11 @@ WITH usage_candidates AS (
 ), usage AS (
     SELECT ul.account_id,
            COUNT(*)::bigint AS successful_requests,
+           COUNT(*) FILTER (WHERE ul.unit_cost IS NOT NULL AND ul.unit_cost > 0)::bigint AS priced_requests,
+           COALESCE(SUM(
+               __INPUT_TOKENS__::bigint + __OUTPUT_TOKENS__::bigint +
+               __CACHE_CREATION_TOKENS__::bigint + __CACHE_READ_TOKENS__::bigint
+           ) FILTER (WHERE ul.unit_cost IS NOT NULL AND ul.unit_cost > 0), 0)::bigint AS priced_tokens,
            COALESCE(SUM(__INPUT_TOKENS__::bigint +
                         __OUTPUT_TOKENS__::bigint +
                         __CACHE_CREATION_TOKENS__::bigint +
@@ -317,6 +331,8 @@ SELECT a.id,
        a.temp_unschedulable_until,
        a.overload_until,
        COALESCE(u.successful_requests, 0),
+       COALESCE(u.priced_requests, 0),
+       COALESCE(u.priced_tokens, 0),
        COALESCE(u.total_tokens, 0),
        COALESCE(u.input_tokens, 0),
        COALESCE(u.output_tokens, 0),
@@ -357,13 +373,6 @@ WHERE a.deleted_at IS NULL
   AND a.schedulable = TRUE
   AND LOWER(TRIM(a.status)) IN ('active', 'error')
 ORDER BY ag.account_id, ag.group_id`
-
-// windowedMetricsSource is an optional source capability. Callers can keep
-// using metricsSource when this method is unavailable; the 24h snapshot is
-// always the primary account and pool result.
-type windowedMetricsSource interface {
-	LoadAccountMetricsWindows(context.Context, time.Time) ([]AccountMetrics, error)
-}
 
 func NewMetricsStore(db *sql.DB) *MetricsStore {
 	return &MetricsStore{db: db}
@@ -420,7 +429,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Platform, &item.Status, &priority,
 			&item.RateMultiplier, &rateLimitReset, &tempUnschedulable, &overload,
-			&item.SuccessfulRequests, &item.TotalTokens,
+			&item.SuccessfulRequests, &item.PricedRequests, &item.PricedTokens, &item.TotalTokens,
 			&item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens,
 			&item.AccountCost, &item.ActualCost,
 			&item.InputCost, &item.OutputCost, &item.CacheCreationCost, &item.CacheReadCost,
@@ -490,21 +499,25 @@ func (s *MetricsStore) loadGroupPriorities(ctx context.Context, accounts []Accou
 	return nil
 }
 
-// LoadAccountMetricsWindows loads the fixed policy windows. The 24h result is
-// authoritative for the returned account and pool set; shorter/longer windows
-// are attached as optional snapshots when their query succeeds.
+// LoadAccountMetricsWindows uses 24h as the authoritative account set. The
+// 30m/2h snapshots are the only formal decision inputs; 24h/7d remain visible
+// for observation.
 func (s *MetricsStore) LoadAccountMetricsWindows(ctx context.Context, now time.Time) ([]AccountMetrics, error) {
 	primary, err := s.LoadAccountMetrics(ctx, now, defaultWindow)
 	if err != nil {
 		return nil, err
 	}
 	attachWindowSnapshots(primary, nil, snapshotWindow24h)
+	for index := range primary {
+		primary[index].DecisionWindowsAvailable = true
+	}
 
 	for _, window := range []struct {
 		duration time.Duration
 		kind     snapshotWindow
 	}{
-		{duration: fastWindow, kind: snapshotWindow6h},
+		{duration: fastWindow, kind: snapshotWindow30m},
+		{duration: decisionWindow, kind: snapshotWindow2h},
 		{duration: trafficWindow, kind: snapshotWindow7d},
 	} {
 		metrics, loadErr := s.LoadAccountMetrics(ctx, now, window.duration)
@@ -512,9 +525,7 @@ func (s *MetricsStore) LoadAccountMetricsWindows(ctx context.Context, now time.T
 			if ctx.Err() != nil {
 				return nil, fmt.Errorf("load fixed window metrics: %w", ctx.Err())
 			}
-			// Fixed-window data is enrichment. Keep the authoritative 24h result
-			// usable when a secondary query is unavailable.
-			slog.Default().Warn("固定窗口指标不可用，继续使用 24h 数据", "window", window.duration.String(), "error", loadErr)
+			slog.Default().Warn("固定窗口指标不可用", "window", window.duration.String(), "formal_cost_fallback", false, "error", loadErr)
 			continue
 		}
 		attachWindowSnapshots(primary, metrics, window.kind)
@@ -526,7 +537,8 @@ type snapshotWindow uint8
 
 const (
 	snapshotWindow24h snapshotWindow = iota
-	snapshotWindow6h
+	snapshotWindow30m
+	snapshotWindow2h
 	snapshotWindow7d
 )
 
@@ -549,9 +561,12 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 		if !ok {
 			continue
 		}
-		if window == snapshotWindow6h {
-			primary[index].Window6h = accountMetricSnapshot(secondaryAccount)
-		} else {
+		switch window {
+		case snapshotWindow30m:
+			primary[index].Window30m = accountMetricSnapshot(secondaryAccount)
+		case snapshotWindow2h:
+			primary[index].Window2h = accountMetricSnapshot(secondaryAccount)
+		default:
 			primary[index].Window7d = accountMetricSnapshot(secondaryAccount)
 		}
 		pools := make(map[string]PoolMetrics, len(secondaryAccount.Pools))
@@ -566,9 +581,7 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 			if !ok {
 				continue
 			}
-			if window == snapshotWindow6h {
-				primary[index].Pools[poolIndex].Window6h = poolMetricSnapshot(pool)
-			} else {
+			if window == snapshotWindow7d {
 				primary[index].Pools[poolIndex].Window7d = poolMetricSnapshot(pool)
 			}
 		}
@@ -602,6 +615,8 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 	return &MetricSnapshot{
 		SuccessfulRequests:       account.SuccessfulRequests,
+		PricedRequests:           account.PricedRequests,
+		PricedTokens:             account.PricedTokens,
 		TerminalFailures:         account.TerminalFailures,
 		RecoveredRateLimitWeight: account.RecoveredRateLimitWeight,
 		TotalTokens:              account.TotalTokens,

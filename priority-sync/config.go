@@ -14,11 +14,11 @@ import (
 const (
 	defaultSub2APIURL = "http://sub2api:8080"
 	defaultInterval   = 10 * time.Minute
-	// The primary window is deliberately long enough to smooth cache churn.
-	// The scorer also loads the fixed fast (6h) and traffic (7d) windows when
-	// the data source supports them.
+	// The 24h window remains the main report view. Formal cost decisions use
+	// the fixed 30m/2h windows; 24h and 7d are observation-only.
 	defaultWindow        = 24 * time.Hour
-	fastWindow           = 6 * time.Hour
+	fastWindow           = 30 * time.Minute
+	decisionWindow       = 2 * time.Hour
 	trafficWindow        = 7 * 24 * time.Hour
 	defaultCooldown      = 15 * time.Minute
 	defaultMinSamples    = 5
@@ -31,7 +31,9 @@ const (
 	costWeight             = 1.00
 	speedWeight            = 0.00
 	evaluationWeights      = "成本=100%,速度=0%,可用性=0%,失败/429=0%"
-	strategyVersion        = "direct-cost-v1"
+	strategyVersion        = "direct-cost-v2"
+	decisionWindowPolicy   = "30m:计费请求>=20,计费Tokens>=1000000;2h:计费请求>=5,计费Tokens>=500000;24h/7d=仅观察"
+	recoveryAnchorPolicy   = "同平台成本/倍率中位数×当前倍率;同平台有效样本>=2;试跑10m;失败退避2h/6h/24h"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
 	minimumCostAdvantage   = 0.05
@@ -57,7 +59,17 @@ const (
 	priorityRampMaxSteps = 4
 	coldAnchorFloor      = priorityGood
 
-	explorationDuration = 30 * time.Minute
+	explorationDuration     = 30 * time.Minute
+	recoveryDuration        = 10 * time.Minute
+	recoveryMinimumPeers    = 2
+	recoveryNoResultBackoff = 2 * time.Hour
+)
+
+const (
+	fastWindowMinPricedRequests       = 20
+	fastWindowMinPricedTokens   int64 = 1_000_000
+	mainWindowMinPricedRequests       = 5
+	mainWindowMinPricedTokens   int64 = 500_000
 )
 
 type Config struct {

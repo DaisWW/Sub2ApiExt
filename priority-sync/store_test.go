@@ -14,6 +14,8 @@ func TestPriorityMetricsQueryUsesRawEvidenceAndCooldowns(t *testing.T) {
 		"usage_rows AS MATERIALIZED",
 		"DISTINCT ON (account_id, request_key)",
 		"COUNT(*)::bigint AS successful_requests",
+		"AS priced_requests",
+		"AS priced_tokens",
 		"FROM ops_error_logs oe",
 		"rate_limit_reset_at",
 		"temp_unschedulable_until",
@@ -267,9 +269,11 @@ func TestAttachWindowSnapshotsKeeps24hAsPrimary(t *testing.T) {
 		}},
 	}}
 	secondary := []AccountMetrics{{
-		ID:          1,
-		TotalTokens: 6,
-		AccountCost: 0.6,
+		ID:             1,
+		PricedRequests: 5,
+		PricedTokens:   6,
+		TotalTokens:    6,
+		AccountCost:    0.6,
 		Pools: []PoolMetrics{{
 			Key:         "openai:gpt-4o:gpt-4o:api",
 			TotalTokens: 6,
@@ -278,18 +282,22 @@ func TestAttachWindowSnapshotsKeeps24hAsPrimary(t *testing.T) {
 	}}
 
 	attachWindowSnapshots(primary, nil, snapshotWindow24h)
-	attachWindowSnapshots(primary, secondary, snapshotWindow6h)
+	attachWindowSnapshots(primary, secondary, snapshotWindow30m)
 	if primary[0].Window24h == nil || primary[0].Window24h.TotalTokens != 24 {
 		t.Fatalf("24h snapshot missing or not primary: %+v", primary[0].Window24h)
 	}
 	if primary[0].Window24h.SuccessfulRequests != 8 || primary[0].Window24h.TerminalFailures != 1 {
 		t.Fatalf("24h snapshot dropped request outcomes: %+v", primary[0].Window24h)
 	}
-	if primary[0].Window6h == nil || primary[0].Window6h.TotalTokens != 6 {
-		t.Fatalf("6h snapshot not attached: %+v", primary[0].Window6h)
+	if primary[0].Window30m == nil || primary[0].Window30m.TotalTokens != 6 {
+		t.Fatalf("30m snapshot not attached: %+v", primary[0].Window30m)
 	}
-	if primary[0].Pools[0].Window6h == nil || primary[0].Pools[0].Window6h.TotalTokens != 6 {
-		t.Fatalf("pool 6h snapshot not attached: %+v", primary[0].Pools[0].Window6h)
+	if primary[0].Window30m.PricedRequests != 5 || primary[0].Window30m.PricedTokens != 6 {
+		t.Fatalf("30m snapshot dropped billing evidence: %+v", primary[0].Window30m)
+	}
+	attachWindowSnapshots(primary, secondary, snapshotWindow2h)
+	if primary[0].Window2h == nil || primary[0].Window2h.PricedRequests != 5 {
+		t.Fatalf("2h snapshot not attached: %+v", primary[0].Window2h)
 	}
 }
 

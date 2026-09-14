@@ -9,11 +9,12 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
 type metricsSource interface {
-	LoadAccountMetrics(context.Context, time.Time, time.Duration) ([]AccountMetrics, error)
+	LoadAccountMetricsWindows(context.Context, time.Time) ([]AccountMetrics, error)
 	AdminAPIKey(context.Context) (string, error)
 }
 
@@ -51,15 +52,8 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		return fmt.Errorf("priority runner is not configured")
 	}
 	now = now.UTC()
-	window := r.config.Window
-	var accounts []AccountMetrics
-	var err error
-	if source, ok := r.source.(windowedMetricsSource); ok {
-		accounts, err = source.LoadAccountMetricsWindows(ctx, now)
-		window = defaultWindow
-	} else {
-		accounts, err = r.source.LoadAccountMetrics(ctx, now, window)
-	}
+	window := defaultWindow
+	accounts, err := r.source.LoadAccountMetricsWindows(ctx, now)
 	if err != nil {
 		return err
 	}
@@ -73,6 +67,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		defer func() { r.state = originalState }()
 	}
 	r.prepareStrategyState()
+	accounts = r.includeExpiredMissingRecovery(accounts, now)
 	recommendations := scoreAccounts(accounts, now, r.config.MinSamples)
 	r.prepareExploration(accounts, recommendations, now)
 	apiKey := r.config.AdminAPIKey
@@ -108,6 +103,8 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		"dry_run", r.config.DryRun,
 		"window", window.String(),
 		"evaluation_weights", evaluationWeights,
+		"decision_windows", decisionWindowPolicy,
+		"recovery_anchor", recoveryAnchorPolicy,
 	)
 	return nil
 }
@@ -127,11 +124,30 @@ func (r *Runner) prepareStrategyState() {
 
 func hasPendingChanges(recommendations []Recommendation) bool {
 	for _, recommendation := range recommendations {
-		if recommendation.RecommendedPriority != recommendation.CurrentPriority {
+		if recommendation.explorationStart || recommendation.RecommendedPriority != recommendation.CurrentPriority {
 			return true
 		}
 	}
 	return false
+}
+
+func (r *Runner) includeExpiredMissingRecovery(accounts []AccountMetrics, now time.Time) []AccountMetrics {
+	if r == nil || r.state == nil || r.state.Exploration == nil ||
+		!r.state.Exploration.Recovery || !explorationExpired(r.state.Exploration, now) {
+		return accounts
+	}
+	for _, account := range accounts {
+		if account.ID == r.state.Exploration.AccountID {
+			return accounts
+		}
+	}
+	return append(accounts, AccountMetrics{
+		ID:                       r.state.Exploration.AccountID,
+		Status:                   "active",
+		CurrentPriority:          priorityExplore,
+		DecisionWindowsAvailable: true,
+		recoveryPlaceholder:      true,
+	})
 }
 
 // prepareExploration gives one low-evidence, low-priority account a bounded
@@ -148,11 +164,9 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 	if exploration := r.state.Exploration; exploration != nil {
 		account, exists := byID[exploration.AccountID]
 		if !exists {
-			// The account is no longer eligible for the read-only snapshot (for
-			// example it was disabled or deleted). Keep a bounded lease so a
-			// brief empty snapshot cannot immediately unlock a new explorer,
-			// then discard it after the exploration window.
-			if explorationExpired(exploration, now) {
+			// A recovery lease means priority 20 was already written. Keep it
+			// until the account returns so the original priority can be restored.
+			if explorationExpired(exploration, now) && !exploration.Recovery {
 				r.state.Exploration = nil
 			}
 			return
@@ -163,6 +177,10 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 				continue
 			}
 			recommendation.Exploration = true
+			if exploration.Recovery {
+				r.prepareActiveRecovery(account, recommendation, exploration, now)
+				break
+			}
 			evidence := scoringEvidence(account, r.config.MinSamples)
 			hardExcluded, hardReason := accountHardExcluded(account, now)
 			switch {
@@ -207,6 +225,27 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 		sortRecommendations(recommendations)
 		return
 	}
+	if candidate, ok := r.selectRecoveryCandidate(accounts, now); ok {
+		for index := range recommendations {
+			if recommendations[index].ID != candidate.Account.ID {
+				continue
+			}
+			recommendation := &recommendations[index]
+			recommendation.RecommendedPriority = priorityExplore
+			recommendation.AnchorPriority = candidate.TargetPriority
+			recommendation.Exploration = true
+			recommendation.Recovery = true
+			recommendation.RecoveryAnchorCostPerMillion = candidate.AnchorCostPerMillion
+			recommendation.RecoveryPeerCount = candidate.PeerCount
+			recommendation.recoveryBaselineFailures = recoveryTerminalFailures(candidate.Account)
+			recommendation.explorationStart = true
+			recommendation.applyImmediately = true
+			recommendation.Reason = fmt.Sprintf("倍率恢复锚点 %.4f/M（同平台 %d 个样本，预测目标 %d），进入 10 分钟试跑", candidate.AnchorCostPerMillion, candidate.PeerCount, candidate.TargetPriority)
+			break
+		}
+		sortRecommendations(recommendations)
+		return
+	}
 	if !r.config.ExplorationEnabled {
 		return
 	}
@@ -230,6 +269,145 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 		break
 	}
 	sortRecommendations(recommendations)
+}
+
+const (
+	recoveryOutcomeSuccess  = "success"
+	recoveryOutcomeFailure  = "failure"
+	recoveryOutcomeNoResult = "no-result"
+)
+
+type recoveryCandidate struct {
+	Account              AccountMetrics
+	AnchorCostPerMillion float64
+	PeerCount            int
+	TargetPriority       int
+}
+
+func (r *Runner) prepareActiveRecovery(account AccountMetrics, recommendation *Recommendation, exploration *explorationState, now time.Time) {
+	recommendation.Recovery = true
+	recommendation.recoveryMissing = account.recoveryPlaceholder
+	recommendation.RecoveryAnchorCostPerMillion = exploration.RecoveryAnchorCostPerMillion
+	recommendation.RecoveryPeerCount = exploration.RecoveryPeerCount
+	recommendation.AnchorPriority = exploration.RecoveryTargetPriority
+	hardExcluded, hardReason := accountHardExcluded(account, now)
+	if hardExcluded {
+		recommendation.RecommendedPriority = priorityUnavailable
+		recommendation.Reason = hardReason + "；结束倍率恢复试跑"
+		recommendation.applyImmediately = true
+		recommendation.explorationEnd = true
+		recommendation.recoveryOutcome = recoveryOutcomeFailure
+		return
+	}
+	if !explorationExpired(exploration, now) {
+		recommendation.RecommendedPriority = priorityExplore
+		recommendation.Reason = "倍率恢复试跑中，等待 10 分钟真实成本"
+		recommendation.ApplyStatus = "recovery-testing"
+		return
+	}
+
+	measuredPriority := recommendation.RecommendedPriority
+	restorePriority := normalizedPriority(exploration.OriginalPriority)
+	recommendation.RecommendedPriority = restorePriority
+	recommendation.applyImmediately = true
+	recommendation.explorationEnd = true
+	if !hasReliableCost(recommendation) {
+		if recoveryTerminalFailures(account) > exploration.RecoveryBaselineFailures {
+			recommendation.recoveryOutcome = recoveryOutcomeFailure
+			recommendation.Reason = fmt.Sprintf("倍率恢复试跑出现终态失败，恢复原优先级 %d", restorePriority)
+		} else {
+			recommendation.recoveryOutcome = recoveryOutcomeNoResult
+			recommendation.Reason = fmt.Sprintf("倍率恢复试跑无有效成本，恢复原优先级 %d，2 小时后可重试", restorePriority)
+		}
+		return
+	}
+	if measuredPriority < restorePriority && measuredPriority < priorityNeutral {
+		recommendation.recoveryOutcome = recoveryOutcomeSuccess
+		recommendation.Reason = fmt.Sprintf("倍率恢复试跑成本 %.4f/M，恢复原优先级 %d，后续按正式成本重新确认", recommendation.CostPerMillionTokens, restorePriority)
+		return
+	}
+	recommendation.recoveryOutcome = recoveryOutcomeFailure
+	recommendation.Reason = fmt.Sprintf("倍率恢复试跑成本 %.4f/M 未改善目标，恢复原优先级 %d", recommendation.CostPerMillionTokens, restorePriority)
+}
+
+func (r *Runner) selectRecoveryCandidate(accounts []AccountMetrics, now time.Time) (recoveryCandidate, bool) {
+	best := recoveryCandidate{}
+	for _, account := range accounts {
+		if !account.DecisionWindowsAvailable || directAccountCost(account).Valid {
+			continue
+		}
+		state := r.state.Accounts[account.ID]
+		if state.RecoveryRetryAt != nil && now.Before(*state.RecoveryRetryAt) {
+			continue
+		}
+		if account.RateMultiplier <= 0 || !validScore(account.RateMultiplier) {
+			continue
+		}
+		if hardExcluded, _ := accountHardExcluded(account, now); hardExcluded {
+			continue
+		}
+		platform := strings.ToLower(strings.TrimSpace(account.Platform))
+		if platform == "" {
+			continue
+		}
+		normalizedPeerCosts := make([]float64, 0)
+		for _, peer := range accounts {
+			if peer.ID == account.ID || !strings.EqualFold(strings.TrimSpace(peer.Platform), platform) || peer.RateMultiplier <= 0 || !validScore(peer.RateMultiplier) {
+				continue
+			}
+			if hardExcluded, _ := accountHardExcluded(peer, now); hardExcluded {
+				continue
+			}
+			evidence := directAccountCost(peer)
+			if !evidence.Valid {
+				continue
+			}
+			normalizedPeerCosts = append(normalizedPeerCosts, evidence.CostPerMillion/peer.RateMultiplier)
+		}
+		if len(normalizedPeerCosts) < recoveryMinimumPeers {
+			continue
+		}
+		anchor := percentile(normalizedPeerCosts, 0.5) * account.RateMultiplier
+		if anchor <= 0 || !validScore(anchor) {
+			continue
+		}
+		target := recoveryPriorityForCost(accounts, anchor, now)
+		if target >= normalizedPriority(account.CurrentPriority) {
+			continue
+		}
+		candidate := recoveryCandidate{Account: account, AnchorCostPerMillion: anchor, PeerCount: len(normalizedPeerCosts), TargetPriority: target}
+		if best.Account.ID == 0 || candidate.AnchorCostPerMillion < best.AnchorCostPerMillion ||
+			(candidate.AnchorCostPerMillion == best.AnchorCostPerMillion && candidate.Account.ID < best.Account.ID) {
+			best = candidate
+		}
+	}
+	return best, best.Account.ID != 0
+}
+
+func recoveryPriorityForCost(accounts []AccountMetrics, anchor float64, now time.Time) int {
+	values := make([]float64, 0, len(accounts)+1)
+	for _, account := range accounts {
+		if hardExcluded, _ := accountHardExcluded(account, now); hardExcluded {
+			continue
+		}
+		if evidence := directAccountCost(account); evidence.Valid {
+			values = append(values, evidence.CostPerMillion)
+		}
+	}
+	values = append(values, anchor)
+	valid := make([]bool, len(values))
+	for index := range valid {
+		valid[index] = true
+	}
+	scores := rankLowerBetter(values, valid)
+	return priorityForScore(scores[len(scores)-1])
+}
+
+func recoveryTerminalFailures(account AccountMetrics) int64 {
+	if account.Window30m == nil {
+		return 0
+	}
+	return maxInt64(account.Window30m.TerminalFailures, 0)
 }
 
 func containsRecommendation(recommendations []Recommendation, id int64) bool {
@@ -330,13 +508,22 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 				continue
 			}
 			r.state.Accounts[recommendation.ID] = state
-			recommendation.ApplyStatus = "exploration-started"
+			if recommendation.Recovery {
+				recommendation.ApplyStatus = "recovery-started"
+			} else {
+				recommendation.ApplyStatus = "exploration-started"
+			}
 			state.LastExploredAt = timePtr(now)
 			r.state.Accounts[recommendation.ID] = state
 			r.state.Exploration = &explorationState{
-				AccountID:        recommendation.ID,
-				OriginalPriority: recommendation.CurrentPriority,
-				StartedAt:        timePtr(now),
+				AccountID:                    recommendation.ID,
+				OriginalPriority:             recommendation.CurrentPriority,
+				StartedAt:                    timePtr(now),
+				Recovery:                     recommendation.Recovery,
+				RecoveryAnchorCostPerMillion: recommendation.RecoveryAnchorCostPerMillion,
+				RecoveryPeerCount:            recommendation.RecoveryPeerCount,
+				RecoveryTargetPriority:       recommendation.AnchorPriority,
+				RecoveryBaselineFailures:     recommendation.recoveryBaselineFailures,
 			}
 			r.state.ExplorationCursor = recommendation.ID
 			changed++
@@ -347,30 +534,36 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		if recommendation.RecommendedPriority == recommendation.CurrentPriority {
 			state.CandidatePriority = 0
 			state.CandidateCount = 0
-			r.state.Accounts[recommendation.ID] = state
 			if isActiveExploration && recommendation.explorationEnd {
-				r.state.Exploration = nil
+				r.finishExploration(recommendation, &state, now)
 				activeExplorationID = 0
-				recommendation.ApplyStatus = "exploration-ended"
+				recommendation.ApplyStatus = explorationEndStatus(recommendation)
 			} else if recommendation.ApplyStatus == "" {
 				recommendation.ApplyStatus = "unchanged"
 			}
+			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
 		if recommendation.applyImmediately {
 			if !r.applyPriorityUpdate(ctx, recommendation, apiKey, recommendation.RecommendedPriority, now, &state) {
-				pending++
+				if isActiveExploration && recommendation.recoveryMissing && recommendation.ApplyStatus == "not-found" {
+					r.state.Exploration = nil
+					activeExplorationID = 0
+					recommendation.ApplyStatus = "recovery-account-removed"
+				} else {
+					pending++
+				}
 				r.state.Accounts[recommendation.ID] = state
 				continue
 			}
-			r.state.Accounts[recommendation.ID] = state
 			if isActiveExploration && recommendation.explorationEnd {
-				r.state.Exploration = nil
+				r.finishExploration(recommendation, &state, now)
 				activeExplorationID = 0
-				recommendation.ApplyStatus = "exploration-ended"
+				recommendation.ApplyStatus = explorationEndStatus(recommendation)
 			} else {
 				recommendation.ApplyStatus = "updated"
 			}
+			r.state.Accounts[recommendation.ID] = state
 			changed++
 			continue
 		}
@@ -420,14 +613,14 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
-		r.state.Accounts[recommendation.ID] = state
 		if isActiveExploration && recommendation.explorationEnd {
-			r.state.Exploration = nil
+			r.finishExploration(recommendation, &state, now)
 			activeExplorationID = 0
-			recommendation.ApplyStatus = "exploration-ended"
+			recommendation.ApplyStatus = explorationEndStatus(recommendation)
 		} else {
 			recommendation.ApplyStatus = "updated"
 		}
+		r.state.Accounts[recommendation.ID] = state
 		changed++
 	}
 	r.pruneAccountState(now)
@@ -475,7 +668,48 @@ func explorationExpired(exploration *explorationState, now time.Time) bool {
 	if startedAt == nil {
 		return true
 	}
-	return !now.Before(startedAt.Add(explorationDuration))
+	duration := explorationDuration
+	if exploration.Recovery {
+		duration = recoveryDuration
+	}
+	return !now.Before(startedAt.Add(duration))
+}
+
+func (r *Runner) finishExploration(recommendation *Recommendation, state *accountState, now time.Time) {
+	if r == nil || r.state == nil || r.state.Exploration == nil {
+		return
+	}
+	if r.state.Exploration.Recovery && recommendation != nil && state != nil {
+		switch recommendation.recoveryOutcome {
+		case recoveryOutcomeSuccess:
+			state.RecoveryFailures = 0
+			state.RecoveryRetryAt = nil
+		case recoveryOutcomeFailure:
+			state.RecoveryFailures++
+			state.RecoveryRetryAt = timePtr(now.Add(recoveryBackoff(state.RecoveryFailures)))
+		case recoveryOutcomeNoResult:
+			state.RecoveryRetryAt = timePtr(now.Add(recoveryNoResultBackoff))
+		}
+	}
+	r.state.Exploration = nil
+}
+
+func recoveryBackoff(failures int) time.Duration {
+	switch failures {
+	case 1:
+		return 2 * time.Hour
+	case 2:
+		return 6 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
+
+func explorationEndStatus(recommendation *Recommendation) string {
+	if recommendation != nil && recommendation.Recovery {
+		return "recovery-ended"
+	}
+	return "exploration-ended"
 }
 
 func latestStateTime(values ...*time.Time) *time.Time {
@@ -552,8 +786,13 @@ func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recomm
 		return false
 	}
 	if err := r.admin.updatePriority(ctx, apiKey, recommendation.ID, priority); err != nil {
-		recommendation.ApplyStatus = "failed"
-		r.logger.Error("账户优先级写入失败", "account", accountLabel(recommendation.Name, recommendation.ID), "error", err)
+		if isAdminAccountNotFound(err) {
+			recommendation.ApplyStatus = "not-found"
+			r.logger.Warn("账户已不存在，跳过优先级写入", "account", accountLabel(recommendation.Name, recommendation.ID), "error", err)
+		} else {
+			recommendation.ApplyStatus = "failed"
+			r.logger.Error("账户优先级写入失败", "account", accountLabel(recommendation.Name, recommendation.ID), "error", err)
+		}
 		return false
 	}
 	state.LastAppliedAt = timePtr(now)

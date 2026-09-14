@@ -68,6 +68,20 @@ func TestRecommendationTableUsesScoringWindowEvidence(t *testing.T) {
 	}
 }
 
+func TestRecommendationTableShowsPricedRequestAndTokenEvidence(t *testing.T) {
+	var output strings.Builder
+	err := writeRecommendationTable(&output, "2026-09-09T00:00:00Z", []Recommendation{{
+		ID: 3, Name: "windowed", RecommendedPriority: 10, CurrentPriority: 50,
+		ScoringWindow: "30m", ScoringPricedRequests: 20, ScoringTokens: 1_250_000,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "20/1.25M(30m)") {
+		t.Fatalf("table omitted priced evidence: %s", output.String())
+	}
+}
+
 func TestTableActionLabelAndLatency(t *testing.T) {
 	if got := tableActionLabel("deferred-exploration"); got != "等待当前探索完成" {
 		t.Fatalf("action label = %q", got)

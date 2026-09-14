@@ -16,9 +16,14 @@ type syncState struct {
 }
 
 type explorationState struct {
-	AccountID        int64      `json:"account_id"`
-	OriginalPriority int        `json:"original_priority"`
-	StartedAt        *time.Time `json:"started_at,omitempty"`
+	AccountID                    int64      `json:"account_id"`
+	OriginalPriority             int        `json:"original_priority"`
+	StartedAt                    *time.Time `json:"started_at,omitempty"`
+	Recovery                     bool       `json:"recovery,omitempty"`
+	RecoveryAnchorCostPerMillion float64    `json:"recovery_anchor_cost_per_million,omitempty"`
+	RecoveryPeerCount            int        `json:"recovery_peer_count,omitempty"`
+	RecoveryTargetPriority       int        `json:"recovery_target_priority,omitempty"`
+	RecoveryBaselineFailures     int64      `json:"recovery_baseline_failures,omitempty"`
 }
 
 type accountState struct {
@@ -28,6 +33,8 @@ type accountState struct {
 	LastAppliedAt         *time.Time `json:"last_applied_at,omitempty"`
 	LastApplied           int        `json:"last_applied_priority,omitempty"`
 	LastExploredAt        *time.Time `json:"last_explored_at,omitempty"`
+	RecoveryFailures      int        `json:"recovery_failures,omitempty"`
+	RecoveryRetryAt       *time.Time `json:"recovery_retry_at,omitempty"`
 	LastCostPerMillion    float64    `json:"last_cost_per_million,omitempty"`
 	LastCacheHitRate      float64    `json:"last_cache_hit_rate,omitempty"`
 	HasCostBaseline       bool       `json:"has_cost_baseline,omitempty"`
@@ -55,6 +62,8 @@ func cloneSyncState(source *syncState) *syncState {
 			LastAppliedAt:         cloneTimePtr(account.LastAppliedAt),
 			LastApplied:           account.LastApplied,
 			LastExploredAt:        cloneTimePtr(account.LastExploredAt),
+			RecoveryFailures:      account.RecoveryFailures,
+			RecoveryRetryAt:       cloneTimePtr(account.RecoveryRetryAt),
 			LastCostPerMillion:    account.LastCostPerMillion,
 			LastCacheHitRate:      account.LastCacheHitRate,
 			HasCostBaseline:       account.HasCostBaseline,
@@ -64,9 +73,14 @@ func cloneSyncState(source *syncState) *syncState {
 	}
 	if source.Exploration != nil {
 		clone.Exploration = &explorationState{
-			AccountID:        source.Exploration.AccountID,
-			OriginalPriority: source.Exploration.OriginalPriority,
-			StartedAt:        cloneTimePtr(source.Exploration.StartedAt),
+			AccountID:                    source.Exploration.AccountID,
+			OriginalPriority:             source.Exploration.OriginalPriority,
+			StartedAt:                    cloneTimePtr(source.Exploration.StartedAt),
+			Recovery:                     source.Exploration.Recovery,
+			RecoveryAnchorCostPerMillion: source.Exploration.RecoveryAnchorCostPerMillion,
+			RecoveryPeerCount:            source.Exploration.RecoveryPeerCount,
+			RecoveryTargetPriority:       source.Exploration.RecoveryTargetPriority,
+			RecoveryBaselineFailures:     source.Exploration.RecoveryBaselineFailures,
 		}
 	}
 	return clone

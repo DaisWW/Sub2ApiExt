@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,24 @@ import (
 type adminAPI struct {
 	baseURL string
 	client  *http.Client
+}
+
+type adminAPIResponseError struct {
+	statusCode int
+	code       int
+}
+
+func (e *adminAPIResponseError) Error() string {
+	if e.statusCode != 0 {
+		return fmt.Sprintf("update account priority returned HTTP %d", e.statusCode)
+	}
+	return fmt.Sprintf("update account priority failed: code=%d", e.code)
+}
+
+func isAdminAccountNotFound(err error) bool {
+	var responseError *adminAPIResponseError
+	return errors.As(err, &responseError) &&
+		(responseError.statusCode == http.StatusNotFound || responseError.code == http.StatusNotFound)
 }
 
 func newAdminAPI(baseURL string, client *http.Client) *adminAPI {
@@ -51,7 +70,7 @@ func (a *adminAPI) updatePriority(ctx context.Context, apiKey string, accountID 
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("update account priority returned HTTP %d", response.StatusCode)
+		return &adminAPIResponseError{statusCode: response.StatusCode}
 	}
 	var envelope struct {
 		Code int `json:"code"`
@@ -60,7 +79,7 @@ func (a *adminAPI) updatePriority(ctx context.Context, apiKey string, accountID 
 		return fmt.Errorf("decode account priority response: %w", err)
 	}
 	if envelope.Code != 0 {
-		return fmt.Errorf("update account priority failed: code=%d", envelope.Code)
+		return &adminAPIResponseError{code: envelope.Code}
 	}
 	return nil
 }

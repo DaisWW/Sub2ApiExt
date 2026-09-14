@@ -72,6 +72,8 @@ func main() {
 		"dry_run", config.DryRun,
 		"confirmations", config.Confirmations,
 		"evaluation_weights", evaluationWeights,
+		"decision_windows", decisionWindowPolicy,
+		"recovery_anchor", recoveryAnchorPolicy,
 	)
 	run := func() {
 		cycleContext, cancel := context.WithTimeout(ctx, config.Interval)

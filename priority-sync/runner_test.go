@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,17 +32,30 @@ func (s *windowedFakeMetricsSource) LoadAccountMetricsWindows(context.Context, t
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.windows++
-	result := make([]AccountMetrics, len(s.accounts))
-	copy(result, s.accounts)
-	return result, nil
+	return withQualifiedTwoHourCosts(s.accounts), nil
 }
 
-func (s *fakeMetricsSource) LoadAccountMetrics(context.Context, time.Time, time.Duration) ([]AccountMetrics, error) {
+func (s *fakeMetricsSource) LoadAccountMetricsWindows(context.Context, time.Time) ([]AccountMetrics, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result := make([]AccountMetrics, len(s.accounts))
-	copy(result, s.accounts)
-	return result, nil
+	return withQualifiedTwoHourCosts(s.accounts), nil
+}
+
+func withQualifiedTwoHourCosts(accounts []AccountMetrics) []AccountMetrics {
+	result := make([]AccountMetrics, len(accounts))
+	copy(result, accounts)
+	for index := range result {
+		result[index].DecisionWindowsAvailable = true
+		if result[index].Window30m != nil || result[index].Window2h != nil || result[index].TotalTokens <= 0 ||
+			(positiveMetric(result[index].AccountCost) <= 0 && positiveMetric(result[index].ActualCost) <= 0) {
+			continue
+		}
+		snapshot := accountMetricSnapshot(result[index])
+		snapshot.PricedRequests = maxInt64(result[index].SuccessfulRequests, 0)
+		snapshot.PricedTokens = maxInt64(result[index].TotalTokens, 0)
+		result[index].Window2h = snapshot
+	}
+	return result
 }
 
 func (s *fakeMetricsSource) AdminAPIKey(context.Context) (string, error) { return s.key, nil }
@@ -154,7 +169,8 @@ func TestRunnerLogsEvaluationWeights(t *testing.T) {
 	if err := runner.RunOnce(context.Background(), nowForTest()); err != nil {
 		t.Fatal(err)
 	}
-	if output := logs.String(); !strings.Contains(output, "evaluation_weights=") || !strings.Contains(output, evaluationWeights) {
+	if output := logs.String(); !strings.Contains(output, "evaluation_weights=") || !strings.Contains(output, evaluationWeights) ||
+		!strings.Contains(output, decisionWindowPolicy) || !strings.Contains(output, recoveryAnchorPolicy) {
 		t.Fatalf("cycle log does not include evaluation weights: %q", output)
 	}
 }
@@ -323,7 +339,7 @@ func TestRunnerExplorationWithCostUsesNormalConfirmation(t *testing.T) {
 		t.Fatalf("start update = %+v", got)
 	}
 	source.accounts[0].CurrentPriority = priorityExplore
-	source.accounts[0].SuccessfulRequests = 1
+	source.accounts[0].SuccessfulRequests = 5
 	source.accounts[0].TotalTokens = 1_000_000
 	source.accounts[0].AccountCost = 1
 	source.accounts[0].LatencyP90Ms = 100
@@ -351,9 +367,10 @@ func TestPrepareExplorationDoesNotTurnFailuresIntoImmediateDowngrade(t *testing.
 	now := nowForTest()
 	accounts := []AccountMetrics{{
 		ID: 9, Name: "failing-exploration", Status: "active", CurrentPriority: priorityExplore,
-		SuccessfulRequests: 2, TerminalFailures: 3, TrailingTerminalFailures: 3,
+		SuccessfulRequests: 5, TerminalFailures: 3, TrailingTerminalFailures: 3,
 		TotalTokens: 1_000_000, AccountCost: 1,
 	}}
+	accounts = withQualifiedTwoHourCosts(accounts)
 	recommendations := scoreAccounts(accounts, now, 5)
 	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", false), &fakeMetricsSource{}, http.DefaultClient, &syncState{
 		Accounts: map[int64]accountState{},
@@ -379,6 +396,7 @@ func TestRunnerExplorationExpiryUsesMeasuredTargetWhenEvidenceIsReady(t *testing
 		{ID: 9, Name: "measured", Status: "active", CurrentPriority: priorityExplore, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
 		{ID: 10, Name: "peer", Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 2, LatencyP90Ms: 100},
 	}
+	accounts = withQualifiedTwoHourCosts(accounts)
 	recommendations := scoreAccounts(accounts, start.Add(explorationDuration), 5)
 	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, &syncState{
 		Accounts: map[int64]accountState{},
@@ -830,4 +848,261 @@ func TestRunnerAllowsDowngradeDuringPromotionFreeze(t *testing.T) {
 	if got := <-updates; got != priorityGood {
 		t.Fatalf("downgrade step = %d, want %d", got, priorityGood)
 	}
+}
+
+func TestPrepareExplorationStartsMultiplierRecoveryWhenOrdinaryExplorationDisabled(t *testing.T) {
+	now := nowForTest()
+	accounts := recoveryAccounts(nil)
+	recommendations := scoreAccounts(accounts, now, 5)
+	before := testRecommendationByID(t, recommendations, 1)
+	if before.CostPerMillionTokens != 0 || before.RecommendedPriority != priorityUnavailable {
+		t.Fatalf("multiplier anchor leaked into formal scoring: %+v", before)
+	}
+	config := testRunnerConfig(t, "http://127.0.0.1:1", true)
+	config.ExplorationEnabled = false
+	runner := NewRunner(config, &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.prepareExploration(accounts, recommendations, now)
+	candidate := testRecommendationByID(t, recommendations, 1)
+	if !candidate.Recovery || !candidate.explorationStart || candidate.RecommendedPriority != priorityExplore {
+		t.Fatalf("recovery trial was not prepared: %+v", candidate)
+	}
+	if candidate.RecoveryPeerCount != 2 || math.Abs(candidate.RecoveryAnchorCostPerMillion-1) > 1e-9 || candidate.AnchorPriority != priorityBest {
+		t.Fatalf("unexpected recovery anchor: %+v", candidate)
+	}
+}
+
+func TestMultiplierRecoveryRequiresTwoSamePlatformPeersAndHonorsRetryAt(t *testing.T) {
+	now := nowForTest()
+	accounts := recoveryAccounts(nil)
+	accounts[2].Platform = "anthropic"
+	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, ok := runner.selectRecoveryCandidate(accounts, now); ok {
+		t.Fatal("recovery used a peer from another platform")
+	}
+
+	accounts[2].Platform = "openai"
+	retryAt := now.Add(time.Minute)
+	runner.state.Accounts[1] = accountState{RecoveryRetryAt: &retryAt}
+	if _, ok := runner.selectRecoveryCandidate(accounts, now); ok {
+		t.Fatal("recovery ignored its persisted retry deadline")
+	}
+	if candidate, ok := runner.selectRecoveryCandidate(accounts, retryAt); !ok || candidate.Account.ID != 1 {
+		t.Fatalf("recovery was not reconsidered at retry deadline: %+v, ok=%v", candidate, ok)
+	}
+}
+
+func TestRecoveryTrialRestoresPriorityAndRecordsOutcomeAfterSuccessfulWrite(t *testing.T) {
+	tests := []struct {
+		name             string
+		snapshot         *MetricSnapshot
+		previousFailures int
+		wantFailures     int
+		wantRetry        time.Duration
+	}{
+		{name: "no result", wantRetry: 2 * time.Hour},
+		{name: "terminal failure", snapshot: &MetricSnapshot{TerminalFailures: 1}, wantFailures: 1, wantRetry: 2 * time.Hour},
+		{name: "still expensive", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, wantFailures: 1, wantRetry: 2 * time.Hour},
+		{name: "cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			updates := make(chan int, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				var payload struct {
+					Priority int `json:"priority"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				updates <- payload.Priority
+				_, _ = io.WriteString(w, `{"code":0}`)
+			}))
+			defer server.Close()
+
+			now := nowForTest()
+			accounts := recoveryAccounts(test.snapshot)
+			accounts[0].CurrentPriority = priorityExplore
+			recommendations := scoreAccounts(accounts, now, 5)
+			state := &syncState{
+				Accounts: map[int64]accountState{1: {RecoveryFailures: test.previousFailures}},
+				Exploration: &explorationState{
+					AccountID: 1, OriginalPriority: priorityPoor, StartedAt: timePtr(now.Add(-recoveryDuration)),
+					Recovery: true, RecoveryAnchorCostPerMillion: 1, RecoveryPeerCount: 2, RecoveryTargetPriority: priorityBest,
+				},
+			}
+			runner := NewRunner(testRunnerConfig(t, server.URL, false), &fakeMetricsSource{}, server.Client(), state, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			runner.prepareExploration(accounts, recommendations, now)
+			candidate := testRecommendationByID(t, recommendations, 1)
+			if !candidate.explorationEnd || candidate.RecommendedPriority != priorityPoor {
+				t.Fatalf("expired recovery did not restore original priority: %+v", candidate)
+			}
+			if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", now); changed != 1 || pending != 0 {
+				t.Fatalf("recovery restore changed=%d pending=%d", changed, pending)
+			}
+			if got := <-updates; got != priorityPoor {
+				t.Fatalf("restored priority = %d, want %d", got, priorityPoor)
+			}
+			gotState := runner.state.Accounts[1]
+			if runner.state.Exploration != nil || gotState.RecoveryFailures != test.wantFailures {
+				t.Fatalf("recovery outcome state = %+v", runner.state)
+			}
+			if test.wantRetry == 0 {
+				if gotState.RecoveryRetryAt != nil {
+					t.Fatalf("successful recovery retained retry deadline: %+v", gotState)
+				}
+			} else if gotState.RecoveryRetryAt == nil || !gotState.RecoveryRetryAt.Equal(now.Add(test.wantRetry)) {
+				t.Fatalf("recovery retry deadline = %v, want %v", gotState.RecoveryRetryAt, now.Add(test.wantRetry))
+			}
+		})
+	}
+}
+
+func TestRecoveryLeaseSurvivesMissingSnapshotAndRestoresWhenAccountReturns(t *testing.T) {
+	now := nowForTest()
+	state := &syncState{
+		Accounts: map[int64]accountState{},
+		Exploration: &explorationState{
+			AccountID: 1, OriginalPriority: priorityPoor, StartedAt: timePtr(now.Add(-recoveryDuration)),
+			Recovery: true, RecoveryAnchorCostPerMillion: 1, RecoveryPeerCount: 2, RecoveryTargetPriority: priorityBest,
+		},
+	}
+	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, state, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	missingAccounts := recoveryAccounts(nil)[1:]
+	runner.prepareExploration(missingAccounts, scoreAccounts(missingAccounts, now, 5), now)
+	if runner.state.Exploration == nil || runner.state.Exploration.AccountID != 1 {
+		t.Fatalf("missing snapshot released active recovery lease: %+v", runner.state)
+	}
+
+	returnedAccounts := recoveryAccounts(nil)
+	returnedAccounts[0].CurrentPriority = priorityExplore
+	recommendations := scoreAccounts(returnedAccounts, now.Add(time.Minute), 5)
+	runner.prepareExploration(returnedAccounts, recommendations, now.Add(time.Minute))
+	returned := testRecommendationByID(t, recommendations, 1)
+	if !returned.Recovery || !returned.explorationEnd || returned.RecommendedPriority != priorityPoor {
+		t.Fatalf("returned recovery account was not restored: %+v", returned)
+	}
+}
+
+func TestRunnerRestoresOrReleasesExpiredRecoveryMissingFromSnapshot(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        int
+		wantLease     bool
+		wantApply     string
+		wantRetryTime bool
+	}{
+		{name: "restore succeeds", status: http.StatusOK, wantApply: "recovery-ended", wantRetryTime: true},
+		{name: "account was deleted", status: http.StatusNotFound, wantApply: "recovery-account-removed"},
+		{name: "temporary API failure", status: http.StatusBadGateway, wantLease: true, wantApply: "failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			updatedPriority := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				calls++
+				if request.URL.Path != "/api/v1/admin/accounts/1" {
+					t.Fatalf("unexpected recovery path: %s", request.URL.Path)
+				}
+				var payload struct {
+					Priority int `json:"priority"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				updatedPriority = payload.Priority
+				w.WriteHeader(test.status)
+				if test.status == http.StatusOK {
+					_, _ = io.WriteString(w, `{"code":0}`)
+				}
+			}))
+			defer server.Close()
+
+			now := nowForTest()
+			state := &syncState{
+				Accounts: map[int64]accountState{},
+				Exploration: &explorationState{
+					AccountID: 1, OriginalPriority: priorityPoor, StartedAt: timePtr(now.Add(-recoveryDuration)), Recovery: true,
+				},
+			}
+			runner := NewRunner(testRunnerConfig(t, server.URL, false), &fakeMetricsSource{}, server.Client(), state, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			runner.tableWriter = io.Discard
+			if err := runner.RunOnce(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || updatedPriority != priorityPoor {
+				t.Fatalf("missing recovery writes=%d priority=%d, want one write to %d", calls, updatedPriority, priorityPoor)
+			}
+			if gotLease := runner.state.Exploration != nil; gotLease != test.wantLease {
+				t.Fatalf("recovery lease retained=%v, want %v: %+v", gotLease, test.wantLease, runner.state)
+			}
+			var report PriorityReport
+			data, err := os.ReadFile(runner.config.ReportFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Accounts) != 1 || report.Accounts[0].ApplyStatus != test.wantApply {
+				t.Fatalf("missing recovery report = %+v, want status %q", report.Accounts, test.wantApply)
+			}
+			if gotRetry := runner.state.Accounts[1].RecoveryRetryAt != nil; gotRetry != test.wantRetryTime {
+				t.Fatalf("recovery retry recorded=%v, want %v: %+v", gotRetry, test.wantRetryTime, runner.state.Accounts[1])
+			}
+		})
+	}
+}
+
+func TestRecoveryBackoffEscalatesAndCaps(t *testing.T) {
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{{1, 2 * time.Hour}, {2, 6 * time.Hour}, {3, 24 * time.Hour}, {20, 24 * time.Hour}}
+	for _, test := range tests {
+		if got := recoveryBackoff(test.failures); got != test.want {
+			t.Fatalf("recoveryBackoff(%d) = %s, want %s", test.failures, got, test.want)
+		}
+	}
+}
+
+func TestRecoveryStartAdminFailureDoesNotCountAsTrialFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	now := nowForTest()
+	accounts := recoveryAccounts(nil)
+	recommendations := scoreAccounts(accounts, now, 5)
+	runner := NewRunner(testRunnerConfig(t, server.URL, false), &fakeMetricsSource{}, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.config.ExplorationEnabled = false
+	runner.prepareExploration(accounts, recommendations, now)
+	candidate := testRecommendationByID(t, recommendations, 1)
+	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", now); changed != 0 || pending != 1 {
+		t.Fatalf("failed recovery start changed=%d pending=%d", changed, pending)
+	}
+	state := runner.state.Accounts[1]
+	if runner.state.Exploration != nil || state.RecoveryFailures != 0 || state.RecoveryRetryAt != nil {
+		t.Fatalf("Admin failure was recorded as a recovery trial failure: %+v", runner.state)
+	}
+}
+
+func recoveryAccounts(candidateSnapshot *MetricSnapshot) []AccountMetrics {
+	return []AccountMetrics{
+		{ID: 1, Name: "recover", Platform: "openai", Status: "active", CurrentPriority: priorityUnavailable, RateMultiplier: 0.1, DecisionWindowsAvailable: true, Window30m: candidateSnapshot},
+		{ID: 2, Name: "peer-1", Platform: "openai", Status: "active", CurrentPriority: priorityBest, RateMultiplier: 1, DecisionWindowsAvailable: true, Window30m: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 10}},
+		{ID: 3, Name: "peer-2", Platform: "openai", Status: "active", CurrentPriority: priorityPoor, RateMultiplier: 2, DecisionWindowsAvailable: true, Window30m: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 20}},
+	}
+}
+
+func testRecommendationByID(t *testing.T, recommendations []Recommendation, id int64) Recommendation {
+	t.Helper()
+	for _, recommendation := range recommendations {
+		if recommendation.ID == id {
+			return recommendation
+		}
+	}
+	t.Fatalf("recommendation %d not found", id)
+	return Recommendation{}
 }
