@@ -13,6 +13,7 @@ func TestLoadConfigDefaultsToAutoApply(t *testing.T) {
 		"DATABASE_PASSWORD", "DATABASE_DBNAME", "DATABASE_SSLMODE", "PRIORITY_SYNC_SUB2API_URL",
 		"PRIORITY_SYNC_INTERVAL", "PRIORITY_SYNC_WINDOW", "PRIORITY_SYNC_CHANGE_COOLDOWN",
 		"PRIORITY_SYNC_MIN_SAMPLES", "PRIORITY_SYNC_CONFIRMATIONS", "PRIORITY_SYNC_DRY_RUN",
+		"PRIORITY_SYNC_EXPLORATION_ENABLED",
 		"PRIORITY_SYNC_STATE_FILE", "PRIORITY_SYNC_REPORT_FILE",
 	} {
 		t.Setenv(key, "")
@@ -24,11 +25,23 @@ func TestLoadConfigDefaultsToAutoApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.DryRun || config.Interval != 10*time.Minute || config.Window != defaultWindow {
+	if config.DryRun || config.ExplorationEnabled || config.Interval != 10*time.Minute || config.Window != defaultWindow {
 		t.Fatalf("unexpected defaults: %+v", config)
 	}
 	if !strings.Contains(config.DatabaseURL, "db.example") {
 		t.Fatalf("database URL was not built: %q", config.DatabaseURL)
+	}
+}
+
+func TestLoadConfigEnablesExplorationExplicitly(t *testing.T) {
+	t.Setenv("PRIORITY_SYNC_DATABASE_URL", "postgres://user:pass@db/sub2api")
+	t.Setenv("PRIORITY_SYNC_EXPLORATION_ENABLED", "true")
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.ExplorationEnabled {
+		t.Fatal("explicit exploration setting was ignored")
 	}
 }
 

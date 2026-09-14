@@ -47,16 +47,47 @@ func testRunnerConfig(t *testing.T, endpoint string, dryRun bool) Config {
 	t.Helper()
 	directory := t.TempDir()
 	return Config{
-		Sub2APIURL:     endpoint,
-		AdminAPIKey:    "secret",
-		Interval:       10 * time.Minute,
-		Window:         time.Hour,
-		ChangeCooldown: 0,
-		MinSamples:     5,
-		Confirmations:  1,
-		DryRun:         dryRun,
-		StateFile:      filepath.Join(directory, "state.json"),
-		ReportFile:     filepath.Join(directory, "report.json"),
+		Sub2APIURL:         endpoint,
+		AdminAPIKey:        "secret",
+		Interval:           10 * time.Minute,
+		Window:             time.Hour,
+		ChangeCooldown:     0,
+		MinSamples:         5,
+		Confirmations:      1,
+		ExplorationEnabled: true,
+		DryRun:             dryRun,
+		StateFile:          filepath.Join(directory, "state.json"),
+		ReportFile:         filepath.Join(directory, "report.json"),
+	}
+}
+
+func TestPrepareExplorationRequiresExplicitEnablement(t *testing.T) {
+	now := nowForTest()
+	accounts := []AccountMetrics{{ID: 9, Status: "active", CurrentPriority: priorityPoor}}
+	recommendations := scoreAccounts(accounts, now, 5)
+	config := testRunnerConfig(t, "http://127.0.0.1:1", false)
+	config.ExplorationEnabled = false
+	runner := NewRunner(config, &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.prepareExploration(accounts, recommendations, now)
+	if runner.state.Exploration != nil || recommendations[0].Exploration || recommendations[0].RecommendedPriority != priorityPoor {
+		t.Fatalf("disabled exploration changed recommendations: state=%+v recommendation=%+v", runner.state, recommendations[0])
+	}
+}
+
+func TestPrepareExplorationRestoresActiveLeaseWhenDisabled(t *testing.T) {
+	now := nowForTest()
+	accounts := []AccountMetrics{{ID: 9, Status: "active", CurrentPriority: priorityExplore}}
+	recommendations := scoreAccounts(accounts, now, 5)
+	config := testRunnerConfig(t, "http://127.0.0.1:1", false)
+	config.ExplorationEnabled = false
+	runner := NewRunner(config, &fakeMetricsSource{}, http.DefaultClient, &syncState{
+		Accounts:    map[int64]accountState{},
+		Exploration: &explorationState{AccountID: 9, OriginalPriority: priorityPoor, StartedAt: timePtr(now)},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.prepareExploration(accounts, recommendations, now)
+	got := recommendations[0]
+	if got.RecommendedPriority != priorityPoor || !got.applyImmediately || !got.explorationEnd {
+		t.Fatalf("disabled active exploration was not restored: %+v", got)
 	}
 }
 
@@ -335,6 +366,7 @@ func TestRunnerExplorationDoesNotBlockMatureAccount(t *testing.T) {
 	source := &fakeMetricsSource{accounts: []AccountMetrics{
 		{ID: 1, Name: "cold", Status: "active", CurrentPriority: 90},
 		{ID: 2, Name: "mature", Status: "active", CurrentPriority: 90, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100},
+		{ID: 3, Name: "mature-peer", Status: "active", CurrentPriority: 90, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 2, LatencyP90Ms: 100},
 	}}
 	runner := NewRunner(testRunnerConfig(t, server.URL, false), source, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runner.tableWriter = io.Discard
@@ -532,10 +564,16 @@ func TestRunnerAdminFailureDoesNotRecordAppliedState(t *testing.T) {
 		http.Error(w, "temporarily unavailable", http.StatusBadGateway)
 	}))
 	defer server.Close()
-	source := &fakeMetricsSource{accounts: []AccountMetrics{{
-		ID: 14, Name: "stable", Status: "active", CurrentPriority: priorityPoor,
-		SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100,
-	}}}
+	source := &fakeMetricsSource{accounts: []AccountMetrics{
+		{
+			ID: 14, Name: "stable", Status: "active", CurrentPriority: priorityPoor,
+			SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1, LatencyP90Ms: 100,
+		},
+		{
+			ID: 15, Name: "peer", Status: "active", CurrentPriority: priorityPoor,
+			SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 2, LatencyP90Ms: 100,
+		},
+	}}
 	config := testRunnerConfig(t, server.URL, false)
 	config.Confirmations = 1
 	runner := NewRunner(config, source, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -670,7 +708,7 @@ func TestRunnerGatesPromotionBelowEightPercentCostAdvantage(t *testing.T) {
 	}
 }
 
-func TestRunnerDoesNotGatePromotionWithoutPeerCostEvidence(t *testing.T) {
+func TestRunnerGatesPromotionWithoutPeerCostEvidence(t *testing.T) {
 	updates := make(chan int, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
@@ -689,11 +727,11 @@ func TestRunnerDoesNotGatePromotionWithoutPeerCostEvidence(t *testing.T) {
 	runner.tableWriter = io.Discard
 	recommendation := Recommendation{ID: 1, Name: "single-pool", CurrentPriority: priorityPoor, RecommendedPriority: priorityBest,
 		CostPerMillionTokens: 1, CostAdvantage: 0, PoolCount: 1}
-	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", nowForTest()); changed != 1 || pending != 0 {
-		t.Fatalf("promotion without peer evidence was incorrectly gated: changed=%d pending=%d", changed, pending)
+	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", nowForTest()); changed != 0 || pending != 1 {
+		t.Fatalf("promotion without peer evidence was not gated: changed=%d pending=%d", changed, pending)
 	}
-	if got := <-updates; got != priorityDegraded {
-		t.Fatalf("promotion step = %d, want %d", got, priorityDegraded)
+	if len(updates) != 0 {
+		t.Fatal("promotion without peer evidence was applied")
 	}
 }
 
@@ -755,7 +793,7 @@ func TestRunnerFreezesPromotionOnCostAndCacheShock(t *testing.T) {
 	runner.tableWriter = io.Discard
 	now := nowForTest()
 	recommendation := Recommendation{ID: 1, Name: "shock", CurrentPriority: priorityPoor, RecommendedPriority: priorityBest,
-		CostPerMillionTokens: 1.4, CostAdvantage: 0.5, CacheHitRate: 0.50, CacheHitRateKnown: true, PoolCount: 1}
+		CostPerMillionTokens: 1.4, CostAdvantage: 0.5, CacheHitRate: 0.50, CacheHitRateKnown: true, PoolCount: 1, costAdvantageKnown: true}
 	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", now); changed != 0 || pending != 1 {
 		t.Fatalf("cost/cache shock was not frozen: changed=%d pending=%d", changed, pending)
 	}

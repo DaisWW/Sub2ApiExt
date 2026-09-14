@@ -156,6 +156,11 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 				recommendation.Reason = hardReason + "；结束探索"
 				recommendation.applyImmediately = true
 				recommendation.explorationEnd = true
+			case !r.config.ExplorationEnabled:
+				recommendation.RecommendedPriority = normalizedPriority(exploration.OriginalPriority)
+				recommendation.Reason = "自动探索已关闭，恢复探索前优先级"
+				recommendation.applyImmediately = true
+				recommendation.explorationEnd = true
 			case evidence >= int64(r.config.MinSamples):
 				// scoreAccounts has already applied failure and success-rate safety
 				// gates. Preserve that final target while leaving exploration.
@@ -181,6 +186,20 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 		if !containsRecommendation(recommendations, exploration.AccountID) {
 			r.state.Exploration = nil
 			return
+		}
+		sortRecommendations(recommendations)
+		return
+	}
+	if !r.config.ExplorationEnabled {
+		for index := range recommendations {
+			recommendation := &recommendations[index]
+			account, ok := byID[recommendation.ID]
+			if !ok || scoringEvidence(account, r.config.MinSamples) >= int64(r.config.MinSamples) ||
+				recommendation.RecommendedPriority >= recommendation.CurrentPriority || recommendation.applyImmediately {
+				continue
+			}
+			recommendation.RecommendedPriority = recommendation.CurrentPriority
+			recommendation.Reason = "自动探索已关闭，低样本账户保持当前优先级"
 		}
 		sortRecommendations(recommendations)
 		return
@@ -346,7 +365,16 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 				r.state.Accounts[recommendation.ID] = state
 				continue
 			}
-			if hasReliableCost(recommendation) && costAdvantageEvidence(recommendation) && recommendation.CostAdvantage < promotionCostAdvantage {
+			if hasReliableCost(recommendation) && !costAdvantageEvidence(recommendation) {
+				recommendation.ApplyStatus = "cost-evidence-gated"
+				recommendation.Reason += "；缺少同域对照成本，禁止提升"
+				state.CandidatePriority = 0
+				state.CandidateCount = 0
+				pending++
+				r.state.Accounts[recommendation.ID] = state
+				continue
+			}
+			if hasReliableCost(recommendation) && recommendation.CostAdvantage < promotionCostAdvantage {
 				recommendation.ApplyStatus = "cost-advantage-gated"
 				recommendation.Reason += fmt.Sprintf("；成本优势 %.1f%% 未达到 %.0f%% 提升门槛", recommendation.CostAdvantage*100, promotionCostAdvantage*100)
 				state.CandidatePriority = 0

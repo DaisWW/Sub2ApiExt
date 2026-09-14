@@ -59,32 +59,34 @@ const (
 )
 
 type Config struct {
-	DatabaseURL    string
-	Sub2APIURL     string
-	AdminAPIKey    string
-	Interval       time.Duration
-	Window         time.Duration
-	ChangeCooldown time.Duration
-	MinSamples     int
-	Confirmations  int
-	DryRun         bool
-	StateFile      string
-	ReportFile     string
+	DatabaseURL        string
+	Sub2APIURL         string
+	AdminAPIKey        string
+	Interval           time.Duration
+	Window             time.Duration
+	ChangeCooldown     time.Duration
+	MinSamples         int
+	Confirmations      int
+	ExplorationEnabled bool
+	DryRun             bool
+	StateFile          string
+	ReportFile         string
 }
 
 func LoadConfig() (Config, error) {
 	c := Config{
-		DatabaseURL:    strings.TrimSpace(os.Getenv("PRIORITY_SYNC_DATABASE_URL")),
-		Sub2APIURL:     envString("PRIORITY_SYNC_SUB2API_URL", defaultSub2APIURL),
-		AdminAPIKey:    strings.TrimSpace(os.Getenv("PRIORITY_SYNC_ADMIN_API_KEY")),
-		Interval:       envDuration("PRIORITY_SYNC_INTERVAL", defaultInterval),
-		Window:         envDuration("PRIORITY_SYNC_WINDOW", defaultWindow),
-		ChangeCooldown: envDuration("PRIORITY_SYNC_CHANGE_COOLDOWN", defaultCooldown),
-		MinSamples:     envInt("PRIORITY_SYNC_MIN_SAMPLES", defaultMinSamples),
-		Confirmations:  envInt("PRIORITY_SYNC_CONFIRMATIONS", defaultConfirmations),
-		DryRun:         envBool("PRIORITY_SYNC_DRY_RUN", false),
-		StateFile:      envString("PRIORITY_SYNC_STATE_FILE", defaultStateFile),
-		ReportFile:     envString("PRIORITY_SYNC_REPORT_FILE", defaultReportFile),
+		DatabaseURL:        strings.TrimSpace(os.Getenv("PRIORITY_SYNC_DATABASE_URL")),
+		Sub2APIURL:         envString("PRIORITY_SYNC_SUB2API_URL", defaultSub2APIURL),
+		AdminAPIKey:        strings.TrimSpace(os.Getenv("PRIORITY_SYNC_ADMIN_API_KEY")),
+		Interval:           envDuration("PRIORITY_SYNC_INTERVAL", defaultInterval),
+		Window:             envDuration("PRIORITY_SYNC_WINDOW", defaultWindow),
+		ChangeCooldown:     envDuration("PRIORITY_SYNC_CHANGE_COOLDOWN", defaultCooldown),
+		MinSamples:         envInt("PRIORITY_SYNC_MIN_SAMPLES", defaultMinSamples),
+		Confirmations:      envInt("PRIORITY_SYNC_CONFIRMATIONS", defaultConfirmations),
+		ExplorationEnabled: envBool("PRIORITY_SYNC_EXPLORATION_ENABLED", false),
+		DryRun:             envBool("PRIORITY_SYNC_DRY_RUN", false),
+		StateFile:          envString("PRIORITY_SYNC_STATE_FILE", defaultStateFile),
+		ReportFile:         envString("PRIORITY_SYNC_REPORT_FILE", defaultReportFile),
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDatabaseURL()
