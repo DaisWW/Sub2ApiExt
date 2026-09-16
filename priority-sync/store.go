@@ -376,6 +376,17 @@ WHERE a.deleted_at IS NULL
   AND LOWER(TRIM(a.status)) IN ('active', 'error')
 ORDER BY ag.account_id, ag.group_id`
 
+const priorityAccountGroupMembershipQuery = `
+SELECT ag.account_id, g.id, COALESCE(BTRIM(g.name), '')
+FROM account_groups ag
+JOIN groups g ON g.id = ag.group_id
+JOIN accounts a ON a.id = ag.account_id
+WHERE a.deleted_at IS NULL
+  AND a.schedulable = TRUE
+  AND LOWER(TRIM(a.status)) IN ('active', 'error')
+  AND g.deleted_at IS NULL
+ORDER BY ag.account_id, g.id`
+
 func NewMetricsStore(db *sql.DB) *MetricsStore {
 	return &MetricsStore{db: db}
 }
@@ -468,7 +479,47 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 	if err := rows.Close(); err != nil {
 		return nil, fmt.Errorf("close priority metrics rows: %w", err)
 	}
+	if err := s.loadAccountGroupMemberships(ctx, metrics); err != nil {
+		return nil, err
+	}
 	return metrics, nil
+}
+
+func (s *MetricsStore) loadAccountGroupMemberships(ctx context.Context, accounts []AccountMetrics) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, priorityAccountGroupMembershipQuery)
+	if err != nil {
+		return fmt.Errorf("load priority account group memberships: %w", err)
+	}
+	defer rows.Close()
+	byID := make(map[int64]int, len(accounts))
+	for index := range accounts {
+		byID[accounts[index].ID] = index
+	}
+	for rows.Next() {
+		var accountID, groupID int64
+		var groupName string
+		if err := rows.Scan(&accountID, &groupID, &groupName); err != nil {
+			return fmt.Errorf("scan priority account group membership: %w", err)
+		}
+		index, ok := byID[accountID]
+		if !ok {
+			continue
+		}
+		accounts[index].GroupIDs = append(accounts[index].GroupIDs, groupID)
+		if groupName = strings.TrimSpace(groupName); groupName != "" {
+			accounts[index].GroupNames = append(accounts[index].GroupNames, groupName)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate priority account group memberships: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close priority account group membership rows: %w", err)
+	}
+	return nil
 }
 
 func (s *MetricsStore) loadGroupPriorities(ctx context.Context, accounts []AccountMetrics) error {

@@ -49,7 +49,15 @@ evaluation_weights="成本=100%,速度=0%,可用性=0%,失败/429=0%"
 
 若锚点推导出的成本优先级优于当前值，服务会复用单一探索租约，把一个候选账户放到优先级 20 试跑 10 分钟。试跑结束先立即恢复原优先级，再让新鲜真实成本按正常的两轮确认和步进规则生效。试跑仍贵或出现新的终态失败时按 `2h -> 6h -> 24h` 退避；没有结果时等待 2 小时。Admin API 写入失败不会记作账户试跑失败。账户短暂离开指标快照时会保留租约并按保存的 ID 恢复；确认账户已删除时释放租约，临时写入失败则继续重试。该恢复机制独立于普通探索开关，因此普通探索关闭时，低倍率异常账户仍有受控恢复机会。
 
-排名是账户级全局排名，不再按分组、模型、端点或平台分别归一化。网关仍只会在实际可承接同一请求的候选账户之间使用 `accounts.priority`，且 `account_groups.priority` 的分组档位仍优先于账户优先级；本服务不能跨分组档位改变路由。
+排名是账户级全局排名，不再按分组、模型、端点或平台分别归一化。网关仍只会在实际可承接同一请求的候选账户之间使用 `accounts.priority`，且 `account_groups.priority` 的分组档位仍优先于账户优先级；本服务不能跨分组档位改变路由。一个账户可以属于多个业务组，但 `accounts.priority` 仍然只有一个值，不能为同一账户在不同业务组分别排名。
+
+排除规则只控制哪些账号不参加本服务的自动优先级处理，不会创建或拆分业务组。规则字段可组合使用；例如，下面的配置排除 `西郊-gpt`，以及 `策略-gpt-低价` 或 `策略-gpt-高阶` 中的 OpenAI OAuth 账号：
+
+```env
+PRIORITY_SYNC_EXCLUDE_RULES=[{"platform":"openai","type":"oauth","groups":["西郊-gpt"]},{"platform":"openai","type":"oauth","groups":["策略-gpt-低价","策略-gpt-高阶"]}]
+```
+
+如果目的是排除所有 OpenAI OAuth 账号，直接使用 `[{"platform":"openai","type":"oauth"}]`，无需列出业务组。要让同一账户在不同业务组拥有不同优先级，需要拆成不同账号，因为网关的 `accounts.priority` 是账户级字段。
 
 ## 数据与报告
 
@@ -66,7 +74,7 @@ evaluation_weights="成本=100%,速度=0%,可用性=0%,失败/429=0%"
 | `PRIORITY_SYNC_CHANGE_COOLDOWN` | `15m` | 同一账号两次实际变更的最短间隔 |
 | `PRIORITY_SYNC_MIN_SAMPLES` | `5` | 报告置信度和可选探索使用；不限制有效成本参与排名 |
 | `PRIORITY_SYNC_CONFIRMATIONS` | `2` | 连续相同调整方向的确认周期数 |
-| `PRIORITY_SYNC_EXCLUDE_RULES` | `[{"platform":"openai","type":"oauth"}]` | JSON 规则列表；命中的账号不参与自动评分、探索、恢复或 Admin API 优先级写回。规则之间为 OR，同一规则字段之间为 AND；支持 `id`、`name`、`platform`、`type`、`status`，字符串比较忽略大小写。设为空字符串可关闭排除 |
+| `PRIORITY_SYNC_EXCLUDE_RULES` | `[{"platform":"openai","type":"oauth"}]` | JSON 规则列表；命中的账号不参与自动评分、探索、恢复或 Admin API 优先级写回。规则之间为 OR，同一规则字段之间为 AND；支持 `id`、`name`、`platform`、`type`、`status`、`groups`、`group_ids`。`groups`/`group_ids` 列表各自命中任意一项即可，字符串比较忽略大小写。设为空字符串可关闭排除 |
 | `PRIORITY_SYNC_EXPLORATION_ENABLED` | `false` | 是否开启无成本账户的有限探索 |
 | `PRIORITY_SYNC_DRY_RUN` | `false` | `true` 时只报告，不通过 Admin API 写回 |
 | `PRIORITY_SYNC_SUB2API_URL` | `http://sub2api:8080` | Admin API 地址 |

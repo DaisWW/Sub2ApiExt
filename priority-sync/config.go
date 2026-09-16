@@ -148,11 +148,13 @@ func LoadConfig() (Config, error) {
 // AccountExcludeRule matches account metadata using AND semantics. Multiple
 // rules configured in Config are evaluated with OR semantics.
 type AccountExcludeRule struct {
-	ID       *int64 `json:"id,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Platform string `json:"platform,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Status   string `json:"status,omitempty"`
+	ID       *int64   `json:"id,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	Platform string   `json:"platform,omitempty"`
+	Type     string   `json:"type,omitempty"`
+	Status   string   `json:"status,omitempty"`
+	Groups   []string `json:"groups,omitempty"`
+	GroupIDs []int64  `json:"group_ids,omitempty"`
 }
 
 func parseExcludeRules(value string) ([]AccountExcludeRule, error) {
@@ -175,10 +177,16 @@ func parseExcludeRules(value string) ([]AccountExcludeRule, error) {
 		rule.Platform = strings.TrimSpace(rule.Platform)
 		rule.Type = strings.TrimSpace(rule.Type)
 		rule.Status = strings.TrimSpace(rule.Status)
+		rule.Groups = normalizeExcludeRuleGroups(rule.Groups)
 		if rule.ID != nil && *rule.ID <= 0 {
 			return nil, fmt.Errorf("PRIORITY_SYNC_EXCLUDE_RULES 第 %d 条规则 id 必须为正整数", index+1)
 		}
-		if rule.ID == nil && rule.Name == "" && rule.Platform == "" && rule.Type == "" && rule.Status == "" {
+		for _, groupID := range rule.GroupIDs {
+			if groupID <= 0 {
+				return nil, fmt.Errorf("PRIORITY_SYNC_EXCLUDE_RULES 第 %d 条规则 group_ids 必须为正整数", index+1)
+			}
+		}
+		if rule.ID == nil && rule.Name == "" && rule.Platform == "" && rule.Type == "" && rule.Status == "" && len(rule.Groups) == 0 && len(rule.GroupIDs) == 0 {
 			return nil, fmt.Errorf("PRIORITY_SYNC_EXCLUDE_RULES 第 %d 条规则不能为空", index+1)
 		}
 	}
@@ -186,7 +194,7 @@ func parseExcludeRules(value string) ([]AccountExcludeRule, error) {
 }
 
 func (rule AccountExcludeRule) Matches(account AccountMetrics) bool {
-	if rule.ID == nil && rule.Name == "" && rule.Platform == "" && rule.Type == "" && rule.Status == "" {
+	if rule.ID == nil && rule.Name == "" && rule.Platform == "" && rule.Type == "" && rule.Status == "" && len(rule.Groups) == 0 && len(rule.GroupIDs) == 0 {
 		return false
 	}
 	if rule.ID != nil && account.ID != *rule.ID {
@@ -202,7 +210,53 @@ func (rule AccountExcludeRule) Matches(account AccountMetrics) bool {
 			return false
 		}
 	}
+	if len(rule.Groups) > 0 && !matchesAnyGroupName(account.GroupNames, rule.Groups) {
+		return false
+	}
+	if len(rule.GroupIDs) > 0 && !matchesAnyGroupID(account.GroupIDs, rule.GroupIDs) {
+		return false
+	}
 	return true
+}
+
+func normalizeExcludeRuleGroups(groups []string) []string {
+	seen := make(map[string]struct{}, len(groups))
+	result := make([]string, 0, len(groups))
+	for _, group := range groups {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		key := strings.ToLower(group)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, group)
+	}
+	return result
+}
+
+func matchesAnyGroupName(actual, expected []string) bool {
+	for _, actualGroup := range actual {
+		for _, expectedGroup := range expected {
+			if strings.EqualFold(strings.TrimSpace(actualGroup), strings.TrimSpace(expectedGroup)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func matchesAnyGroupID(actual, expected []int64) bool {
+	for _, actualID := range actual {
+		for _, expectedID := range expected {
+			if actualID == expectedID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c Config) ExcludesAccount(account AccountMetrics) bool {

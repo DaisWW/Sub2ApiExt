@@ -64,8 +64,33 @@ func TestParseExcludeRulesUsesAndWithinRuleAndOrAcrossRules(t *testing.T) {
 	}
 }
 
+func TestParseExcludeRulesMatchesMultipleGroups(t *testing.T) {
+	rules, err := parseExcludeRules(`[{"platform":"openai","groups":[" 西郊-gpt ","策略-gpt-低价","西郊-GPT"]},{"group_ids":[36,39]}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 || len(rules[0].Groups) != 2 || rules[0].Groups[0] != "西郊-gpt" || rules[0].Groups[1] != "策略-gpt-低价" {
+		t.Fatalf("normalized rules = %+v", rules)
+	}
+	if !rules[0].Matches(AccountMetrics{Platform: "OPENAI", GroupNames: []string{"策略-gpt-低价"}}) {
+		t.Fatal("group name list did not match any configured group")
+	}
+	if rules[0].Matches(AccountMetrics{Platform: "openai", GroupNames: []string{"其他-gpt"}}) {
+		t.Fatal("group rule matched an account outside the configured groups")
+	}
+	if rules[0].Matches(AccountMetrics{Platform: "anthropic", GroupNames: []string{"西郊-gpt"}}) {
+		t.Fatal("platform and group fields were not AND-ed")
+	}
+	if !rules[1].Matches(AccountMetrics{GroupIDs: []int64{12, 39}}) {
+		t.Fatal("group ID list did not match any configured group ID")
+	}
+	if rules[1].Matches(AccountMetrics{GroupIDs: []int64{12, 40}}) {
+		t.Fatal("group ID rule matched an account outside the configured IDs")
+	}
+}
+
 func TestParseExcludeRulesRejectsUnknownOrEmptyRules(t *testing.T) {
-	for _, value := range []string{`[{"platfrom":"openai"}]`, `[{}]`, `[{"id":0}]`} {
+	for _, value := range []string{`[{"platfrom":"openai"}]`, `[{}]`, `[{"id":0}]`, `[{"group_ids":[0]}]`, `[{"groups":[" "]}]`} {
 		if _, err := parseExcludeRules(value); err == nil {
 			t.Fatalf("parseExcludeRules(%q) unexpectedly succeeded", value)
 		}

@@ -10,6 +10,8 @@ type AccountMetrics struct {
 	Platform              string
 	Type                  string
 	Status                string
+	GroupNames            []string
+	GroupIDs              []int64
 	CurrentPriority       int
 	RateMultiplier        float64
 	RateLimitResetAt      *time.Time
