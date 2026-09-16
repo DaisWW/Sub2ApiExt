@@ -73,9 +73,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\codex-account-import
 
 | 参数 | 类型 | 当前模板值 | 作用 |
 | --- | --- | --- | --- |
-| `codex_cli_only` | 布尔值 | `true` | 启用 Sub2API 的 Codex CLI 专用模式。 |
+| `codex_cli_only` | 布尔值 | `true` | 仅对 OpenAI OAuth 账号生效。开启后只允许 Codex 官方客户端家族访问；其他客户端可能被拒绝。需要供其他客户端使用时设为 `false`。 |
 | `codex_fingerprint_mode` | 字符串 | `full` | Codex 指纹模式，可使用 `off`、`device`、`session` 或 `full`；当前使用完整模式。 |
 | `openai_long_context_billing_enabled` | 布尔值 | `true` | 启用 OpenAI 长上下文计费选项。 |
 | `openai_passthrough` | 布尔值 | `true` | 启用 OpenAI 请求透传选项。 |
+
+模板中的 `codex_cli_only=true` 是为了与当前已导入账号保持一致，不是通用推荐。如果还要允许通过 app-server 协议接入的客户端，需要另外了解 Sub2API 的 `codex_cli_only_allow_app_server` 选项。
 
 这些高级参数由 Sub2API 0.2.3 解释。自定义配置可以删除不需要显式设置的键，但删除后将由 Sub2API 的默认行为决定。
