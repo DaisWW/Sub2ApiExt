@@ -24,7 +24,6 @@ if /I "%~2"=="/WhatIf" set "CHECK_ONLY=-WhatIf"
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass ^
     -File "%~dp0import-codex-accounts.ps1" ^
-    -ConfigPath "C:\ProgramData\Sub2API\codex-account-import.json" ^
     -InputPath "%~f1" %CHECK_ONLY%
 
 set "IMPORT_EXIT_CODE=%ERRORLEVEL%"

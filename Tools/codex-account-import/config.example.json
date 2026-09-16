@@ -6,12 +6,12 @@
   "name_start": 1,
   "name_width": 3,
   "group_names": [
-    "your-openai-group"
+    "西郊-gpt"
   ],
-  "proxy_name": "your-proxy",
+  "proxy_name": "Verge",
   "concurrency": 3,
   "priority": 50,
-  "rate_multiplier": 1,
+  "rate_multiplier": 0.1,
   "load_factor": null,
   "notes": "",
   "expires_at": "",

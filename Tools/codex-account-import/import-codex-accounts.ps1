@@ -1,5 +1,4 @@
 ﻿param(
-    [Parameter(Mandatory = $true)]
     [string]$ConfigPath,
 
     [string]$InputPath,
@@ -110,6 +109,15 @@ function Resolve-UniqueByName {
     return $matches[0]
 }
 
+if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+    $customConfigPath = "C:\ProgramData\Sub2API\codex-account-import.json"
+    $ConfigPath = if (Test-Path -LiteralPath $customConfigPath -PathType Leaf) {
+        $customConfigPath
+    }
+    else {
+        Join-Path $PSScriptRoot "config.example.json"
+    }
+}
 $resolvedConfigPath = (Resolve-Path -LiteralPath $ConfigPath).Path
 $configDirectory = Split-Path -Parent $resolvedConfigPath
 $config = Get-Content -LiteralPath $resolvedConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json

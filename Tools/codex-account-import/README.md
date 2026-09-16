@@ -4,7 +4,9 @@
 
 Sub2API 的普通数据包导入不会随账号绑定分组。数据包里没有明确填写的代理、倍率和高级选项也会使用默认值。因此，需要一次设置完整配置时，应使用本脚本调用原生 Codex Session 导入接口。
 
-先把 `config.example.json` 复制到 `C:\ProgramData\Sub2API\codex-account-import.json`，把分组、代理、倍率等示例值改为实际配置。管理员账号与密码从 `C:\ProgramData\Sub2API\runtime\.env` 读取，不写入导入配置或日志。`sub2api_url` 只接受本机回环地址，避免把管理员密码发送到其他主机。
+模板 `config.example.json` 默认使用分组 `西郊-gpt`、代理 `Verge`、并发 `3`、优先级 `50`、倍率 `0.1` 及项目所需的 Codex 高级选项。需要自定义时，把模板复制到 `C:\ProgramData\Sub2API\codex-account-import.json` 后修改。脚本未显式指定 `-ConfigPath` 时，优先读取该自定义配置；文件不存在时自动使用工具目录内的模板。
+
+管理员账号与密码从 `C:\ProgramData\Sub2API\runtime\.env` 读取，不写入导入配置或日志。`sub2api_url` 只接受本机回环地址，避免把管理员密码发送到其他主机。
 
 日常使用时，把一个账号 JSON 文件拖到 `drop-json-to-import.bat` 上即可正式导入。BAT 会把拖入文件的路径传给脚本，因此配置中不需要 `input_path`。窗口会保留导入结果；一次只能拖入一个文件。
 
@@ -12,9 +14,10 @@ Sub2API 的普通数据包导入不会随账号绑定分组。数据包里没有
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\codex-account-import\import-codex-accounts.ps1 `
-  -ConfigPath C:\ProgramData\Sub2API\codex-account-import.json `
   -InputPath D:\path\to\codex-auth.json -WhatIf
 ```
+
+需要临时使用另一份配置时，再加 `-ConfigPath D:\path\to\custom-config.json`。
 
 校验通过后去掉 `-WhatIf` 执行导入。脚本按名称精确解析已有分组和代理；名称不存在、重复、未启用或平台不匹配时会停止。每条记录单独调用 `/api/v1/admin/accounts/import/codex-session`，并启用 `update_existing`，重复执行会更新匹配账号而不是再次创建。
 
