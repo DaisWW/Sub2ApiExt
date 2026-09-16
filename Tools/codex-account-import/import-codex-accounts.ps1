@@ -266,8 +266,7 @@ for ($index = 0; $index -lt $records.Count; $index++) {
     if ($null -ne $loadFactor) { $payload.load_factor = [int]$loadFactor }
     $expiresAt = [string](Get-JsonProperty $config "expires_at" "")
     if ($expiresAt) {
-        [void][DateTimeOffset]::Parse($expiresAt)
-        $payload.expires_at = $expiresAt
+        $payload.expires_at = [DateTimeOffset]::Parse($expiresAt).ToUnixTimeSeconds()
     }
 
     if ($WhatIf) {
