@@ -13,7 +13,7 @@ func TestLoadConfigDefaultsToAutoApply(t *testing.T) {
 		"DATABASE_PASSWORD", "DATABASE_DBNAME", "DATABASE_SSLMODE", "PRIORITY_SYNC_SUB2API_URL",
 		"PRIORITY_SYNC_INTERVAL", "PRIORITY_SYNC_WINDOW", "PRIORITY_SYNC_CHANGE_COOLDOWN",
 		"PRIORITY_SYNC_MIN_SAMPLES", "PRIORITY_SYNC_CONFIRMATIONS", "PRIORITY_SYNC_DRY_RUN",
-		"PRIORITY_SYNC_EXPLORATION_ENABLED",
+		"PRIORITY_SYNC_EXPLORATION_ENABLED", "PRIORITY_SYNC_EXCLUDE_RULES",
 		"PRIORITY_SYNC_STATE_FILE", "PRIORITY_SYNC_REPORT_FILE",
 	} {
 		t.Setenv(key, "")
@@ -42,6 +42,45 @@ func TestLoadConfigEnablesExplorationExplicitly(t *testing.T) {
 	}
 	if !config.ExplorationEnabled {
 		t.Fatal("explicit exploration setting was ignored")
+	}
+}
+
+func TestParseExcludeRulesUsesAndWithinRuleAndOrAcrossRules(t *testing.T) {
+	rules, err := parseExcludeRules(`[{"platform":"OpenAI","type":"OAuth"},{"id":64}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 || rules[0].Platform != "OpenAI" || rules[0].Type != "OAuth" || rules[1].ID == nil || *rules[1].ID != 64 {
+		t.Fatalf("parsed rules = %+v", rules)
+	}
+	if !rules[0].Matches(AccountMetrics{ID: 1, Platform: "openai", Type: "oauth"}) {
+		t.Fatal("matching platform/type rule did not match case-insensitively")
+	}
+	if rules[0].Matches(AccountMetrics{ID: 1, Platform: "openai", Type: "apikey"}) {
+		t.Fatal("platform/type rule matched an account with a different type")
+	}
+	if !rules[1].Matches(AccountMetrics{ID: 64, Platform: "openai", Type: "apikey"}) {
+		t.Fatal("id rule did not match")
+	}
+}
+
+func TestParseExcludeRulesRejectsUnknownOrEmptyRules(t *testing.T) {
+	for _, value := range []string{`[{"platfrom":"openai"}]`, `[{}]`, `[{"id":0}]`} {
+		if _, err := parseExcludeRules(value); err == nil {
+			t.Fatalf("parseExcludeRules(%q) unexpectedly succeeded", value)
+		}
+	}
+}
+
+func TestLoadConfigParsesExcludeRules(t *testing.T) {
+	t.Setenv("PRIORITY_SYNC_DATABASE_URL", "postgres://user:pass@db/sub2api")
+	t.Setenv("PRIORITY_SYNC_EXCLUDE_RULES", `[{"platform":"openai","type":"oauth"}]`)
+	config, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.ExcludeRules) != 1 || !config.ExcludesAccount(AccountMetrics{Platform: "OpenAI", Type: "OAuth"}) || config.ExcludesAccount(AccountMetrics{Platform: "openai", Type: "apikey"}) {
+		t.Fatalf("exclude rules = %+v", config.ExcludeRules)
 	}
 }
 

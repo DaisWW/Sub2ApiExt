@@ -66,6 +66,7 @@ evaluation_weights="成本=100%,速度=0%,可用性=0%,失败/429=0%"
 | `PRIORITY_SYNC_CHANGE_COOLDOWN` | `15m` | 同一账号两次实际变更的最短间隔 |
 | `PRIORITY_SYNC_MIN_SAMPLES` | `5` | 报告置信度和可选探索使用；不限制有效成本参与排名 |
 | `PRIORITY_SYNC_CONFIRMATIONS` | `2` | 连续相同调整方向的确认周期数 |
+| `PRIORITY_SYNC_EXCLUDE_RULES` | `[{"platform":"openai","type":"oauth"}]` | JSON 规则列表；命中的账号不参与自动评分、探索、恢复或 Admin API 优先级写回。规则之间为 OR，同一规则字段之间为 AND；支持 `id`、`name`、`platform`、`type`、`status`，字符串比较忽略大小写。设为空字符串可关闭排除 |
 | `PRIORITY_SYNC_EXPLORATION_ENABLED` | `false` | 是否开启无成本账户的有限探索 |
 | `PRIORITY_SYNC_DRY_RUN` | `false` | `true` 时只报告，不通过 Admin API 写回 |
 | `PRIORITY_SYNC_SUB2API_URL` | `http://sub2api:8080` | Admin API 地址 |

@@ -161,6 +161,31 @@ func TestRunnerUsesFixedWindowSourceWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestRunnerFiltersConfiguredAccountsBeforeScoring(t *testing.T) {
+	source := &fakeMetricsSource{accounts: []AccountMetrics{
+		{ID: 1, Name: "oauth", Platform: "openai", Type: "oauth", Status: "active", CurrentPriority: priorityBest, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 1},
+		{ID: 2, Name: "apikey", Platform: "openai", Type: "apikey", Status: "active", CurrentPriority: priorityNeutral, SuccessfulRequests: 5, TotalTokens: 1_000_000, AccountCost: 2},
+	}}
+	config := testRunnerConfig(t, "http://127.0.0.1:1", true)
+	config.ExcludeRules = []AccountExcludeRule{{Platform: "openai", Type: "oauth"}}
+	runner := NewRunner(config, source, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	runner.tableWriter = io.Discard
+	if err := runner.RunOnce(context.Background(), nowForTest()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(config.ReportFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report PriorityReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Accounts) != 1 || report.Accounts[0].ID != 2 {
+		t.Fatalf("filtered report accounts = %+v", report.Accounts)
+	}
+}
+
 func TestRunnerLogsEvaluationWeights(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))

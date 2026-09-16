@@ -192,6 +192,7 @@ WITH usage_candidates AS (
 SELECT a.id,
        COALESCE(BTRIM(a.name), '') AS name,
        COALESCE(BTRIM(a.platform), '') AS platform,
+       COALESCE(BTRIM(a.type), '') AS type,
        COALESCE(BTRIM(a.status), '') AS status,
        COALESCE(a.priority, 50),
        COALESCE(a.rate_multiplier, 1)::double precision,
@@ -324,6 +325,7 @@ WITH usage_candidates AS (
 SELECT a.id,
        COALESCE(BTRIM(a.name), '') AS name,
        COALESCE(BTRIM(a.platform), '') AS platform,
+       COALESCE(BTRIM(a.type), '') AS type,
        COALESCE(BTRIM(a.status), '') AS status,
        COALESCE(a.priority, 50),
        COALESCE(a.rate_multiplier, 1)::double precision,
@@ -427,7 +429,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		var rateLimitReset, tempUnschedulable, overload sql.NullTime
 		var costP75, latencyP90, firstTokenP90 sql.NullFloat64
 		if err := rows.Scan(
-			&item.ID, &item.Name, &item.Platform, &item.Status, &priority,
+			&item.ID, &item.Name, &item.Platform, &item.Type, &item.Status, &priority,
 			&item.RateMultiplier, &rateLimitReset, &tempUnschedulable, &overload,
 			&item.SuccessfulRequests, &item.PricedRequests, &item.PricedTokens, &item.TotalTokens,
 			&item.InputTokens, &item.OutputTokens, &item.CacheCreationTokens, &item.CacheReadTokens,

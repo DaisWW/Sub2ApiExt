@@ -67,6 +67,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		defer func() { r.state = originalState }()
 	}
 	r.prepareStrategyState()
+	accounts, excluded := r.filterExcludedAccounts(accounts)
 	accounts = r.includeExpiredMissingRecovery(accounts, now)
 	recommendations := scoreAccounts(accounts, now, r.config.MinSamples)
 	r.prepareExploration(accounts, recommendations, now)
@@ -98,6 +99,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 	}
 	r.logger.Info("优先级策略周期完成",
 		"accounts", len(recommendations),
+		"excluded", excluded,
 		"changed", changed,
 		"pending", pending,
 		"dry_run", r.config.DryRun,
@@ -107,6 +109,28 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		"recovery_anchor", recoveryAnchorPolicy,
 	)
 	return nil
+}
+
+func (r *Runner) filterExcludedAccounts(accounts []AccountMetrics) ([]AccountMetrics, int) {
+	if r == nil || len(r.config.ExcludeRules) == 0 || len(accounts) == 0 {
+		return accounts, 0
+	}
+	filtered := make([]AccountMetrics, 0, len(accounts))
+	excluded := 0
+	for _, account := range accounts {
+		if r.config.ExcludesAccount(account) {
+			if r.state != nil {
+				delete(r.state.Accounts, account.ID)
+				if r.state.Exploration != nil && r.state.Exploration.AccountID == account.ID {
+					r.state.Exploration = nil
+				}
+			}
+			excluded++
+			continue
+		}
+		filtered = append(filtered, account)
+	}
+	return filtered, excluded
 }
 
 func (r *Runner) prepareStrategyState() {

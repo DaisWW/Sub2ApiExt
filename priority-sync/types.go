@@ -8,6 +8,7 @@ type AccountMetrics struct {
 	ID                    int64
 	Name                  string
 	Platform              string
+	Type                  string
 	Status                string
 	CurrentPriority       int
 	RateMultiplier        float64

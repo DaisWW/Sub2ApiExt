@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/url"
@@ -76,6 +78,7 @@ type Config struct {
 	DatabaseURL        string
 	Sub2APIURL         string
 	AdminAPIKey        string
+	ExcludeRules       []AccountExcludeRule
 	Interval           time.Duration
 	Window             time.Duration
 	ChangeCooldown     time.Duration
@@ -102,6 +105,11 @@ func LoadConfig() (Config, error) {
 		StateFile:          envString("PRIORITY_SYNC_STATE_FILE", defaultStateFile),
 		ReportFile:         envString("PRIORITY_SYNC_REPORT_FILE", defaultReportFile),
 	}
+	excludeRules, err := parseExcludeRules(os.Getenv("PRIORITY_SYNC_EXCLUDE_RULES"))
+	if err != nil {
+		return Config{}, err
+	}
+	c.ExcludeRules = excludeRules
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDatabaseURL()
 	}
@@ -135,6 +143,75 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("状态和报告文件路径不能为空")
 	}
 	return c, nil
+}
+
+// AccountExcludeRule matches account metadata using AND semantics. Multiple
+// rules configured in Config are evaluated with OR semantics.
+type AccountExcludeRule struct {
+	ID       *int64 `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Platform string `json:"platform,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Status   string `json:"status,omitempty"`
+}
+
+func parseExcludeRules(value string) ([]AccountExcludeRule, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.DisallowUnknownFields()
+	var rules []AccountExcludeRule
+	if err := decoder.Decode(&rules); err != nil {
+		return nil, fmt.Errorf("PRIORITY_SYNC_EXCLUDE_RULES 必须是 JSON 对象数组: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("PRIORITY_SYNC_EXCLUDE_RULES 只能包含一个 JSON 数组")
+	}
+	for index := range rules {
+		rule := &rules[index]
+		rule.Name = strings.TrimSpace(rule.Name)
+		rule.Platform = strings.TrimSpace(rule.Platform)
+		rule.Type = strings.TrimSpace(rule.Type)
+		rule.Status = strings.TrimSpace(rule.Status)
+		if rule.ID != nil && *rule.ID <= 0 {
+			return nil, fmt.Errorf("PRIORITY_SYNC_EXCLUDE_RULES 第 %d 条规则 id 必须为正整数", index+1)
+		}
+		if rule.ID == nil && rule.Name == "" && rule.Platform == "" && rule.Type == "" && rule.Status == "" {
+			return nil, fmt.Errorf("PRIORITY_SYNC_EXCLUDE_RULES 第 %d 条规则不能为空", index+1)
+		}
+	}
+	return rules, nil
+}
+
+func (rule AccountExcludeRule) Matches(account AccountMetrics) bool {
+	if rule.ID == nil && rule.Name == "" && rule.Platform == "" && rule.Type == "" && rule.Status == "" {
+		return false
+	}
+	if rule.ID != nil && account.ID != *rule.ID {
+		return false
+	}
+	for _, pair := range [][2]string{
+		{rule.Name, account.Name},
+		{rule.Platform, account.Platform},
+		{rule.Type, account.Type},
+		{rule.Status, account.Status},
+	} {
+		if pair[0] != "" && !strings.EqualFold(pair[0], strings.TrimSpace(pair[1])) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c Config) ExcludesAccount(account AccountMetrics) bool {
+	for _, rule := range c.ExcludeRules {
+		if rule.Matches(account) {
+			return true
+		}
+	}
+	return false
 }
 
 func envString(name, fallback string) string {
