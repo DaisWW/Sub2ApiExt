@@ -19,20 +19,42 @@ Sub2API 的普通数据包导入不会随账号绑定分组。数据包里没有
 "group_names": ["西郊-gpt", "策略-gpt-低价"]
 ```
 
-这表示每个导入账号都进入两个组，不会把账号平均拆分。若要让不同账号批次进入不同组，请分别准备配置或输入文件后各运行一次导入；脚本会把当前配置中的全部分组应用到当前批次。
+这表示每个导入账号都进入两个组，不会把账号平均拆分。若要让不同账号批次进入不同组，可以在一个配置里使用 `batches`，每个批次单独指定输入文件和分组：
 
-账号输入按以下顺序选择：
+```json
+"batches": [
+  {
+    "input_path": "accounts-west.json",
+    "group_names": ["西郊-gpt"]
+  },
+  {
+    "input_path": "accounts-strategy.json",
+    "group_names": ["策略-gpt-低价"]
+  }
+]
+```
+
+批次中的其他字段默认继承顶层配置；每个批次都必须明确填写 `group_names`，避免误继承顶层分组。如果需要让同一批账号进入多个组，可在该批次的 `group_names` 中填写多个名称。配置使用 `batches` 时，不能再传 `-InputPath`；路径相对于配置文件所在目录。没有 `batches` 时，原来的单批次配置和拖入 BAT 用法保持不变。
+
+单批次配置的账号输入按以下顺序选择：
 
 1. 命令行 `-InputPath`；拖入 BAT 时由 BAT 自动传入被拖入文件的绝对路径。
 2. 配置中的可选 `input_path`。
 
-两处都没有提供输入文件时，脚本停止。配置中的相对 `input_path` 以配置文件所在目录为基准；命令行相对路径以当前工作目录为基准。
+两处都没有提供输入文件时，脚本停止。配置中的相对 `input_path` 以配置文件所在目录为基准；命令行相对路径以当前工作目录为基准。使用 `batches` 时，输入文件由每个批次的 `input_path` 提供。
 
 管理员账号与密码从 `runtime_env_path` 指定的 `.env` 读取，不写入导入配置或日志。`sub2api_url` 只接受本机回环地址，避免把管理员密码发送到其他主机。
 
 ## 使用方法
 
 日常使用时，把一个账号 JSON 文件拖到 `drop-json-to-import.bat` 上即可正式导入。窗口会保留导入结果；一次只能拖入一个文件。
+
+多批次配置使用 `-ConfigPath` 执行，例如：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\codex-account-import\import-codex-accounts.ps1 `
+  -ConfigPath C:\ProgramData\Sub2API\codex-account-import.json -WhatIf
+```
 
 先校验输入、管理员登录、分组和代理，不创建或修改账号；`-WhatIf` 不会调用导入接口验证每条凭据能否被接受：
 
@@ -63,10 +85,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\codex-account-import
 | `sub2api_url` | 字符串 | `http://127.0.0.1:18080` | 使用 `http://127.0.0.1:<SERVER_PORT>`；没有 `SERVER_PORT` 时端口为 `18080` | Sub2API 服务根地址，不要附加 `/api/v1`。只允许 `http` 或 `https` 的本机回环地址，不能包含用户信息、查询参数或片段。 |
 | `source_type` | 字符串 | `codex` | `codex` | 只导入凭据中 `type` 与该值相同的记录，比较不区分大小写。设为 `""` 可关闭类型过滤。 |
 | `input_path` | 字符串 | 未配置 | 无输入备用值 | 可选账号文件路径。`-InputPath` 优先于该字段；拖入 BAT 时无需填写。 |
+| `batches` | 对象数组 | 未配置 | 使用单批次模式 | 多批次导入；每项必须填写 `input_path` 和 `group_names`，并可填写 `source_type`、`name_prefix`、`name_start`、`name_width` 覆盖顶层值。使用此字段时不能传 `-InputPath`。 |
 | `name_prefix` | 字符串 | `""` | `""` | 新建账号时，留空使用每条凭据的 `email` 命名，缺少邮箱即报错；填写后改为“前缀 + 连续编号”。更新已有账号不修改名称。 |
 | `name_start` | 整数 | `1` | `1` | 连续编号起始值，只在 `name_prefix` 非空时使用，不能小于 `0`。 |
 | `name_width` | 整数 | `3` | `3` | 连续编号的最小位数，只在 `name_prefix` 非空时使用；范围为 `1` 到 `99`。例如 `3` 生成 `001`。 |
-| `group_names` | 字符串数组 | `["西郊-gpt"]` | `[]` | 导入时指定的分组名称，可填写多个；同一批每个账号都会绑定全部列出的分组。名称按不区分大小写的方式精确匹配，并且必须唯一、启用且属于 OpenAI 平台。空数组时，新建账号可能绑定 `openai-default`，更新已有账号则保留原分组。 |
+| `group_names` | 字符串数组 | `["西郊-gpt"]` | `[]` | 导入时指定的分组名称，可填写多个；同一批每个账号都会绑定全部列出的分组。名称按不区分大小写的方式精确匹配，并且必须唯一、启用且属于 OpenAI 平台。空数组时，新建账号可能绑定 `openai-default`，更新已有账号则保留原分组。批次模式下每个批次必须明确填写。 |
 | `proxy_name` | 字符串 | `Verge` | `""` | 导入时指定的代理名称。名称必须唯一且代理已启用；留空时新建账号直连，更新已有账号保留原代理。 |
 | `concurrency` | 整数 | `3` | `3` | 写入账户并发数，必须大于 `0`。 |
 | `priority` | 整数 | `50` | `50` | 写入账户调度优先级，必须大于 `0`；数值越小优先级越高。 |

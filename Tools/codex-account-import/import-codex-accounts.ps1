@@ -109,6 +109,70 @@ function Resolve-UniqueByName {
     return $matches[0]
 }
 
+function Get-EffectiveConfigValue {
+    param(
+        $Batch,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Default = $null
+    )
+
+    if ($null -ne $Batch) {
+        $batchProperty = $Batch.PSObject.Properties[$Name]
+        if ($null -ne $batchProperty) {
+            return $batchProperty.Value
+        }
+    }
+    return Get-JsonProperty $Config $Name $Default
+}
+
+function Resolve-ImportInputPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$BasePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "未提供账号 JSON；请拖入 BAT，或使用 -InputPath，或在配置中填写 input_path"
+    }
+    if (-not [IO.Path]::IsPathRooted($Path)) {
+        $Path = [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "找不到账号 JSON: $Path"
+    }
+    return (Resolve-Path -LiteralPath $Path).Path
+}
+
+function Read-ImportRecords {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$SourceType
+    )
+
+    $source = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    $sourceAccounts = Get-JsonProperty $source "accounts" $null
+    if ($null -ne $sourceAccounts) {
+        $records = @($sourceAccounts | ForEach-Object { Get-JsonProperty $_ "credentials" $null } | Where-Object { $null -ne $_ })
+    }
+    else {
+        $records = @($source)
+    }
+    $records = @($records | Where-Object {
+        $recordType = [string](Get-JsonProperty $_ "type" "")
+        -not $SourceType -or [string]::Equals($recordType, $SourceType, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($records.Count -eq 0) {
+        throw "账号 JSON '$Path' 中没有符合 source_type='$SourceType' 的记录"
+    }
+    foreach ($record in $records) {
+        if (-not (Get-JsonProperty $record "access_token" "") -and -not (Get-JsonProperty $record "accessToken" "")) {
+            throw "账号 JSON '$Path' 中存在缺少 access_token/accessToken 的记录"
+        }
+    }
+    return $records
+}
+
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $customConfigPath = "C:\ProgramData\Sub2API\codex-account-import.json"
     $ConfigPath = if (Test-Path -LiteralPath $customConfigPath -PathType Leaf) {
@@ -146,40 +210,63 @@ if ($baseUri.UserInfo -or $baseUri.Query -or $baseUri.Fragment) {
 }
 $baseUrl = $baseUrl.TrimEnd('/')
 
-$configuredInputPath = [string](Get-JsonProperty $config "input_path" "")
 $inputPathFromArgument = -not [string]::IsNullOrWhiteSpace($InputPath)
-$inputPath = if ($inputPathFromArgument) { $InputPath } else { $configuredInputPath }
-if ([string]::IsNullOrWhiteSpace($inputPath)) {
-    throw "未提供账号 JSON；请拖入 BAT，或使用 -InputPath，或在配置中填写 input_path"
-}
-if (-not [IO.Path]::IsPathRooted($inputPath)) {
-    $inputBasePath = if ($inputPathFromArgument) { (Get-Location).Path } else { $configDirectory }
-    $inputPath = [IO.Path]::GetFullPath((Join-Path $inputBasePath $inputPath))
-}
-if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) {
-    throw "找不到账号 JSON: $inputPath"
-}
-
-$source = Get-Content -LiteralPath $inputPath -Raw -Encoding UTF8 | ConvertFrom-Json
-$sourceAccounts = Get-JsonProperty $source "accounts" $null
-if ($null -ne $sourceAccounts) {
-    $records = @($sourceAccounts | ForEach-Object { Get-JsonProperty $_ "credentials" $null } | Where-Object { $null -ne $_ })
+$sourceType = [string](Get-JsonProperty $config "source_type" "codex")
+$batchDefinitions = @()
+$configuredBatches = Get-JsonProperty $config "batches" $null
+if ($null -ne $configuredBatches) {
+    if ($inputPathFromArgument) {
+        throw "配置使用 batches 时不能同时传入 -InputPath；请在每个批次中填写 input_path"
+    }
+    $rawBatches = @($configuredBatches)
+    if ($rawBatches.Count -eq 0) {
+        throw "batches 至少需要包含一个批次"
+    }
+    for ($batchIndex = 0; $batchIndex -lt $rawBatches.Count; $batchIndex++) {
+        $rawBatch = $rawBatches[$batchIndex]
+        if ($null -eq $rawBatch) {
+            throw "第 $($batchIndex + 1) 个批次不能为空"
+        }
+        $batchInputProperty = $rawBatch.PSObject.Properties["input_path"]
+        if ($null -eq $batchInputProperty -or [string]::IsNullOrWhiteSpace([string]$batchInputProperty.Value)) {
+            throw "第 $($batchIndex + 1) 个批次必须填写 input_path"
+        }
+        $batchGroupProperty = $rawBatch.PSObject.Properties["group_names"]
+        if ($null -eq $batchGroupProperty) {
+            throw "第 $($batchIndex + 1) 个批次必须填写 group_names（可以是空数组）"
+        }
+        $batchInputPath = Resolve-ImportInputPath `
+            -Path ([string]$batchInputProperty.Value) `
+            -BasePath $configDirectory
+        $batchSourceType = [string](Get-EffectiveConfigValue $rawBatch $config "source_type" $sourceType)
+        $batchGroupNames = @($batchGroupProperty.Value)
+        $batchRecords = @(Read-ImportRecords -Path $batchInputPath -SourceType $batchSourceType)
+        $batchDefinitions += [pscustomobject]@{
+            Index      = $batchIndex + 1
+            Config     = $rawBatch
+            InputPath  = $batchInputPath
+            SourceType = $batchSourceType
+            GroupNames = $batchGroupNames
+            GroupIds   = @()
+            Records    = $batchRecords
+        }
+    }
 }
 else {
-    $records = @($source)
-}
-$sourceType = [string](Get-JsonProperty $config "source_type" "codex")
-$records = @($records | Where-Object {
-    $recordType = [string](Get-JsonProperty $_ "type" "")
-    -not $sourceType -or [string]::Equals($recordType, $sourceType, [StringComparison]::OrdinalIgnoreCase)
-})
-if ($records.Count -eq 0) {
-    throw "账号 JSON 中没有符合 source_type='$sourceType' 的记录"
-}
-foreach ($record in $records) {
-    if (-not (Get-JsonProperty $record "access_token" "") -and -not (Get-JsonProperty $record "accessToken" "")) {
-        throw "账号 JSON 中存在缺少 access_token/accessToken 的记录"
-    }
+    $configuredInputPath = [string](Get-JsonProperty $config "input_path" "")
+    $inputPath = if ($inputPathFromArgument) { $InputPath } else { $configuredInputPath }
+    $inputBasePath = if ($inputPathFromArgument) { (Get-Location).Path } else { $configDirectory }
+    $resolvedInputPath = Resolve-ImportInputPath -Path $inputPath -BasePath $inputBasePath
+    $batchRecords = @(Read-ImportRecords -Path $resolvedInputPath -SourceType $sourceType)
+    $batchDefinitions = @([pscustomobject]@{
+        Index      = 1
+        Config     = $null
+        InputPath  = $resolvedInputPath
+        SourceType = $sourceType
+        GroupNames = @(Get-JsonProperty $config "group_names" @())
+        GroupIds   = @()
+        Records    = $batchRecords
+    })
 }
 
 $login = Invoke-Sub2Api -Method Post -Path "/auth/login" -BaseUrl $baseUrl -Body @{
@@ -192,14 +279,18 @@ if (-not $token) {
 }
 
 $groups = @(Invoke-Sub2Api -Method Get -Path "/admin/groups/all?include_inactive=true" -BaseUrl $baseUrl -Token $token)
-$groupNames = @(Get-JsonProperty $config "group_names" @())
-$groupIds = @()
-foreach ($groupName in $groupNames) {
-    $group = Resolve-UniqueByName -Items $groups -Name ([string]$groupName) -Label "分组"
-    if ($group.platform -ne "openai" -or $group.status -ne "active") {
-        throw "分组 '$groupName' 必须是启用状态的 OpenAI 分组"
+$groupBatchSummaries = @()
+foreach ($batch in $batchDefinitions) {
+    $groupIds = @()
+    foreach ($groupName in @($batch.GroupNames)) {
+        $group = Resolve-UniqueByName -Items $groups -Name ([string]$groupName) -Label "分组"
+        if ($group.platform -ne "openai" -or $group.status -ne "active") {
+            throw "第 $($batch.Index) 个批次的分组 '$groupName' 必须是启用状态的 OpenAI 分组"
+        }
+        $groupIds += [int64]$group.id
     }
-    $groupIds += [int64]$group.id
+    $batch.GroupIds = $groupIds
+    $groupBatchSummaries += if ($batch.GroupNames.Count) { $batch.GroupNames -join ", " } else { "无" }
 }
 
 $proxyId = $null
@@ -226,67 +317,77 @@ if ($null -ne $loadFactor) {
     if ($loadFactor -lt 1) { throw "load_factor 必须大于 0，或设为 null 使用默认值" }
 }
 
-$namePrefix = [string](Get-JsonProperty $config "name_prefix" "")
-$nameStart = [int](Get-JsonProperty $config "name_start" 1)
-$nameWidth = [int](Get-JsonProperty $config "name_width" 3)
-if ($nameStart -lt 0) { throw "name_start 不能小于 0" }
-if ($nameWidth -lt 1 -or $nameWidth -gt 99) { throw "name_width 必须在 1 到 99 之间" }
-if ($nameStart -gt [int]::MaxValue - ($records.Count - 1)) { throw "name_start 加账号数量超出整数范围" }
 $extra = Get-JsonProperty $config "extra" ([pscustomobject]@{})
 $created = 0
 $updated = 0
 $skipped = 0
+$whatIfSummaries = @()
 
-for ($index = 0; $index -lt $records.Count; $index++) {
-    $record = $records[$index]
-    $name = if ($namePrefix) {
-        $namePrefix + ($nameStart + $index).ToString("D$nameWidth")
-    }
-    else {
-        $candidate = ([string](Get-JsonProperty $record "email" "")).Trim()
-        if (-not $candidate) {
-            throw "第 $($index + 1) 个账号缺少 email，无法按邮箱命名"
+foreach ($batch in $batchDefinitions) {
+    $records = @($batch.Records)
+    $namePrefix = [string](Get-EffectiveConfigValue $batch.Config $config "name_prefix" "")
+    $nameStart = [int](Get-EffectiveConfigValue $batch.Config $config "name_start" 1)
+    $nameWidth = [int](Get-EffectiveConfigValue $batch.Config $config "name_width" 3)
+    if ($nameStart -lt 0) { throw "第 $($batch.Index) 个批次的 name_start 不能小于 0" }
+    if ($nameWidth -lt 1 -or $nameWidth -gt 99) { throw "第 $($batch.Index) 个批次的 name_width 必须在 1 到 99 之间" }
+    if ($nameStart -gt [int]::MaxValue - ($records.Count - 1)) { throw "第 $($batch.Index) 个批次的 name_start 加账号数量超出整数范围" }
+
+    for ($index = 0; $index -lt $records.Count; $index++) {
+        $record = $records[$index]
+        $name = if ($namePrefix) {
+            $namePrefix + ($nameStart + $index).ToString("D$nameWidth")
         }
-        $candidate
-    }
+        else {
+            $candidate = ([string](Get-JsonProperty $record "email" "")).Trim()
+            if (-not $candidate) {
+                throw "第 $($batch.Index) 个批次第 $($index + 1) 个账号缺少 email，无法按邮箱命名"
+            }
+            $candidate
+        }
 
-    $payload = @{
-        content               = $record | ConvertTo-Json -Depth 50 -Compress
-        name                  = $name
-        notes                 = [string](Get-JsonProperty $config "notes" "")
-        proxy_id              = $proxyId
-        concurrency           = $concurrency
-        priority              = $priority
-        rate_multiplier       = $rateMultiplier
-        group_ids             = $groupIds
-        auto_pause_on_expired = [bool](Get-JsonProperty $config "auto_pause_on_expired" $false)
-        extra                 = $extra
-        update_existing       = $true
-    }
-    if ($null -ne $loadFactor) { $payload.load_factor = [int]$loadFactor }
-    $expiresAt = [string](Get-JsonProperty $config "expires_at" "")
-    if ($expiresAt) {
-        $payload.expires_at = [DateTimeOffset]::Parse($expiresAt).ToUnixTimeSeconds()
+        $payload = @{
+            content               = $record | ConvertTo-Json -Depth 50 -Compress
+            name                  = $name
+            notes                 = [string](Get-JsonProperty $config "notes" "")
+            proxy_id              = $proxyId
+            concurrency           = $concurrency
+            priority              = $priority
+            rate_multiplier       = $rateMultiplier
+            group_ids             = @($batch.GroupIds)
+            auto_pause_on_expired = [bool](Get-JsonProperty $config "auto_pause_on_expired" $false)
+            extra                 = $extra
+            update_existing       = $true
+        }
+        if ($null -ne $loadFactor) { $payload.load_factor = [int]$loadFactor }
+        $expiresAt = [string](Get-JsonProperty $config "expires_at" "")
+        if ($expiresAt) {
+            $payload.expires_at = [DateTimeOffset]::Parse($expiresAt).ToUnixTimeSeconds()
+        }
+
+        if ($WhatIf) {
+            continue
+        }
+
+        $result = Invoke-Sub2Api -Method Post -Path "/admin/accounts/import/codex-session" -BaseUrl $baseUrl -Token $token -Body $payload
+        $created += [int](Get-JsonProperty $result "created" 0)
+        $updated += [int](Get-JsonProperty $result "updated" 0)
+        $skipped += [int](Get-JsonProperty $result "skipped" 0)
+        if ([int](Get-JsonProperty $result "failed" 0) -gt 0) {
+            throw "第 $($batch.Index) 个批次第 $($index + 1) 个账号导入失败；凭据内容未输出，请在 Sub2API 操作日志中查看请求结果"
+        }
     }
 
     if ($WhatIf) {
-        continue
-    }
-
-    $result = Invoke-Sub2Api -Method Post -Path "/admin/accounts/import/codex-session" -BaseUrl $baseUrl -Token $token -Body $payload
-    $created += [int](Get-JsonProperty $result "created" 0)
-    $updated += [int](Get-JsonProperty $result "updated" 0)
-    $skipped += [int](Get-JsonProperty $result "skipped" 0)
-    if ([int](Get-JsonProperty $result "failed" 0) -gt 0) {
-        throw "第 $($index + 1) 个账号导入失败；凭据内容未输出，请在 Sub2API 操作日志中查看请求结果"
+        $nameSummary = if ($namePrefix) { "前缀 $namePrefix" } else { "邮箱" }
+        $whatIfSummaries += "批次 $($batch.Index)：$($records.Count) 个账号；文件=$($batch.InputPath)；命名=$nameSummary；分组=$($groupBatchSummaries[$batch.Index - 1])"
     }
 }
 
 if ($WhatIf) {
-    $groupSummary = if ($groupNames.Count) { $groupNames -join ", " } else { "无" }
     $proxySummary = if ($proxyName) { $proxyName } else { "直连" }
-    $nameSummary = if ($namePrefix) { "前缀 $namePrefix" } else { "邮箱" }
-    Write-Host "校验通过：$($records.Count) 个账号；命名=$nameSummary；分组=$groupSummary；代理=$proxySummary；并发=$concurrency；优先级=$priority；倍率=$rateMultiplier"
+    foreach ($summary in $whatIfSummaries) {
+        Write-Host "校验通过：$summary；代理=$proxySummary；并发=$concurrency；优先级=$priority；倍率=$rateMultiplier"
+    }
 }
 else {
     Write-Host "导入完成：创建 $created，更新 $updated，跳过 $skipped"
