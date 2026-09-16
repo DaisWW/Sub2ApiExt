@@ -1,0 +1,25 @@
+{
+  "runtime_env_path": "C:\\ProgramData\\Sub2API\\runtime\\.env",
+  "sub2api_url": "http://127.0.0.1:18080",
+  "source_type": "codex",
+  "name_prefix": "",
+  "name_start": 1,
+  "name_width": 3,
+  "group_names": [
+    "your-openai-group"
+  ],
+  "proxy_name": "your-proxy",
+  "concurrency": 3,
+  "priority": 50,
+  "rate_multiplier": 1,
+  "load_factor": null,
+  "notes": "",
+  "expires_at": "",
+  "auto_pause_on_expired": true,
+  "extra": {
+    "codex_cli_only": true,
+    "codex_fingerprint_mode": "full",
+    "openai_long_context_billing_enabled": true,
+    "openai_passthrough": true
+  }
+}
