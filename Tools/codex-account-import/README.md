@@ -34,7 +34,7 @@ Sub2API 的普通数据包导入不会随账号绑定分组。数据包里没有
 ]
 ```
 
-批次中的其他字段默认继承顶层配置；每个批次都必须明确填写 `group_names`，避免误继承顶层分组。如果需要让同一批账号进入多个组，可在该批次的 `group_names` 中填写多个名称。配置使用 `batches` 时，不能再传 `-InputPath`；路径相对于配置文件所在目录。没有 `batches` 时，原来的单批次配置和拖入 BAT 用法保持不变。
+批次中的其他字段默认继承顶层配置；每个批次都必须明确填写 `group_names`，避免误继承顶层分组。如果需要让同一批账号进入多个组，可在该批次的 `group_names` 中填写多个名称。配置使用 `batches` 时，每个批次的路径相对于配置文件所在目录。若同时传入 `-InputPath`（包括拖入 BAT），命令行输入会优先按单批次处理，并使用顶层配置；没有 `batches` 时，原来的单批次配置和拖入 BAT 用法保持不变。
 
 单批次配置的账号输入按以下顺序选择：
 
@@ -85,7 +85,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\codex-account-import
 | `sub2api_url` | 字符串 | `http://127.0.0.1:18080` | 使用 `http://127.0.0.1:<SERVER_PORT>`；没有 `SERVER_PORT` 时端口为 `18080` | Sub2API 服务根地址，不要附加 `/api/v1`。只允许 `http` 或 `https` 的本机回环地址，不能包含用户信息、查询参数或片段。 |
 | `source_type` | 字符串 | `codex` | `codex` | 只导入凭据中 `type` 与该值相同的记录，比较不区分大小写。设为 `""` 可关闭类型过滤。 |
 | `input_path` | 字符串 | 未配置 | 无输入备用值 | 可选账号文件路径。`-InputPath` 优先于该字段；拖入 BAT 时无需填写。 |
-| `batches` | 对象数组 | 未配置 | 使用单批次模式 | 多批次导入；每项必须填写 `input_path` 和 `group_names`，并可填写 `source_type`、`name_prefix`、`name_start`、`name_width` 覆盖顶层值。使用此字段时不能传 `-InputPath`。 |
+| `batches` | 对象数组 | 未配置 | 使用单批次模式 | 多批次导入；每项必须填写 `input_path` 和 `group_names`，并可填写 `source_type`、`name_prefix`、`name_start`、`name_width` 覆盖顶层值。若传入 `-InputPath`，则按单批次处理并优先使用命令行文件。 |
 | `name_prefix` | 字符串 | `""` | `""` | 新建账号时，留空使用每条凭据的 `email` 命名，缺少邮箱即报错；填写后改为“前缀 + 连续编号”。更新已有账号不修改名称。 |
 | `name_start` | 整数 | `1` | `1` | 连续编号起始值，只在 `name_prefix` 非空时使用，不能小于 `0`。 |
 | `name_width` | 整数 | `3` | `3` | 连续编号的最小位数，只在 `name_prefix` 非空时使用；范围为 `1` 到 `99`。例如 `3` 生成 `001`。 |

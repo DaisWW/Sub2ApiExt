@@ -214,10 +214,7 @@ $inputPathFromArgument = -not [string]::IsNullOrWhiteSpace($InputPath)
 $sourceType = [string](Get-JsonProperty $config "source_type" "codex")
 $batchDefinitions = @()
 $configuredBatches = Get-JsonProperty $config "batches" $null
-if ($null -ne $configuredBatches) {
-    if ($inputPathFromArgument) {
-        throw "配置使用 batches 时不能同时传入 -InputPath；请在每个批次中填写 input_path"
-    }
+if (-not $inputPathFromArgument -and $null -ne $configuredBatches) {
     $rawBatches = @($configuredBatches)
     if ($rawBatches.Count -eq 0) {
         throw "batches 至少需要包含一个批次"

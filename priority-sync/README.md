@@ -51,7 +51,7 @@ evaluation_weights="成本=100%,速度=0%,可用性=0%,失败/429=0%"
 
 排名是账户级全局排名，不再按分组、模型、端点或平台分别归一化。网关仍只会在实际可承接同一请求的候选账户之间使用 `accounts.priority`，且 `account_groups.priority` 的分组档位仍优先于账户优先级；本服务不能跨分组档位改变路由。一个账户可以属于多个业务组，但 `accounts.priority` 仍然只有一个值，不能为同一账户在不同业务组分别排名。
 
-排除规则只控制哪些账号不参加本服务的自动优先级处理，不会创建或拆分业务组。规则字段可组合使用；例如，下面的配置排除 `西郊-gpt`，以及 `策略-gpt-低价` 或 `策略-gpt-高阶` 中的 OpenAI OAuth 账号：
+排除规则只控制哪些账号不参加本服务的自动优先级处理，不会创建或拆分业务组。`PRIORITY_SYNC_EXCLUDE_RULES` 是通用配置入口；服务代码不按某个固定平台或账号类型写判断，后续要排除其他类型时只需增加规则。当前可匹配账号 ID、名称、平台、类型、状态和业务组；规则字段可组合使用。例如，下面的配置排除 `西郊-gpt`，以及 `策略-gpt-低价` 或 `策略-gpt-高阶` 中的 OpenAI OAuth 账号：
 
 ```env
 PRIORITY_SYNC_EXCLUDE_RULES=[{"platform":"openai","type":"oauth","groups":["西郊-gpt"]},{"platform":"openai","type":"oauth","groups":["策略-gpt-低价","策略-gpt-高阶"]}]
