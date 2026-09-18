@@ -61,6 +61,9 @@ func (s *Syncer) runCycle(ctx context.Context, now time.Time) (bool, error) {
 		return false, fmt.Errorf("自动发现渠道: %w", err)
 	}
 	report := newSyncReport(s.syncTarget(), channels)
+	if err := s.initializeImageCreaterRates(ctx, channels, report); err != nil {
+		return false, err
+	}
 	stats := s.syncDiscoveredChannels(ctx, channels, now, report)
 	if err := s.store.Save(s.state); err != nil {
 		return false, err

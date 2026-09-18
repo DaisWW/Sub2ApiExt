@@ -11,10 +11,11 @@ import (
 const currentStateVersion = 6
 
 type State struct {
-	Version           int                               `json:"version"`
-	Rules             map[string]*RuleState             `json:"rules"`
-	DynamicGroups     map[int64]*DynamicGroupState      `json:"dynamic_groups,omitempty"`
-	ImageCreaterHosts map[string]*ImageCreaterHostState `json:"imagecreater_hosts,omitempty"`
+	Version                         int                               `json:"version"`
+	Rules                           map[string]*RuleState             `json:"rules"`
+	DynamicGroups                   map[int64]*DynamicGroupState      `json:"dynamic_groups,omitempty"`
+	ImageCreaterHosts               map[string]*ImageCreaterHostState `json:"imagecreater_hosts,omitempty"`
+	ImageCreaterInitialRatesApplied bool                              `json:"imagecreater_initial_rates_applied,omitempty"`
 }
 
 type ImageCreaterHostState struct {
