@@ -13,10 +13,7 @@ import (
 	"time"
 )
 
-const (
-	templateImageCreaterBalance       = "imagecreater_balance"
-	imageCreaterConfirmationsRequired = 2
-)
+const templateImageCreaterBalance = "imagecreater_balance"
 
 type imageCreaterBalance struct {
 	Balance       *float64 `json:"balance"`
@@ -205,9 +202,9 @@ func (s *Syncer) syncImageCreaterGroup(
 			setImageCreaterGroupError(results, group, err)
 			return true, results
 		}
-		observeImageCreaterRate(state, upstreamRate)
-		s.logger.Printf("[%s] 千纸余额对账得到账号 %d 上游倍率 %.4f（确认 %d/%d）",
-			group.key, accountID, upstreamRate, state.CandidateCount, imageCreaterConfirmationsRequired)
+		state.CandidateUpstreamRate = upstreamRate
+		state.CandidateCount = 1
+		s.logger.Printf("[%s] 千纸余额对账得到账号 %d 上游倍率 %.4f", group.key, accountID, upstreamRate)
 	}
 
 	for _, channel := range group.channels {
@@ -220,9 +217,6 @@ func (s *Syncer) syncImageCreaterGroup(
 			if expected, err := candidateFinalRate(state, discounts[channel.AccountID]); err == nil {
 				report.setAccountExpectedRate(channel.AccountID, expected)
 			}
-		}
-		if state.CandidateCount < imageCreaterConfirmationsRequired {
-			continue
 		}
 		if err := s.applyCandidate(ctx, channel, state, discounts[channel.AccountID], report); err != nil {
 			results[channel.AccountID] = err
@@ -388,18 +382,6 @@ func evaluateImageCreaterWindow(deltaRequests int64, deltaCost, deltaBalance flo
 		return 0, 0, "同一余额窗口有多个账号产生标准成本，无法把上游成本准确归属到单个账号"
 	}
 	return positiveAccountID, positiveBaseCost, ""
-}
-
-func observeImageCreaterRate(state *RuleState, upstreamRate float64) {
-	if state.CandidateCount > 0 && almostEqual(state.CandidateUpstreamRate, upstreamRate) {
-		state.CandidateCount++
-		if state.CandidateCount > imageCreaterConfirmationsRequired {
-			state.CandidateCount = imageCreaterConfirmationsRequired
-		}
-		return
-	}
-	state.CandidateUpstreamRate = upstreamRate
-	state.CandidateCount = 1
 }
 
 func setImageCreaterBaseline(state *ImageCreaterHostState, current imageCreaterBalanceValues, usageID int64, day string) {

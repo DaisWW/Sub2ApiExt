@@ -45,7 +45,7 @@ type imageCreaterSnapshot struct {
 	TodayRequests int64
 }
 
-func TestImageCreaterBalancePublishesAfterTwoMatchingWindows(t *testing.T) {
+func TestImageCreaterBalancePublishesEachValidWindow(t *testing.T) {
 	var snapshotMu sync.RWMutex
 	snapshot := imageCreaterSnapshot{Balance: 100, TodayCost: 1, TodayRequests: 10}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,15 +117,18 @@ func TestImageCreaterBalancePublishesAfterTwoMatchingWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstState := syncer.state.Rules["account:18"]
-	if firstState == nil || firstState.Template != templateImageCreaterBalance || firstState.CandidateUpstreamRate != 0.25 || firstState.CandidateCount != 1 {
-		t.Fatalf("first balance candidate = %+v", firstState)
+	if firstState == nil || firstState.Template != templateImageCreaterBalance || firstState.CandidateUpstreamRate != 0 || firstState.CandidateCount != 0 {
+		t.Fatalf("first published candidate was not cleared: %+v", firstState)
 	}
-	if len(putRates) != 0 {
-		t.Fatalf("first observation must not publish: %+v", putRates)
+	putMu.Lock()
+	firstRates := append([]float64(nil), putRates[18]...)
+	putMu.Unlock()
+	if !reflect.DeepEqual(firstRates, []float64{0.25}) {
+		t.Fatalf("first valid window did not publish: %+v", firstRates)
 	}
 
 	snapshotMu.Lock()
-	snapshot = imageCreaterSnapshot{Balance: 99.85, TodayCost: 1.150004, TodayRequests: 12}
+	snapshot = imageCreaterSnapshot{Balance: 99.84, TodayCost: 1.160004, TodayRequests: 12}
 	snapshotMu.Unlock()
 	source.latestID = 102
 	source.usage = []AccountUsageStats{{AccountID: 18, Requests: 1, BaseCost: 0.2}}
@@ -136,7 +139,7 @@ func TestImageCreaterBalancePublishesAfterTwoMatchingWindows(t *testing.T) {
 	gotRates := append([]float64(nil), putRates[18]...)
 	otherRates := append([]float64(nil), putRates[19]...)
 	putMu.Unlock()
-	if !reflect.DeepEqual(gotRates, []float64{0.25}) || len(otherRates) != 0 {
+	if !reflect.DeepEqual(gotRates, []float64{0.25, 0.3}) || len(otherRates) != 0 {
 		t.Fatalf("published rates = account18:%v account19:%v", gotRates, otherRates)
 	}
 	if firstState.CandidateCount != 0 || firstState.CandidateUpstreamRate != 0 {
@@ -148,6 +151,80 @@ func TestImageCreaterBalancePublishesAfterTwoMatchingWindows(t *testing.T) {
 	}
 	if !reflect.DeepEqual(source.calls, wantCalls) {
 		t.Fatalf("usage watermark calls = %+v, want %+v", source.calls, wantCalls)
+	}
+}
+
+func TestImageCreaterBalanceRetainsCandidateForRetryAndDryRun(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%t", dryRun), func(t *testing.T) {
+			snapshot := imageCreaterSnapshot{Balance: 100, TodayCost: 1, TodayRequests: 10}
+			upstream := newImageCreaterTestUpstream(t, &snapshot)
+			defer upstream.Close()
+			var putMu sync.Mutex
+			var putRates []float64
+			admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || r.URL.Path != "/api/v1/admin/accounts/18" {
+					http.NotFound(w, r)
+					return
+				}
+				var payload accountUpdate
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				putMu.Lock()
+				putRates = append(putRates, payload.RateMultiplier)
+				attempt := len(putRates)
+				putMu.Unlock()
+				if attempt == 1 {
+					http.Error(w, "temporary failure", http.StatusBadGateway)
+					return
+				}
+				writeJSON(t, w, map[string]any{"code": 0})
+			}))
+			defer admin.Close()
+			channels := imageCreaterTestChannels(upstream.URL + "/api/v1")
+			source := &imageCreaterTestSource{
+				staticChannelSource: &staticChannelSource{channels: channels},
+				latestID:            100,
+			}
+			syncer := newAccountTestSyncer(t, source, admin.URL, dryRun, channels[0].BaseURL, 0.9)
+			now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.Local)
+			if err := syncer.RunOnce(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			snapshot = imageCreaterSnapshot{Balance: 99.9, TodayCost: 1.1, TodayRequests: 11}
+			source.latestID = 101
+			source.usage = []AccountUsageStats{{AccountID: 18, Requests: 1, BaseCost: 0.4}}
+			if err := syncer.RunOnce(context.Background(), now.Add(time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := syncer.store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			state := loaded.Rules["account:18"]
+			if state.CandidateCount != 1 || state.CandidateUpstreamRate != 0.25 || loaded.ImageCreaterHosts[channels[0].BaseURL].LastUsageID != 101 {
+				t.Fatalf("candidate or watermark not retained: rule=%+v hosts=%+v", state, loaded.ImageCreaterHosts)
+			}
+			syncer.state = loaded
+			source.usage = nil
+			if err := syncer.RunOnce(context.Background(), now.Add(2*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			putMu.Lock()
+			gotRates := append([]float64(nil), putRates...)
+			putMu.Unlock()
+			if dryRun {
+				if len(gotRates) != 0 || state.CandidateCount != 1 {
+					t.Fatalf("dry-run wrote or discarded candidate: rates=%v state=%+v", gotRates, state)
+				}
+			} else if !reflect.DeepEqual(gotRates, []float64{0.225, 0.225}) || state.CandidateCount != 0 {
+				t.Fatalf("candidate did not retry immediately: rates=%v state=%+v", gotRates, state)
+			}
+			if len(source.calls) != 2 || source.calls[1].AfterID != 101 || source.calls[1].ThroughID != 101 {
+				t.Fatalf("retry replayed consumed usage: %+v", source.calls)
+			}
+		})
 	}
 }
 

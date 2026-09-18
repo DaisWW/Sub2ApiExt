@@ -88,22 +88,15 @@ func TestImageCreaterInitialRatesPublishWithoutUsage(t *testing.T) {
 		t.Fatalf("restart reapplied initial rates: %+v", puts)
 	}
 
-	// Two real windows must replace the temporary rate using the existing confirmation rule.
-	for window := int64(1); window <= 2; window++ {
-		snapshot.Balance = 100 - float64(window)*0.12
-		snapshot.TodayCost = 1 + float64(window)*0.12
-		snapshot.TodayRequests = 10 + window
-		source.latestID = 100 + window
-		source.usage = []AccountUsageStats{{AccountID: 76, Requests: 1, BaseCost: 0.4}}
-		if err := syncer.RunOnce(context.Background(), now.Add(time.Duration(window+1)*time.Minute)); err != nil {
-			t.Fatal(err)
-		}
-		if window == 1 && len(puts[76]) != 1 {
-			t.Fatalf("first real window bypassed confirmation: %+v", puts)
-		}
+	// The first valid real window must replace the temporary rate.
+	snapshot = imageCreaterSnapshot{Balance: 99.88, TodayCost: 1.12, TodayRequests: 11}
+	source.latestID = 101
+	source.usage = []AccountUsageStats{{AccountID: 76, Requests: 1, BaseCost: 0.4}}
+	if err := syncer.RunOnce(context.Background(), now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(puts[76], []float64{0.225, 0.27}) {
-		t.Fatalf("confirmed upstream rate did not replace the initial rate: %+v", puts)
+		t.Fatalf("first real rate did not replace the initial rate: %+v", puts)
 	}
 }
 

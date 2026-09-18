@@ -19,7 +19,7 @@
 
 `sync_target` 可选 `group`（默认）或 `account`。`config.json` 使用 `group`，`account-config.json` 使用 `account`。充值折扣只在账户配置中使用；`recharge_discounts` 只填写需要打折的上游域名。未列出的账号仍自动同步，充值折扣按 `1.0` 计算。新增折扣或修改折扣时只改这个映射，不要再同时维护其他倍率字段。
 
-账户 worker 的周期是 `900s`（15 分钟）。直接价格和独立用量接口只要本轮得到有效的上游倍率，就立即按充值折扣计算并写回。共享余额对账需要连续两次得到相同的四位倍率后才写回。Lucen 和 TokenHorse 的上游倍率在写回前各自乘一次映射中的 `0.9`（覆盖 `lucen.cc`、`xixiapi.io` 和 `ppsubapi.com`）；分组 worker 不会再次乘该充值折扣。
+账户 worker 的周期是 `900s`（15 分钟）。直接价格、独立用量接口和共享余额对账只要本轮得到有效的上游倍率，就立即按充值折扣计算并写回，不再等待第二次对账确认。Lucen 和 TokenHorse 的上游倍率在写回前各自乘一次映射中的 `0.9`（覆盖 `lucen.cc`、`xixiapi.io` 和 `ppsubapi.com`）；分组 worker 不会再次乘该充值折扣。
 
 账户模式会先识别需要共享余额对账的 imageCreater 接口；其他上游仍优先读取 Sub2API `/v1/sub2api/billing` 返回的 `resolved_rate_multiplier`，接口不可用时再读取 NewAPI 的价格表和最新计费日志，所有直接倍率都不可用时才读取 `/v1/usage`。只要 `actual_cost / cost` 能算出有效正倍率，就作为账户候选倍率，不要求当前本地倍率为 `1.0`、最小成本或最小请求数；最终写回值仍会乘 `recharge_discounts` 中对应的充值折扣。`effective_rate_multiplier` 可能包含峰值时段系数，不用于固化账户倍率。
 
@@ -103,7 +103,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 1. `sub2api_billing`：读取 `/v1/sub2api/billing` 的 `resolved_rate_multiplier`，直接使用 Sub2API 自动探测并解析的静态倍率；不使用可能包含峰值系数的 `effective_rate_multiplier`。
 2. `newapi_pricing`：每个同步周期都重新读取该 Key 的 `/api/log/token`，从最新一条已计费的真实请求日志确定实际价格组，不缓存价格组或倍率。若 `/api/pricing` 可用，则读取该价格组当前的 `group_ratio`；若价格接口仅允许网页登录，则直接读取最新计费日志中的 `other.group_ratio`。
 3. `sub2api_usage`：读取 `/v1/usage?days=1`。上游直接倍率不可用时，任一有效的 `actual_cost / cost` 都可作为候选；有新增用量时优先使用新增部分，无新增时使用累计值，不设置最小成本或最小请求数门槛。
-4. `imagecreater_balance`：使用渠道 Key 读取 Base URL 下的 `/user/balance`，将 `todayCost` 与本地账号新增请求的 `COALESCE(account_stats_cost, total_cost)` 对账。余额变化与成本增量允许最多 `0.000005 USD`、且不超过窗口成本 `0.1%` 的舍入差（另容忍 `1e-9 USD` 浮点误差）；超限时日志列出实际差额。同一上游的所有 Key 仍必须返回相同汇总，请求数必须完全一致，且窗口内只能有一个账号产生正标准成本；连续两次得到相同倍率后才写回。充值、调账、跨日、外部请求或多账号混流导致证据不符时会重置基线并跳过，不依赖网页登录态。
+4. `imagecreater_balance`：使用渠道 Key 读取 Base URL 下的 `/user/balance`，将 `todayCost` 与本地账号新增请求的 `COALESCE(account_stats_cost, total_cost)` 对账。余额变化与成本增量允许最多 `0.000005 USD`、且不超过窗口成本 `0.1%` 的舍入差（另容忍 `1e-9 USD` 浮点误差）；超限时日志列出实际差额。同一上游的所有 Key 仍必须返回相同汇总，请求数必须完全一致，且窗口内只能有一个账号产生正标准成本；一次有效对账得到倍率就立即写回，写回失败时保留目标和水位等待重试。充值、调账、跨日、外部请求或多账号混流导致证据不符时会重置基线并跳过，不依赖网页登录态。
 
 本次部署为 `https://image.qzcy3.top/api/v1` 的现有账号预置用户确认的临时上游初值：满血账号 `76` 为 `0.25`、chat 账号 `77` 为 `0.18`、20x 账号 `78` 为 `0.25`，仍乘 `recharge_discounts` 后经 Admin API 写回。仅初始化当前仍为 `1.0` 的账户，保留其他手动倍率和 grok 的已验证倍率。分组 `55` 在账户初值就绪后以当前账户倍率重建成本估计，保留路由权重和日志水位，并通过原有待发布机制预置 `0.25`。初始化完成标记持久化在各 worker 的状态卷中；重启不重复初始化，后续真实余额对账和动态成本校准继续接管。上述数值是临时初值，不代表已验证的实际结算倍率；此初始化仅匹配这些稳定 ID 和上游地址。
 
