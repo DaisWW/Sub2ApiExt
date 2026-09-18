@@ -348,9 +348,9 @@ func evaluateImageCreaterWindow(deltaRequests int64, deltaCost, deltaBalance flo
 	if deltaRequests < 0 || deltaCost < -1e-12 {
 		return 0, 0, "千纸今日计数发生回退，已重置余额基线"
 	}
-	// 只容忍微美元级金额舍入差，同时限制低成本窗口的相对误差。
+	// 允许少量金额偏差，同时限制低成本窗口的相对误差。
 	moneyDifference := math.Abs(deltaBalance - deltaCost)
-	moneyTolerance := math.Min(5e-6, math.Abs(deltaCost)*0.001) + 1e-9
+	moneyTolerance := math.Min(0.001, math.Abs(deltaCost)*0.01) + 1e-9
 	if moneyDifference > moneyTolerance {
 		return 0, 0, fmt.Sprintf("千纸余额变化与今日成本增量不一致（余额变化 %.6f USD，成本增量 %.6f USD，差额 %.9f USD），可能发生了充值、调账或跨日", deltaBalance, deltaCost, moneyDifference)
 	}

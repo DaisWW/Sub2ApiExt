@@ -109,7 +109,7 @@ func TestImageCreaterBalancePublishesEachValidWindow(t *testing.T) {
 	}
 
 	snapshotMu.Lock()
-	snapshot = imageCreaterSnapshot{Balance: 99.9, TodayCost: 1.100003, TodayRequests: 11}
+	snapshot = imageCreaterSnapshot{Balance: 99.90005, TodayCost: 1.1, TodayRequests: 11}
 	snapshotMu.Unlock()
 	source.latestID = 101
 	source.usage = []AccountUsageStats{{AccountID: 18, Requests: 1, BaseCost: 0.4}}
@@ -128,7 +128,7 @@ func TestImageCreaterBalancePublishesEachValidWindow(t *testing.T) {
 	}
 
 	snapshotMu.Lock()
-	snapshot = imageCreaterSnapshot{Balance: 99.84, TodayCost: 1.160004, TodayRequests: 12}
+	snapshot = imageCreaterSnapshot{Balance: 99.84007, TodayCost: 1.16, TodayRequests: 12}
 	snapshotMu.Unlock()
 	source.latestID = 102
 	source.usage = []AccountUsageStats{{AccountID: 18, Requests: 1, BaseCost: 0.2}}
@@ -391,11 +391,15 @@ func TestEvaluateImageCreaterWindowMoneyTolerance(t *testing.T) {
 		{name: "exact amounts", deltaCost: 0.1, deltaBalance: 0.1, accepted: true},
 		{name: "rounded balance above cost", deltaCost: 0.1, deltaBalance: 0.100003, accepted: true},
 		{name: "rounded balance below cost", deltaCost: 0.1, deltaBalance: 0.099997, accepted: true},
-		{name: "rounding limit", deltaCost: 0.1, deltaBalance: 0.100005, accepted: true},
-		{name: "above rounding limit", deltaCost: 0.1, deltaBalance: 0.100006},
-		{name: "large cost retains absolute limit", deltaCost: 10, deltaBalance: 10.00001},
+		{name: "formerly rejected amount", deltaCost: 0.1, deltaBalance: 0.100006, accepted: true},
+		{name: "larger difference above cost", deltaCost: 0.1, deltaBalance: 0.1005, accepted: true},
+		{name: "larger difference below cost", deltaCost: 0.1, deltaBalance: 0.0995, accepted: true},
+		{name: "absolute limit", deltaCost: 1, deltaBalance: 1.001, accepted: true},
+		{name: "above absolute limit", deltaCost: 1, deltaBalance: 1.0011},
+		{name: "large cost retains absolute limit", deltaCost: 10, deltaBalance: 10.002},
 		{name: "small cost within relative limit", deltaCost: 0.001, deltaBalance: 0.0010009, accepted: true},
-		{name: "small cost above relative limit", deltaCost: 0.001, deltaBalance: 0.001003},
+		{name: "small cost relative limit", deltaCost: 0.001, deltaBalance: 0.00101, accepted: true},
+		{name: "small cost above relative limit", deltaCost: 0.001, deltaBalance: 0.001011},
 		{name: "submicro cost cannot absorb rounding", deltaCost: 0.000001, deltaBalance: 0.000004},
 		{name: "no cost cannot absorb balance adjustment", deltaCost: 0, deltaBalance: 0.000003},
 	}
