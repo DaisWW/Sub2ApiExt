@@ -49,6 +49,17 @@ type groupUsageIncrementalSource interface {
 	ListGroupUsageAccounts(context.Context, time.Time, time.Time, int64, []int64) ([]GroupUsageAccountStats, error)
 }
 
+type AccountUsageStats struct {
+	AccountID int64
+	Requests  int64
+	BaseCost  float64
+}
+
+type accountUsageIncrementalSource interface {
+	LatestAccountUsageID(context.Context) (int64, error)
+	ListAccountUsageSince(context.Context, []int64, int64, int64) ([]AccountUsageStats, error)
+}
+
 type adminAPIKeySource interface {
 	AdminAPIKey(context.Context) (string, error)
 }

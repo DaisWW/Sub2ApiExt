@@ -8,12 +8,23 @@ import (
 	"path/filepath"
 )
 
-const currentStateVersion = 5
+const currentStateVersion = 6
 
 type State struct {
-	Version       int                          `json:"version"`
-	Rules         map[string]*RuleState        `json:"rules"`
-	DynamicGroups map[int64]*DynamicGroupState `json:"dynamic_groups,omitempty"`
+	Version           int                               `json:"version"`
+	Rules             map[string]*RuleState             `json:"rules"`
+	DynamicGroups     map[int64]*DynamicGroupState      `json:"dynamic_groups,omitempty"`
+	ImageCreaterHosts map[string]*ImageCreaterHostState `json:"imagecreater_hosts,omitempty"`
+}
+
+type ImageCreaterHostState struct {
+	Identity      string  `json:"identity"`
+	Day           string  `json:"day"`
+	Balance       float64 `json:"balance"`
+	TodayCost     float64 `json:"today_cost"`
+	TodayRequests int64   `json:"today_requests"`
+	LastUsageID   int64   `json:"last_usage_id"`
+	Initialized   bool    `json:"initialized"`
 }
 
 type DynamicGroupState struct {
@@ -98,13 +109,19 @@ func (s StateStore) Load() (*State, error) {
 			rule.resetPriceKey()
 		}
 		state.DynamicGroups = make(map[int64]*DynamicGroupState)
+		state.ImageCreaterHosts = make(map[string]*ImageCreaterHostState)
 		state.Version = currentStateVersion
 	case 3:
 		state.DynamicGroups = make(map[int64]*DynamicGroupState)
+		state.ImageCreaterHosts = make(map[string]*ImageCreaterHostState)
 		state.Version = currentStateVersion
 	case 4:
 		// 动态算法 5 改为以近期观测成本为主；旧状态的长记忆口径不同，重新从近期成功请求初始化。
 		state.DynamicGroups = make(map[int64]*DynamicGroupState)
+		state.ImageCreaterHosts = make(map[string]*ImageCreaterHostState)
+		state.Version = currentStateVersion
+	case 5:
+		state.ImageCreaterHosts = make(map[string]*ImageCreaterHostState)
 		state.Version = currentStateVersion
 	case currentStateVersion:
 	default:
@@ -115,6 +132,9 @@ func (s StateStore) Load() (*State, error) {
 	}
 	if state.DynamicGroups == nil {
 		state.DynamicGroups = make(map[int64]*DynamicGroupState)
+	}
+	if state.ImageCreaterHosts == nil {
+		state.ImageCreaterHosts = make(map[string]*ImageCreaterHostState)
 	}
 	return &state, nil
 }
@@ -128,6 +148,11 @@ func validateStateEntries(state *State) error {
 	for groupID, group := range state.DynamicGroups {
 		if group == nil {
 			return fmt.Errorf("状态文件 dynamic_groups[%d] 不能为空", groupID)
+		}
+	}
+	for host, upstream := range state.ImageCreaterHosts {
+		if upstream == nil {
+			return fmt.Errorf("状态文件 imagecreater_hosts[%q] 不能为空", host)
 		}
 	}
 	return nil
@@ -153,8 +178,9 @@ func (s StateStore) Save(state *State) error {
 
 func newState() *State {
 	return &State{
-		Version:       currentStateVersion,
-		Rules:         make(map[string]*RuleState),
-		DynamicGroups: make(map[int64]*DynamicGroupState),
+		Version:           currentStateVersion,
+		Rules:             make(map[string]*RuleState),
+		DynamicGroups:     make(map[int64]*DynamicGroupState),
+		ImageCreaterHosts: make(map[string]*ImageCreaterHostState),
 	}
 }

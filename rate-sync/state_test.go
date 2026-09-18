@@ -92,6 +92,29 @@ func TestStateStoreMigratesVersion4AndRebuildsDynamicMemory(t *testing.T) {
 	}
 }
 
+func TestStateStoreMigratesVersion5WithEmptyImageCreaterMemory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	legacy := `{
+  "version": 5,
+  "rules": {"account:2": {"identity": "keep-me"}},
+  "dynamic_groups": {"24": {"initialized": true, "last_usage_id": 321}}
+}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := (StateStore{Path: path}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != currentStateVersion || state.Rules["account:2"] == nil || state.DynamicGroups[24] == nil {
+		t.Fatalf("version 5 state was not preserved: %+v", state)
+	}
+	if state.ImageCreaterHosts == nil || len(state.ImageCreaterHosts) != 0 {
+		t.Fatalf("imageCreater memory was not initialized safely: %+v", state.ImageCreaterHosts)
+	}
+}
+
 func TestStateStoreRejectsUnsupportedVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte(`{"version":999,"rules":{}}`), 0o600); err != nil {
@@ -117,6 +140,11 @@ func TestStateStoreRejectsNullEntries(t *testing.T) {
 			name: "dynamic group",
 			data: `{"version":5,"rules":{},"dynamic_groups":{"24":null}}`,
 			want: "dynamic_groups",
+		},
+		{
+			name: "imageCreater host",
+			data: `{"version":6,"rules":{},"imagecreater_hosts":{"https://image.example/api/v1":null}}`,
+			want: "imagecreater_hosts",
 		},
 	}
 	for _, tt := range tests {
@@ -166,5 +194,32 @@ func TestStateStorePersistsDynamicGroupMemory(t *testing.T) {
 		group.PendingTarget != 0.1234 || !group.HasPendingTarget {
 		encoded, _ := json.Marshal(loaded)
 		t.Fatalf("dynamic state did not round-trip: %s", encoded)
+	}
+}
+
+func TestStateStorePersistsImageCreaterWatermark(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state := newState()
+	state.ImageCreaterHosts["https://image.example/api/v1"] = &ImageCreaterHostState{
+		Identity:      "identity",
+		Day:           "2026-09-17",
+		Balance:       9.75,
+		TodayCost:     0.25,
+		TodayRequests: 2,
+		LastUsageID:   321,
+		Initialized:   true,
+	}
+	store := StateStore{Path: path}
+	if err := store.Save(state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := loaded.ImageCreaterHosts["https://image.example/api/v1"]
+	if host == nil || host.Identity != "identity" || host.Day != "2026-09-17" || host.Balance != 9.75 ||
+		host.TodayCost != 0.25 || host.TodayRequests != 2 || host.LastUsageID != 321 || !host.Initialized {
+		t.Fatalf("imageCreater state did not round-trip: %+v", host)
 	}
 }

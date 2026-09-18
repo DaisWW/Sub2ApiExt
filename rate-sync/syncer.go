@@ -100,6 +100,20 @@ func (s *Syncer) syncDiscoveredChannels(ctx context.Context, channels []Channel,
 			}
 			s.logger.Printf("分组历史成本校准失败: 本轮不探测上游，等待下一轮: %v", usageErr)
 		}
+		return s.runChannelChecks(ctx, channels, now, handledGroups, report)
 	}
-	return s.runChannelChecks(ctx, channels, now, handledGroups, report)
+	handledAccounts, imageCreaterStats := s.syncImageCreaterAccounts(ctx, channels, now, report)
+	remaining := make([]Channel, 0, len(channels))
+	for _, channel := range channels {
+		if !handledAccounts[channel.AccountID] {
+			remaining = append(remaining, channel)
+		}
+	}
+	regularStats := s.runChannelChecks(ctx, remaining, now, handledGroups, report)
+	return syncStats{
+		checked: imageCreaterStats.checked + regularStats.checked,
+		normal:  imageCreaterStats.normal + regularStats.normal,
+		skipped: imageCreaterStats.skipped + regularStats.skipped,
+		failed:  imageCreaterStats.failed + regularStats.failed,
+	}
 }

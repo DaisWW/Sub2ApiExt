@@ -92,6 +92,19 @@ ORDER BY ul.group_id, w.window_seconds`
 
 const latestGroupUsageIDSQL = `SELECT COALESCE(MAX(id), 0)::bigint FROM usage_logs`
 
+// 千纸 todayRequests 统计全部上游日志，因此本地请求数不能按正成本过滤。
+const accountUsageSinceSQL = `
+SELECT
+    ul.account_id,
+    COUNT(*)::bigint,
+    COALESCE(SUM(COALESCE(ul.account_stats_cost, ul.total_cost, 0)), 0)::double precision
+FROM usage_logs ul
+WHERE ul.id > $1
+  AND ul.id <= $2
+  AND ul.account_id IN (%s)
+GROUP BY ul.account_id
+ORDER BY ul.account_id`
+
 const groupUsageSinceSQL = `
 WITH watermarks(group_id, last_id) AS (
     VALUES %s

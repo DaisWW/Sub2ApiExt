@@ -60,7 +60,7 @@ func main() {
 	defer stop()
 
 	logger.Printf(
-		"rate-sync 已启动: 自动发现=true templates=3 sync_target=%s interval=%s dry_run=%t recharge_discounts=%d",
+		"rate-sync 已启动: 自动发现=true templates=4 sync_target=%s interval=%s dry_run=%t recharge_discounts=%d",
 		config.SyncTarget,
 		config.Interval,
 		config.DryRun,

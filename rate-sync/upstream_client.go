@@ -23,6 +23,18 @@ func (s *Syncer) fetchUpstreamJSONWithLimit(ctx context.Context, channel *Channe
 	if err != nil {
 		return 0, err
 	}
+	return s.fetchUpstreamEndpointJSONWithLimit(ctx, channel, endpoint, limit, target)
+}
+
+func (s *Syncer) fetchUpstreamBasePathJSON(ctx context.Context, channel *Channel, path, rawQuery string, target any) (int, error) {
+	endpoint, err := upstreamBasePathEndpoint(channel.BaseURL, path, rawQuery)
+	if err != nil {
+		return 0, err
+	}
+	return s.fetchUpstreamEndpointJSONWithLimit(ctx, channel, endpoint, responseLimit, target)
+}
+
+func (s *Syncer) fetchUpstreamEndpointJSONWithLimit(ctx context.Context, channel *Channel, endpoint string, limit int64, target any) (int, error) {
 	req, err := newUpstreamRequest(ctx, endpoint, channel.APIKey)
 	if err != nil {
 		return 0, err
@@ -216,4 +228,17 @@ func upstreamEndpoint(baseURL, path, rawQuery string) (string, error) {
 		return "", fmt.Errorf("账号 base_url 必须是有效的 http/https URL")
 	}
 	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: path, RawQuery: rawQuery}).String(), nil
+}
+
+func upstreamBasePathEndpoint(baseURL, path, rawQuery string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", fmt.Errorf("账号 base_url 必须是有效的 http/https URL")
+	}
+	parsed.User = nil
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/" + strings.TrimLeft(path, "/")
+	parsed.RawPath = ""
+	parsed.RawQuery = rawQuery
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }

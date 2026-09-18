@@ -84,6 +84,48 @@ func (s *PostgresChannelSource) LatestGroupUsageID(ctx context.Context) (int64, 
 	return id, nil
 }
 
+func (s *PostgresChannelSource) LatestAccountUsageID(ctx context.Context) (int64, error) {
+	var id int64
+	if err := s.db.QueryRowContext(ctx, latestGroupUsageIDSQL).Scan(&id); err != nil {
+		return 0, fmt.Errorf("查询账号用量日志水位: %w", err)
+	}
+	return id, nil
+}
+
+func (s *PostgresChannelSource) ListAccountUsageSince(ctx context.Context, accountIDs []int64, afterID, throughID int64) ([]AccountUsageStats, error) {
+	if len(accountIDs) == 0 || throughID <= afterID {
+		return nil, nil
+	}
+	accountIDs = append([]int64(nil), accountIDs...)
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+	placeholders := make([]string, 0, len(accountIDs))
+	args := make([]any, 0, len(accountIDs)+2)
+	args = append(args, afterID, throughID)
+	for _, accountID := range accountIDs {
+		args = append(args, accountID)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+	query := fmt.Sprintf(accountUsageSinceSQL, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询账号增量用量: %w", err)
+	}
+	defer rows.Close()
+
+	var results []AccountUsageStats
+	for rows.Next() {
+		var row AccountUsageStats
+		if err := rows.Scan(&row.AccountID, &row.Requests, &row.BaseCost); err != nil {
+			return nil, fmt.Errorf("读取账号增量用量: %w", err)
+		}
+		results = append(results, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历账号增量用量: %w", err)
+	}
+	return results, nil
+}
+
 func (s *PostgresChannelSource) ListGroupUsageSince(ctx context.Context, watermarks map[int64]int64, throughID int64) ([]GroupUsageAccountStats, error) {
 	if len(watermarks) == 0 {
 		return nil, nil
