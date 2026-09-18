@@ -109,7 +109,7 @@ func TestImageCreaterBalancePublishesAfterTwoMatchingWindows(t *testing.T) {
 	}
 
 	snapshotMu.Lock()
-	snapshot = imageCreaterSnapshot{Balance: 99.9, TodayCost: 1.1, TodayRequests: 11}
+	snapshot = imageCreaterSnapshot{Balance: 99.9, TodayCost: 1.100003, TodayRequests: 11}
 	snapshotMu.Unlock()
 	source.latestID = 101
 	source.usage = []AccountUsageStats{{AccountID: 18, Requests: 1, BaseCost: 0.4}}
@@ -125,7 +125,7 @@ func TestImageCreaterBalancePublishesAfterTwoMatchingWindows(t *testing.T) {
 	}
 
 	snapshotMu.Lock()
-	snapshot = imageCreaterSnapshot{Balance: 99.85, TodayCost: 1.15, TodayRequests: 12}
+	snapshot = imageCreaterSnapshot{Balance: 99.85, TodayCost: 1.150004, TodayRequests: 12}
 	snapshotMu.Unlock()
 	source.latestID = 102
 	source.usage = []AccountUsageStats{{AccountID: 18, Requests: 1, BaseCost: 0.2}}
@@ -288,6 +288,52 @@ func TestImageCreaterBalanceClearsKnownStateWhenEndpointNoLongerMatches(t *testi
 		if state.Template != "" || state.CandidateCount != 0 || state.CandidateUpstreamRate != 0 || state.HasBaseline {
 			t.Fatalf("unmatched endpoint retained imageCreater state: %+v", state)
 		}
+	}
+}
+
+func TestImageCreaterSharedBalanceComparisonRemainsStrict(t *testing.T) {
+	reference := imageCreaterBalanceValues{Balance: 100, TodayCost: 1, TodayRequests: 10}
+	for _, changed := range []imageCreaterBalanceValues{
+		{Balance: 100.000003, TodayCost: 1, TodayRequests: 10},
+		{Balance: 100, TodayCost: 1.000003, TodayRequests: 10},
+		{Balance: 100, TodayCost: 1, TodayRequests: 11},
+	} {
+		if sameImageCreaterBalance(reference, changed) {
+			t.Fatalf("different shared snapshots matched: reference=%+v changed=%+v", reference, changed)
+		}
+	}
+}
+
+func TestEvaluateImageCreaterWindowMoneyTolerance(t *testing.T) {
+	tests := []struct {
+		name         string
+		deltaCost    float64
+		deltaBalance float64
+		accepted     bool
+	}{
+		{name: "exact amounts", deltaCost: 0.1, deltaBalance: 0.1, accepted: true},
+		{name: "rounded balance above cost", deltaCost: 0.1, deltaBalance: 0.100003, accepted: true},
+		{name: "rounded balance below cost", deltaCost: 0.1, deltaBalance: 0.099997, accepted: true},
+		{name: "rounding limit", deltaCost: 0.1, deltaBalance: 0.100005, accepted: true},
+		{name: "above rounding limit", deltaCost: 0.1, deltaBalance: 0.100006},
+		{name: "large cost retains absolute limit", deltaCost: 10, deltaBalance: 10.00001},
+		{name: "small cost within relative limit", deltaCost: 0.001, deltaBalance: 0.0010009, accepted: true},
+		{name: "small cost above relative limit", deltaCost: 0.001, deltaBalance: 0.001003},
+		{name: "submicro cost cannot absorb rounding", deltaCost: 0.000001, deltaBalance: 0.000004},
+		{name: "no cost cannot absorb balance adjustment", deltaCost: 0, deltaBalance: 0.000003},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := []AccountUsageStats{{AccountID: 18, Requests: 1, BaseCost: tt.deltaCost * 4}}
+			accountID, baseCost, reason := evaluateImageCreaterWindow(1, tt.deltaCost, tt.deltaBalance, usage)
+			if tt.accepted {
+				if accountID != 18 || baseCost != usage[0].BaseCost || reason != "" {
+					t.Fatalf("rounded window rejected: account=%d cost=%v reason=%q", accountID, baseCost, reason)
+				}
+			} else if accountID != 0 || reason == "" {
+				t.Fatalf("unreconciled window accepted: account=%d reason=%q", accountID, reason)
+			}
+		})
 	}
 }
 
