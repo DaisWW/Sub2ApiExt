@@ -1,6 +1,7 @@
 {
   "interval": "900s",
   "sync_target": "account",
+  "manual_account_base_urls": ["https://image.qzcy3.top/api/v1"],
   "recharge_discounts": {
     "lucen.cc": 0.9,
     "xixiapi.io": 0.9,

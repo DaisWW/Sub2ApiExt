@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -82,7 +81,7 @@ func imageCreaterChannelGroups(channels []Channel) []imageCreaterChannelGroup {
 		if seenAccounts[channel.AccountID] {
 			continue
 		}
-		key, err := imageCreaterBaseKey(channel.BaseURL)
+		key, err := accountBaseKey(channel.BaseURL)
 		if err != nil {
 			continue
 		}
@@ -96,21 +95,6 @@ func imageCreaterChannelGroups(channels []Channel) []imageCreaterChannelGroup {
 		groups[groupIndex].channels = append(groups[groupIndex].channels, channel)
 	}
 	return groups
-}
-
-func imageCreaterBaseKey(baseURL string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return "", fmt.Errorf("账号 base_url 必须是有效的 http/https URL")
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	parsed.Host = strings.ToLower(parsed.Host)
-	parsed.User = nil
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawPath = ""
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
 }
 
 func (s *Syncer) syncImageCreaterGroup(

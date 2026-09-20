@@ -61,7 +61,7 @@ func (s *Syncer) runCycle(ctx context.Context, now time.Time) (bool, error) {
 		return false, fmt.Errorf("自动发现渠道: %w", err)
 	}
 	report := newSyncReport(s.syncTarget(), channels)
-	if err := s.initializeImageCreaterRates(ctx, channels, report); err != nil {
+	if err := s.initializeImageCreaterRates(channels); err != nil {
 		return false, err
 	}
 	stats := s.syncDiscoveredChannels(ctx, channels, now, report)
@@ -105,6 +105,7 @@ func (s *Syncer) syncDiscoveredChannels(ctx context.Context, channels []Channel,
 		}
 		return s.runChannelChecks(ctx, channels, now, handledGroups, report)
 	}
+	channels, manualStats := s.filterManualAccounts(channels, report)
 	handledAccounts, imageCreaterStats := s.syncImageCreaterAccounts(ctx, channels, now, report)
 	remaining := make([]Channel, 0, len(channels))
 	for _, channel := range channels {
@@ -114,9 +115,36 @@ func (s *Syncer) syncDiscoveredChannels(ctx context.Context, channels []Channel,
 	}
 	regularStats := s.runChannelChecks(ctx, remaining, now, handledGroups, report)
 	return syncStats{
-		checked: imageCreaterStats.checked + regularStats.checked,
+		checked: manualStats.checked + imageCreaterStats.checked + regularStats.checked,
 		normal:  imageCreaterStats.normal + regularStats.normal,
-		skipped: imageCreaterStats.skipped + regularStats.skipped,
+		skipped: manualStats.skipped + imageCreaterStats.skipped + regularStats.skipped,
 		failed:  imageCreaterStats.failed + regularStats.failed,
 	}
+}
+
+func (s *Syncer) filterManualAccounts(channels []Channel, report *syncReport) ([]Channel, syncStats) {
+	if len(s.config.ManualAccountBaseURLs) == 0 {
+		return channels, syncStats{}
+	}
+	remaining := make([]Channel, 0, len(channels))
+	skipped := make(map[int64]bool)
+	stats := syncStats{}
+	for i := range channels {
+		channel := &channels[i]
+		baseURL, err := accountBaseKey(channel.BaseURL)
+		if err != nil || !s.config.ManualAccountBaseURLs[baseURL] {
+			remaining = append(remaining, *channel)
+			continue
+		}
+		if skipped[channel.AccountID] {
+			continue
+		}
+		skipped[channel.AccountID] = true
+		stats.checked++
+		stats.skipped++
+		report.setAccountSource(channel.AccountID, reportAccountSourceManual)
+		report.markChannel(channel, reportStatusSkipped)
+		s.logger.Printf("[%s] 暂不自动: 已配置手动维护，保留当前账户倍率 %.4f", channelLabel(channel), channel.AccountRateMultiplier)
+	}
+	return remaining, stats
 }

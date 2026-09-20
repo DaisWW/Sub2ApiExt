@@ -342,6 +342,7 @@ func TestAccountTargetSyncsUnlistedHostsWithDefaultRechargeDiscount(t *testing.T
 	defer admin.Close()
 	syncer := newTestSyncer(t, source, admin.URL, false, discounted.URL, 0.9)
 	syncer.config.SyncTarget = "account"
+	syncer.config.ManualAccountBaseURLs = map[string]bool{"https://manual.example/api/v1": true}
 	var output bytes.Buffer
 	syncer.logger = log.New(&output, "", 0)
 
@@ -371,6 +372,25 @@ func TestAccountTargetSyncsUnlistedHostsWithDefaultRechargeDiscount(t *testing.T
 	}
 	if !containsRate(gotRates, 0.09) || !containsRate(gotRates, 0.1) {
 		t.Fatalf("unexpected updated rates: %v", gotRates)
+	}
+}
+
+func TestManualAccountBaseURLFiltersAnyUpstream(t *testing.T) {
+	manual := testChannel("https://manual.example/api/v1/", 0.25)
+	automatic := testChannel("https://manual.example/api/v2", 0.18)
+	automatic.AccountID = manual.AccountID + 1
+	channels := []Channel{manual, automatic}
+	report := newSyncReport("account", channels)
+	syncer := &Syncer{
+		config: &Config{ManualAccountBaseURLs: map[string]bool{"https://manual.example/api/v1": true}},
+		logger: log.New(io.Discard, "", 0),
+	}
+	remaining, stats := syncer.filterManualAccounts(channels, report)
+	if len(remaining) != 1 || remaining[0].AccountID != automatic.AccountID || stats.checked != 1 || stats.skipped != 1 {
+		t.Fatalf("remaining=%+v stats=%+v", remaining, stats)
+	}
+	if !strings.Contains(strings.Join(report.tableLines(), "\n"), "暂不自动｜手动维护") {
+		t.Fatal("manual account is missing from the report")
 	}
 }
 

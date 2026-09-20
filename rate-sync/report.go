@@ -19,6 +19,7 @@ const (
 	reportAccountSourceUpstream = "上游同步"
 	reportAccountSourceUsage    = "请求计算"
 	reportAccountSourceBalance  = "余额对账"
+	reportAccountSourceManual   = "手动维护"
 )
 
 type syncReport struct {

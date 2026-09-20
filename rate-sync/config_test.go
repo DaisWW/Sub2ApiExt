@@ -63,6 +63,27 @@ func TestLoadConfigEmptyRechargeDiscountsDefaultToOne(t *testing.T) {
 	}
 }
 
+func TestLoadConfigNormalizesManualAccountBaseURLs(t *testing.T) {
+	config, err := loadConfig(writeTestConfig(t, `{"sync_target":"account","manual_account_base_urls":[" HTTPS://IMAGE.QZCY3.TOP/api/v1/ "]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.ManualAccountBaseURLs) != 1 || !config.ManualAccountBaseURLs["https://image.qzcy3.top/api/v1"] {
+		t.Fatalf("unexpected manual account base URLs: %+v", config.ManualAccountBaseURLs)
+	}
+}
+
+func TestLoadConfigRejectsInvalidManualAccountBaseURLs(t *testing.T) {
+	for _, input := range []string{
+		`{"manual_account_base_urls":["not-a-url"]}`,
+		`{"manual_account_base_urls":["https://example.test/api/v1","https://EXAMPLE.TEST/api/v1/"]}`,
+	} {
+		if _, err := loadConfig(writeTestConfig(t, input)); err == nil {
+			t.Fatalf("loadConfig(%s) error = nil", input)
+		}
+	}
+}
+
 func TestLoadConfigAllowsOptionalRuntimeSettings(t *testing.T) {
 	path := writeTestConfig(t, `{
 	  "sync_target":"account",

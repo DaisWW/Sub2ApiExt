@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -39,64 +43,83 @@ func imageCreaterInitialTestChannels() []Channel {
 	return channels
 }
 
-func TestImageCreaterInitialRatesPublishWithoutUsage(t *testing.T) {
+func TestImageCreaterManualAccountsKeepCurrentRates(t *testing.T) {
 	snapshot := imageCreaterSnapshot{Balance: 100, TodayCost: 1, TodayRequests: 10}
-	upstream := newImageCreaterTestUpstream(t, &snapshot)
-	defer upstream.Close()
-	upstreamURL, _ := url.Parse(upstream.URL)
-	puts := make(map[int64][]float64)
-	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var id int64
-		if _, err := fmt.Sscanf(r.URL.Path, "/api/v1/admin/accounts/%d", &id); err != nil || r.Method != http.MethodPut {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		if r.URL.Path != "/api/v1/user/balance" {
 			http.NotFound(w, r)
 			return
 		}
-		var payload accountUpdate
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Error(err)
+		writeJSON(t, w, map[string]any{
+			"balance":       snapshot.Balance,
+			"todayCost":     snapshot.TodayCost,
+			"todayRequests": snapshot.TodayRequests,
+			"unit":          "USD",
+		})
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
+	var puts atomic.Int32
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			http.NotFound(w, r)
+			return
 		}
-		puts[id] = append(puts[id], payload.RateMultiplier)
+		puts.Add(1)
 		writeJSON(t, w, map[string]any{"code": 0})
 	}))
 	defer admin.Close()
-	source := &imageCreaterTestSource{
-		staticChannelSource: &staticChannelSource{channels: imageCreaterInitialTestChannels()},
-		latestID:            100,
+
+	channels := imageCreaterInitialTestChannels()
+	for i, rate := range []float64{0.25, 0.18, 0.25} {
+		channels[i].AccountRateMultiplier = rate
 	}
-	syncer := newAccountTestSyncer(t, source, admin.URL, false, source.channels[0].BaseURL, 0.9)
+	grok := channels[0]
+	grok.AccountID = 79
+	grok.AccountRateMultiplier = 0.12
+	grok.Group.ID = 56
+	channels = append(channels, grok)
+	source := &imageCreaterTestSource{staticChannelSource: &staticChannelSource{channels: channels}, latestID: 100}
+	syncer := newAccountTestSyncer(t, source, admin.URL, false, "", 1)
+	syncer.config.ManualAccountBaseURLs = map[string]bool{historicalImageCreaterBaseKey: true}
 	syncer.client = &http.Client{Transport: imageCreaterInitialTestTransport{upstream: upstreamURL}}
-	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.Local)
+	var output bytes.Buffer
+	syncer.logger = log.New(&output, "", 0)
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.Local)
 	if err := syncer.RunOnce(context.Background(), now); err != nil {
 		t.Fatal(err)
 	}
-	want := map[int64][]float64{76: {0.225}, 77: {0.162}, 78: {0.225}}
-	if !reflect.DeepEqual(puts, want) {
-		t.Fatalf("initial rates = %+v, want %+v", puts, want)
-	}
-	if len(source.calls) != 0 {
-		t.Fatalf("initialization consumed historical usage: %+v", source.calls)
-	}
-	loaded, err := syncer.store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	syncer.state = loaded
-	if err := syncer.RunOnce(context.Background(), now.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(puts, want) {
-		t.Fatalf("restart reapplied initial rates: %+v", puts)
-	}
-
-	// The first valid real window must replace the temporary rate.
 	snapshot = imageCreaterSnapshot{Balance: 99.88, TodayCost: 1.12, TodayRequests: 11}
 	source.latestID = 101
 	source.usage = []AccountUsageStats{{AccountID: 76, Requests: 1, BaseCost: 0.4}}
-	if err := syncer.RunOnce(context.Background(), now.Add(2*time.Minute)); err != nil {
+	if err := syncer.RunOnce(context.Background(), now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(puts[76], []float64{0.225, 0.27}) {
-		t.Fatalf("first real rate did not replace the initial rate: %+v", puts)
+	if upstreamCalls.Load() != 0 || puts.Load() != 0 {
+		t.Fatalf("manual accounts were probed or updated: upstream=%d puts=%d", upstreamCalls.Load(), puts.Load())
+	}
+	if !strings.Contains(output.String(), "暂不自动｜手动维护") {
+		t.Fatalf("manual status missing from account report:\n%s", output.String())
+	}
+}
+
+func TestImageCreaterManualAccountsDoNotApplyTemporaryInitialRates(t *testing.T) {
+	channels := imageCreaterInitialTestChannels()
+	var puts atomic.Int32
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		puts.Add(1)
+		writeJSON(t, w, map[string]any{"code": 0})
+	}))
+	defer admin.Close()
+	syncer := newAccountTestSyncer(t, &staticChannelSource{channels: channels}, admin.URL, false, "", 1)
+	syncer.config.ManualAccountBaseURLs = map[string]bool{historicalImageCreaterBaseKey: true}
+	if err := syncer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if puts.Load() != 0 || syncer.state.ImageCreaterInitialRatesApplied {
+		t.Fatalf("manual accounts received temporary initial rates: puts=%d state=%+v", puts.Load(), syncer.state)
 	}
 }
 
@@ -176,72 +199,5 @@ func TestImageCreaterInitialGroupRebasesOldMemoryWithoutReplayingUsage(t *testin
 	}
 	if len(puts) != 2 {
 		t.Fatalf("old memory pulled the initialized group price upward: %v", puts)
-	}
-}
-
-func TestImageCreaterInitialRatesRetryPartialFailureWithoutOverwritingManualRates(t *testing.T) {
-	channels := imageCreaterInitialTestChannels()
-	channels[0].AccountRateMultiplier = 0.3
-	grok := channels[0]
-	grok.AccountID = 79
-	grok.AccountRateMultiplier = 0.12
-	grok.Group.ID = 56
-	channels = append(channels, grok)
-	puts := make(map[int64][]float64)
-	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var id int64
-		if _, err := fmt.Sscanf(r.URL.Path, "/api/v1/admin/accounts/%d", &id); err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		var payload accountUpdate
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Error(err)
-		}
-		puts[id] = append(puts[id], payload.RateMultiplier)
-		if id == 78 && len(puts[id]) == 1 {
-			http.Error(w, "temporary failure", http.StatusBadGateway)
-			return
-		}
-		writeJSON(t, w, map[string]any{"code": 0})
-	}))
-	defer admin.Close()
-	syncer := newAccountTestSyncer(t, &staticChannelSource{}, admin.URL, false, "", 1)
-	report := newSyncReport("account", channels)
-	if err := syncer.initializeImageCreaterRates(context.Background(), channels, report); err == nil {
-		t.Fatal("partial failure was not reported")
-	}
-	if syncer.state.ImageCreaterInitialRatesApplied || channels[1].AccountRateMultiplier != 0.18 {
-		t.Fatalf("partial initialization was incorrectly completed: state=%+v channels=%+v", syncer.state, channels)
-	}
-	if err := syncer.initializeImageCreaterRates(context.Background(), channels, report); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(puts, map[int64][]float64{77: {0.18}, 78: {0.25, 0.25}}) || channels[0].AccountRateMultiplier != 0.3 || channels[3].AccountRateMultiplier != 0.12 {
-		t.Fatalf("retry overwrote manual rates or repeated a completed account: %+v", puts)
-	}
-}
-
-func TestImageCreaterInitialRatesRespectDryRunAndScope(t *testing.T) {
-	for _, scenario := range []string{"dry-run", "different-upstream", "different-group"} {
-		t.Run(scenario, func(t *testing.T) {
-			channels := imageCreaterInitialTestChannels()
-			if scenario == "different-upstream" {
-				channels[1].BaseURL = "https://other.example/api/v1"
-			}
-			if scenario == "different-group" {
-				for i := range channels {
-					channels[i].Group.ID = 99
-				}
-			}
-			before := append([]Channel(nil), channels...)
-			syncer := newAccountTestSyncer(t, &staticChannelSource{}, "http://admin.invalid", scenario == "dry-run", "", 1)
-			if err := syncer.initializeImageCreaterRates(context.Background(), channels, newSyncReport("account", channels)); err != nil {
-				t.Fatal(err)
-			}
-			if syncer.state.ImageCreaterInitialRatesApplied || !reflect.DeepEqual(channels, before) {
-				t.Fatal("dry-run or unmatched scope initialized rates")
-			}
-		})
 	}
 }

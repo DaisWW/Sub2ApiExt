@@ -20,16 +20,17 @@ const (
 )
 
 type fileConfig struct {
-	Sub2APIURL        string             `json:"sub2api_url"`
-	ProxyURL          string             `json:"proxy_url"`
-	ProxyFallbackURLs []string           `json:"proxy_fallback_urls"`
-	Interval          string             `json:"interval"`
-	SyncTarget        string             `json:"sync_target"`
-	HistoryWindow     string             `json:"history_window"`
-	MinHistoryCostUSD float64            `json:"min_history_cost_usd"`
-	DryRun            bool               `json:"dry_run"`
-	StateFile         string             `json:"state_file"`
-	RechargeDiscounts map[string]float64 `json:"recharge_discounts"`
+	Sub2APIURL            string             `json:"sub2api_url"`
+	ProxyURL              string             `json:"proxy_url"`
+	ProxyFallbackURLs     []string           `json:"proxy_fallback_urls"`
+	Interval              string             `json:"interval"`
+	SyncTarget            string             `json:"sync_target"`
+	HistoryWindow         string             `json:"history_window"`
+	MinHistoryCostUSD     float64            `json:"min_history_cost_usd"`
+	DryRun                bool               `json:"dry_run"`
+	StateFile             string             `json:"state_file"`
+	RechargeDiscounts     map[string]float64 `json:"recharge_discounts"`
+	ManualAccountBaseURLs []string           `json:"manual_account_base_urls"`
 }
 
 type Config struct {
@@ -45,7 +46,8 @@ type Config struct {
 	StateFile         string
 	// RechargeDiscounts maps upstream hosts to the discount applied to the account rate.
 	// Unlisted hosts still sync with a discount of 1.0.
-	RechargeDiscounts map[string]float64
+	RechargeDiscounts     map[string]float64
+	ManualAccountBaseURLs map[string]bool
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -90,18 +92,56 @@ func normalizeFileConfig(raw fileConfig) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	manualAccountBaseURLs, err := normalizeManualAccountBaseURLs(raw.ManualAccountBaseURLs)
+	if err != nil {
+		return nil, err
+	}
 	return &Config{
-		Sub2APIURL:        strings.TrimRight(raw.Sub2APIURL, "/"),
-		ProxyURL:          strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
-		ProxyFallbackURLs: proxyFallbackURLs,
-		Interval:          interval,
-		SyncTarget:        raw.SyncTarget,
-		HistoryWindow:     historyWindow,
-		MinHistoryCostUSD: raw.MinHistoryCostUSD,
-		DryRun:            raw.DryRun,
-		StateFile:         raw.StateFile,
-		RechargeDiscounts: rechargeDiscounts,
+		Sub2APIURL:            strings.TrimRight(raw.Sub2APIURL, "/"),
+		ProxyURL:              strings.TrimRight(strings.TrimSpace(raw.ProxyURL), "/"),
+		ProxyFallbackURLs:     proxyFallbackURLs,
+		Interval:              interval,
+		SyncTarget:            raw.SyncTarget,
+		HistoryWindow:         historyWindow,
+		MinHistoryCostUSD:     raw.MinHistoryCostUSD,
+		DryRun:                raw.DryRun,
+		StateFile:             raw.StateFile,
+		RechargeDiscounts:     rechargeDiscounts,
+		ManualAccountBaseURLs: manualAccountBaseURLs,
 	}, nil
+}
+
+func normalizeManualAccountBaseURLs(values []string) (map[string]bool, error) {
+	baseURLs := make(map[string]bool, len(values))
+	for index, value := range values {
+		baseURL, err := accountBaseKey(value)
+		if err != nil {
+			return nil, fmt.Errorf("manual_account_base_urls[%d]: %w", index, err)
+		}
+		if baseURLs[baseURL] {
+			return nil, fmt.Errorf("manual_account_base_urls[%d]: Base URL %q 重复", index, baseURL)
+		}
+		baseURLs[baseURL] = true
+	}
+	return baseURLs, nil
+}
+
+func accountBaseKey(baseURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("账号 base_url 必须是有效的 http/https URL")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("账号 base_url 必须是有效的 http/https URL")
+	}
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.User = nil
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 func applyConfigDefaults(raw *fileConfig) {

@@ -102,7 +102,7 @@ func TestImageCreaterBalancePublishesEachValidWindow(t *testing.T) {
 	if len(source.calls) != 0 || len(putRates) != 0 {
 		t.Fatalf("baseline consumed usage or published a rate: calls=%+v puts=%+v", source.calls, putRates)
 	}
-	hostKey, _ := imageCreaterBaseKey(channels[0].BaseURL)
+	hostKey, _ := accountBaseKey(channels[0].BaseURL)
 	hostState := syncer.state.ImageCreaterHosts[hostKey]
 	if hostState == nil || hostState.LastUsageID != 100 || !hostState.Initialized {
 		t.Fatalf("missing initial host watermark: %+v", hostState)
