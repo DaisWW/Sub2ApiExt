@@ -1,6 +1,6 @@
 # Codex 账号配置化导入
 
-适用于把 CLI Proxy API 的 Codex Auth JSON 或 Sub2API 数据包导入 Sub2API 0.2.3。脚本通过 Sub2API Admin API 创建或更新账号，同时设置分组、代理、并发、优先级、倍率和 Codex 高级选项；不直接写 PostgreSQL。
+适用于把 CLI Proxy API 的 Codex Auth JSON、Sub2API 数据包或本机 Cockpit Tools 的 Codex 账号导入 Sub2API 0.2.3。脚本通过 Sub2API Admin API 创建或更新账号，同时设置分组、代理、并发、优先级、倍率和 Codex 高级选项；不直接写 PostgreSQL。
 
 Sub2API 的普通数据包导入不会随账号绑定分组。数据包里没有明确填写的代理、倍率和高级选项也会使用默认值。因此，需要一次设置完整配置时，应使用本脚本调用原生 Codex Session 导入接口。
 
@@ -34,20 +34,52 @@ Sub2API 的普通数据包导入不会随账号绑定分组。数据包里没有
 ]
 ```
 
-批次中的其他字段默认继承顶层配置；每个批次都必须明确填写 `group_names`，避免误继承顶层分组。如果需要让同一批账号进入多个组，可在该批次的 `group_names` 中填写多个名称。配置使用 `batches` 时，每个批次的路径相对于配置文件所在目录。若同时传入 `-InputPath`（包括拖入 BAT），命令行输入会优先按单批次处理，并使用顶层配置；没有 `batches` 时，原来的单批次配置和拖入 BAT 用法保持不变。
+批次中的其他字段默认继承顶层配置；每个批次都必须明确填写 `group_names`，避免误继承顶层分组。如果需要让同一批账号进入多个组，可在该批次的 `group_names` 中填写多个名称。配置使用 `batches` 时，每个批次的路径相对于配置文件所在目录。若传入 `-InputPath`（包括拖入 BAT）或 `-CockpitTools`，命令行输入会优先按单批次处理，并使用顶层配置；两者不能同时使用。没有 `batches` 时，原来的单批次配置和拖入 BAT 用法保持不变。
 
-单批次配置的账号输入按以下顺序选择：
+单批次可使用以下输入：
 
 1. 命令行 `-InputPath`；拖入 BAT 时由 BAT 自动传入被拖入文件的绝对路径。
-2. 配置中的可选 `input_path`。
+2. 命令行 `-CockpitTools`；读取当前 Windows 用户的 Cockpit Tools 本地 Codex 账号。
+3. 两个命令行参数都未使用时，读取配置中的可选 `input_path`。
 
-两处都没有提供输入文件时，脚本停止。配置中的相对 `input_path` 以配置文件所在目录为基准；命令行相对路径以当前工作目录为基准。使用 `batches` 时，输入文件由每个批次的 `input_path` 提供。
+没有提供任何输入时，脚本停止。配置中的相对 `input_path` 以配置文件所在目录为基准；命令行相对路径以当前工作目录为基准。使用 `batches` 时，输入文件由每个批次的 `input_path` 提供。
 
-管理员账号与密码从 `runtime_env_path` 指定的 `.env` 读取，不写入导入配置或日志。`sub2api_url` 只接受本机回环地址，避免把管理员密码发送到其他主机。
+管理员账号与密码从 `runtime_env_path` 指定的 `.env` 读取，不写入导入配置或日志。`sub2api_url` 只接受本机回环地址，避免把管理员密码发送到其他主机。Cockpit Tools 凭据只在导入进程内存中解密，不写临时文件，也不输出到日志。
+
+## Cockpit Tools 本地数据
+
+Cockpit Tools 的 Codex 账号保存在当前 Windows 用户目录下：
+
+| 内容 | 路径 |
+| --- | --- |
+| 当前账号索引 | `%USERPROFILE%\.antigravity_cockpit\codex_accounts.json` |
+| 加密账号详情 | `%USERPROFILE%\.antigravity_cockpit\codex_accounts\*.json` |
+| 详情加密密钥 | `%USERPROFILE%\.antigravity_cockpit\secure-account-storage.key` |
+
+密钥由 Cockpit Tools 生成，文件内容是 Base64 编码的随机 32 字节 AES 密钥；导入器只读取，不会创建、修改或输出密钥。路径按当前 Windows 用户的主目录动态解析，没有写死用户名或盘符。换一台 Windows 机器后，只要当前用户拥有兼容格式的完整 Cockpit Tools 本地数据，导入器仍可使用；若迁移旧数据，索引、加密详情及其匹配的密钥必须成套，仅复制加密详情无法解密，OAuth 凭据也可能因过期或撤销而失效。
+
+`AppData\Local\com.jlcodes.cockpit-tools` 主要是 WebView 数据，`AppData\Local\cockpit-tools` 保存更新设置，都不是 Codex 账号的权威来源。导入器只读取当前索引列出的详情文件，忽略 `.bak`、`codex_account_tombstones` 和孤立文件；不会修改 Cockpit Tools 数据，Cockpit Tools 也不需要保持运行。当前支持其 `version=1`、`AES-256-GCM` 的账号详情格式，格式变化时会停止并报错。
+
+读取加密详情需要 PATH 中可用的 Python 3.8 或更高版本，以及 `requirements.txt` 中声明的 `cryptography` 包。`import-from-cockpit-tools.bat` 会在导入前检查环境；依赖已满足时直接继续，缺少依赖时自动执行：
+
+```bat
+python.exe -m pip install --disable-pip-version-check --user -r requirements.txt
+```
+
+安装失败时 BAT 会停止，不会执行导入。也可以在工具目录中手动运行上述命令后重试。凭据由 Python 通过匿名进程管道交给公共 PowerShell 导入器，不写入临时文件。
 
 ## 使用方法
 
-日常使用时，把一个账号 JSON 文件拖到 `drop-json-to-import.bat` 上即可正式导入。窗口会保留导入结果；一次只能拖入一个文件。
+日常使用有两个入口，它们都调用同一个 `import-codex-accounts.ps1` 执行导入：
+
+- 把一个账号 JSON 文件拖到 `drop-json-to-import.bat` 上；一次只能拖入一个文件。
+- 双击 `import-from-cockpit-tools.bat`，导入 Cockpit Tools 当前保存的全部 Codex 账号。
+
+两个窗口都会保留导入结果。要先校验 Cockpit Tools 输入而不写入账号，可在命令行运行：
+
+```bat
+import-from-cockpit-tools.bat /WhatIf
+```
 
 多批次配置使用 `-ConfigPath` 执行，例如：
 
@@ -73,7 +105,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\codex-account-import
 | Auth JSON 数组 | `[{ "type": "codex", ... }]` | 数组中每条记录作为一个账号导入 |
 | Sub2API 数据包 | `{ "accounts": [{ "credentials": {...} }] }` | 读取每个 `accounts[].credentials` |
 
-每条凭据必须包含 `access_token` 或 `accessToken`。使用当前邮箱命名规则时还必须包含 `email`。脚本不会输出密码、Token、TOTP 或邮箱。
+Cockpit Tools 输入不经过上述文件格式判断；脚本将当前索引中的账号详情转换成同一套导入记录。每条凭据必须包含 `access_token` 或 `accessToken`。使用当前邮箱命名规则时还必须包含 `email`。脚本不会输出密码、Token、TOTP 或邮箱。
 
 ## JSON 顶层参数
 

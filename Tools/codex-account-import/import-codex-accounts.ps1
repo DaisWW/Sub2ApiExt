@@ -3,6 +3,8 @@
 
     [string]$InputPath,
 
+    [switch]$CockpitTools,
+
     [switch]$WhatIf
 )
 
@@ -21,6 +23,54 @@ function Get-JsonProperty {
         return $Default
     }
     return $property.Value
+}
+
+function Read-CockpitToolsImportRecords {
+    $readerPath = Join-Path $PSScriptRoot "read-cockpit-tools-accounts.py"
+    if (-not (Test-Path -LiteralPath $readerPath -PathType Leaf)) {
+        throw "找不到 Cockpit Tools 账号读取组件: $readerPath"
+    }
+
+    $python = Get-Command python.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $python) {
+        throw "导入 Cockpit Tools 账号需要 Python 3 和 cryptography 包"
+    }
+
+    try {
+        $output = @(& $python.Source $readerPath --for-importer 2>$null)
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        throw "无法启动 Cockpit Tools 账号读取组件"
+    }
+
+    $outputJson = $output -join [Environment]::NewLine
+    $output = $null
+    try {
+        $result = $outputJson | ConvertFrom-Json
+    }
+    catch {
+        $outputJson = $null
+        throw "Cockpit Tools 账号读取组件返回了无效结果；凭据内容未输出"
+    }
+    $outputJson = $null
+
+    if ($null -eq $result) {
+        throw "Cockpit Tools 账号读取组件返回了空结果"
+    }
+    $sourceError = [string](Get-JsonProperty $result "error" "")
+    if ($exitCode -ne 0 -or $sourceError) {
+        if ($sourceError) {
+            throw $sourceError
+        }
+        throw "读取 Cockpit Tools Codex 账号失败；凭据内容未输出"
+    }
+
+    $records = @(Get-JsonProperty $result "records" @())
+    if ($records.Count -eq 0) {
+        throw "Cockpit Tools 中没有 Codex 账号"
+    }
+    return $records
 }
 
 function Read-DotEnv {
@@ -133,7 +183,7 @@ function Resolve-ImportInputPath {
     )
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
-        throw "未提供账号 JSON；请拖入 BAT，或使用 -InputPath，或在配置中填写 input_path"
+        throw "未提供账号 JSON；请拖入 BAT、使用 -InputPath、使用 -CockpitTools，或在配置中填写 input_path"
     }
     if (-not [IO.Path]::IsPathRooted($Path)) {
         $Path = [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
@@ -211,10 +261,14 @@ if ($baseUri.UserInfo -or $baseUri.Query -or $baseUri.Fragment) {
 $baseUrl = $baseUrl.TrimEnd('/')
 
 $inputPathFromArgument = -not [string]::IsNullOrWhiteSpace($InputPath)
+if ($CockpitTools -and $inputPathFromArgument) {
+    throw "-CockpitTools 不能与 -InputPath 同时使用"
+}
+$inputSourceFromArgument = $inputPathFromArgument -or $CockpitTools
 $sourceType = [string](Get-JsonProperty $config "source_type" "codex")
 $batchDefinitions = @()
 $configuredBatches = Get-JsonProperty $config "batches" $null
-if (-not $inputPathFromArgument -and $null -ne $configuredBatches) {
+if (-not $inputSourceFromArgument -and $null -ne $configuredBatches) {
     $rawBatches = @($configuredBatches)
     if ($rawBatches.Count -eq 0) {
         throw "batches 至少需要包含一个批次"
@@ -242,6 +296,7 @@ if (-not $inputPathFromArgument -and $null -ne $configuredBatches) {
             Index      = $batchIndex + 1
             Config     = $rawBatch
             InputPath  = $batchInputPath
+            InputLabel = $batchInputPath
             SourceType = $batchSourceType
             GroupNames = $batchGroupNames
             GroupIds   = @()
@@ -250,15 +305,24 @@ if (-not $inputPathFromArgument -and $null -ne $configuredBatches) {
     }
 }
 else {
-    $configuredInputPath = [string](Get-JsonProperty $config "input_path" "")
-    $inputPath = if ($inputPathFromArgument) { $InputPath } else { $configuredInputPath }
-    $inputBasePath = if ($inputPathFromArgument) { (Get-Location).Path } else { $configDirectory }
-    $resolvedInputPath = Resolve-ImportInputPath -Path $inputPath -BasePath $inputBasePath
-    $batchRecords = @(Read-ImportRecords -Path $resolvedInputPath -SourceType $sourceType)
+    if ($CockpitTools) {
+        $resolvedInputPath = $null
+        $inputLabel = "Cockpit Tools 本地数据"
+        $batchRecords = @(Read-CockpitToolsImportRecords)
+    }
+    else {
+        $configuredInputPath = [string](Get-JsonProperty $config "input_path" "")
+        $inputPath = if ($inputPathFromArgument) { $InputPath } else { $configuredInputPath }
+        $inputBasePath = if ($inputPathFromArgument) { (Get-Location).Path } else { $configDirectory }
+        $resolvedInputPath = Resolve-ImportInputPath -Path $inputPath -BasePath $inputBasePath
+        $inputLabel = $resolvedInputPath
+        $batchRecords = @(Read-ImportRecords -Path $resolvedInputPath -SourceType $sourceType)
+    }
     $batchDefinitions = @([pscustomobject]@{
         Index      = 1
         Config     = $null
         InputPath  = $resolvedInputPath
+        InputLabel = $inputLabel
         SourceType = $sourceType
         GroupNames = @(Get-JsonProperty $config "group_names" @())
         GroupIds   = @()
@@ -376,7 +440,7 @@ foreach ($batch in $batchDefinitions) {
 
     if ($WhatIf) {
         $nameSummary = if ($namePrefix) { "前缀 $namePrefix" } else { "邮箱" }
-        $whatIfSummaries += "批次 $($batch.Index)：$($records.Count) 个账号；文件=$($batch.InputPath)；命名=$nameSummary；分组=$($groupBatchSummaries[$batch.Index - 1])"
+        $whatIfSummaries += "批次 $($batch.Index)：$($records.Count) 个账号；来源=$($batch.InputLabel)；命名=$nameSummary；分组=$($groupBatchSummaries[$batch.Index - 1])"
     }
 }
 
