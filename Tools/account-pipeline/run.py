@@ -603,34 +603,23 @@ def run(args: argparse.Namespace) -> int:
             print(f"[增量] 快照已更新：{incremental_state_file}")
 
         redeem_warning = redeem_code == 2
-        final_code = (
-            0
-            if args.incremental and deletion_blocked
-            else 2
-            if redeem_warning
-            else 0
-        )
+        final_code = 0
         manifest.update(
             {
                 "status": (
-                    "success_with_redeem_warnings"
-                    if redeem_warning and final_code == 0
-                    else "partial"
-                    if final_code == 2
-                    else "success"
+                    "success_with_redeem_warnings" if redeem_warning else "success"
                 ),
                 "finished_at": datetime.now().isoformat(timespec="seconds"),
                 "exit_code": final_code,
             }
         )
         write_json(pipeline_manifest, manifest)
-        if redeem_warning and final_code == 0:
-            print(
-                "流水线完成：已继续导入；兑换结果含异常，删除已暂缓。"
-                f"运行记录：{pipeline_manifest}"
-            )
-        elif final_code == 2:
-            print(f"流水线完成，但有卡密失败；运行记录：{pipeline_manifest}")
+        if redeem_warning:
+            if args.incremental and deletion_blocked:
+                message = "兑换结果含异常，已继续导入；增量删除暂缓。"
+            else:
+                message = "兑换结果含异常，已继续导入；异常仅记录。"
+            print(f"流水线完成：{message}运行记录：{pipeline_manifest}")
         else:
             print(f"流水线完成。运行记录：{pipeline_manifest}")
         return final_code
