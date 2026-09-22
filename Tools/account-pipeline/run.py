@@ -11,15 +11,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from modules.cockpit import main as cockpit_module
-from modules.normalize import main as normalize_module
-from modules.redeem import main as redeem_module
-from modules.sub2api import main as sub2api_module
-
 
 BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from cockpit import main as cockpit_module  # noqa: E402
+from normalize import main as normalize_module  # noqa: E402
+from redeem import main as redeem_module  # noqa: E402
+from sub2api import main as sub2api_module  # noqa: E402
+
+
 NEW_CODES_FILE = BASE_DIR / "input" / "redeem-codes.txt"
-LEGACY_CODES_FILE = BASE_DIR.parent / "codex-account-import" / "redeem-codes.txt"
 DEFAULT_RUNTIME_DIR = Path(
     os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
 ) / "Sub2API" / "account-pipeline"
@@ -37,7 +40,7 @@ def resolved(path: Path) -> Path:
 def config_path(value: Any) -> Optional[Path]:
     if not isinstance(value, str) or not value.strip():
         return None
-    path = Path(value)
+    path = Path(value).expanduser()
     if not path.is_absolute():
         path = BASE_DIR / path
     return resolved(path)
@@ -61,12 +64,11 @@ def choose_input(argument: Optional[Path]) -> Path:
         if not path.is_file():
             raise PipelineError(f"找不到拖入的卡密文件：{path}")
         return path
-    for candidate in (NEW_CODES_FILE, LEGACY_CODES_FILE):
-        if candidate.is_file():
-            return resolved(candidate)
+    if NEW_CODES_FILE.is_file():
+        return resolved(NEW_CODES_FILE)
     raise PipelineError(
         "没有找到卡密文件；请把文件拖到 run.bat，或创建 "
-        f"{NEW_CODES_FILE}（也兼容 {LEGACY_CODES_FILE}）"
+        f"{NEW_CODES_FILE}"
     )
 
 
@@ -95,17 +97,9 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
 def validate_layout(input_file: Path, sub2api_config: Optional[Path]) -> None:
     if sys.version_info < (3, 8):
         raise PipelineError("需要 Python 3.8 或更高版本")
-    if not input_file.is_file() or not input_file.read_bytes():
-        raise PipelineError(f"卡密文件不存在或为空：{input_file}")
     redeem_module.validate(input_file)
-    if not redeem_module.LEGACY_SCRIPT.is_file():
-        raise PipelineError(f"找不到兑换脚本：{redeem_module.LEGACY_SCRIPT}")
-    if not sub2api_module.IMPORTER.is_file():
-        raise PipelineError(f"找不到 Sub2API 导入脚本：{sub2api_module.IMPORTER}")
-    if not cockpit_module.BRIDGE.is_file():
-        raise PipelineError(f"找不到 Cockpit 导入桥接脚本：{cockpit_module.BRIDGE}")
-    if sub2api_config is not None and not sub2api_config.is_file():
-        raise PipelineError(f"找不到 Sub2API 配置文件：{sub2api_config}")
+    if sub2api_config is not None:
+        sub2api_module.validate_config(sub2api_config)
 
 
 def read_redeem_manifest(path: Path, fallback_data_dir: Path) -> Dict[str, Any]:
@@ -121,8 +115,8 @@ def read_redeem_manifest(path: Path, fallback_data_dir: Path) -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise PipelineError("兑换 manifest 格式无效")
     data_dir_value = value.get("data_dir")
-    if isinstance(data_dir_value, str):
-        data_dir_candidate = Path(data_dir_value)
+    if isinstance(data_dir_value, str) and data_dir_value.strip():
+        data_dir_candidate = Path(data_dir_value).expanduser()
         if not data_dir_candidate.is_absolute():
             data_dir_candidate = path.parent / data_dir_candidate
         data_dir = resolved(data_dir_candidate)
@@ -134,7 +128,13 @@ def read_redeem_manifest(path: Path, fallback_data_dir: Path) -> Dict[str, Any]:
     return value
 
 
-def stage_error(manifest: Dict[str, Any], path: Path, stage: str, code: int, message: str) -> int:
+def stage_error(
+    manifest: Dict[str, Any],
+    path: Path,
+    stage: str,
+    code: int,
+    message: str,
+) -> int:
     manifest.update(
         {
             "status": "failed",
@@ -152,16 +152,19 @@ def stage_error(manifest: Dict[str, Any], path: Path, stage: str, code: int, mes
 def run(args: argparse.Namespace) -> int:
     config = load_pipeline_config()
     input_file = choose_input(args.input_file)
-    runtime_value = args.runtime_dir
-    if runtime_value is not None:
-        runtime_dir = resolved(runtime_value)
-    elif config.get("runtime_dir"):
-        configured_runtime = config_path(config.get("runtime_dir"))
-        runtime_dir = configured_runtime or resolved(DEFAULT_RUNTIME_DIR)
+
+    if args.runtime_dir is not None:
+        runtime_dir = resolved(args.runtime_dir)
     else:
-        runtime_dir = resolved(DEFAULT_RUNTIME_DIR)
-    config_value = args.sub2api_config
-    sub2api_config = resolved(config_value) if config_value else config_path(config.get("sub2api_config"))
+        runtime_dir = config_path(config.get("runtime_dir")) or resolved(
+            DEFAULT_RUNTIME_DIR
+        )
+
+    sub2api_config = (
+        resolved(args.sub2api_config)
+        if args.sub2api_config is not None
+        else config_path(config.get("sub2api_config"))
+    )
     wait_seconds = args.wait_seconds
     if wait_seconds is None and "cockpit_wait_seconds" in config:
         try:
@@ -198,14 +201,16 @@ def run(args: argparse.Namespace) -> int:
         "skip_sub2api": bool(args.skip_sub2api),
         "skip_cockpit": bool(args.skip_cockpit),
     }
+    stage = "redeem"
     try:
-        (runtime_dir / "logs").mkdir(parents=True, exist_ok=True)
         write_json(pipeline_manifest, manifest)
         redeem_code = redeem_module.execute(
             input_file,
-            redeem_dir,
-            result_file,
-            redeem_manifest,
+            action="sub2api",
+            cache_dir=runtime_dir / "runs",
+            run_dir=redeem_dir,
+            result_file=result_file,
+            manifest_file=redeem_manifest,
         )
         manifest["redeem_exit_code"] = redeem_code
         manifest["redeem_result_file"] = str(result_file)
@@ -223,29 +228,39 @@ def run(args: argparse.Namespace) -> int:
         if redeem_code == 2:
             print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
 
-        data_dir = Path(redeem_info["data_dir"])
-        normalized = normalize_module.normalize(data_dir, normalized_dir)
+        stage = "normalize"
+        normalized = normalize_module.normalize(
+            Path(redeem_info["data_dir"]), normalized_dir
+        )
         manifest["normalized"] = normalized
         write_json(pipeline_manifest, manifest)
         print(f"标准化完成：{normalized['accounts']} 个账号")
 
         if not args.skip_sub2api:
-            sub2api_input = Path(normalized["sub2api_input"])
-            sub2api_code = sub2api_module.execute(sub2api_input, sub2api_config)
+            stage = "sub2api"
+            sub2api_code = sub2api_module.execute(
+                Path(normalized["sub2api_input"]), sub2api_config
+            )
             manifest["sub2api_exit_code"] = sub2api_code
             write_json(pipeline_manifest, manifest)
             if sub2api_code != 0:
-                return stage_error(manifest, pipeline_manifest, "sub2api", sub2api_code, "Sub2API 导入未完成")
+                return stage_error(
+                    manifest, pipeline_manifest, "sub2api", sub2api_code, "Sub2API 导入未完成"
+                )
         else:
             print("已跳过 Sub2API 导入。")
 
         if not args.skip_cockpit:
-            cockpit_input = Path(normalized["cockpit_input"])
-            cockpit_code = cockpit_module.execute(cockpit_input, wait_seconds=wait_seconds)
+            stage = "cockpit"
+            cockpit_code = cockpit_module.execute(
+                Path(normalized["cockpit_input"]), wait_seconds=wait_seconds
+            )
             manifest["cockpit_exit_code"] = cockpit_code
             write_json(pipeline_manifest, manifest)
             if cockpit_code != 0:
-                return stage_error(manifest, pipeline_manifest, "cockpit", cockpit_code, "Cockpit 导入未完成")
+                return stage_error(
+                    manifest, pipeline_manifest, "cockpit", cockpit_code, "Cockpit 导入未完成"
+                )
         else:
             print("已跳过 Cockpit 导入。")
 
@@ -269,12 +284,12 @@ def run(args: argparse.Namespace) -> int:
         TypeError,
         KeyError,
         normalize_module.NormalizeError,
-        redeem_module.RedeemModuleError,
-        sub2api_module.Sub2ApiModuleError,
-        cockpit_module.CockpitModuleError,
+        redeem_module.RedeemError,
+        sub2api_module.Sub2ApiError,
+        cockpit_module.CockpitError,
         PipelineError,
     ) as exc:
-        return stage_error(manifest, pipeline_manifest, "pipeline", 1, str(exc))
+        return stage_error(manifest, pipeline_manifest, stage, 1, str(exc))
 
 
 def main() -> int:
@@ -291,7 +306,15 @@ def main() -> int:
     args = parser.parse_args()
     try:
         return run(args)
-    except (PipelineError, OSError, ValueError, TypeError, KeyError) as exc:
+    except (
+        PipelineError,
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        redeem_module.RedeemError,
+        sub2api_module.Sub2ApiError,
+    ) as exc:
         print(f"流水线失败：{exc}", file=sys.stderr)
         return 1
 

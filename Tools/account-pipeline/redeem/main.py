@@ -23,10 +23,13 @@ from pathlib import Path
 
 
 BASE_URL = "https://redeem.plusproteam.xyz"
-TOOL_DIR = Path(__file__).resolve().parent
-CODES_FILE = TOOL_DIR / "redeem-codes.txt"
-CACHE_DIR = TOOL_DIR / "cache"
-RESULT_FILE = TOOL_DIR / "redeem-result.txt"
+PIPELINE_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_RUNTIME_DIR = Path(
+    os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
+) / "Sub2API" / "account-pipeline"
+CODES_FILE = PIPELINE_DIR / "input" / "redeem-codes.txt"
+CACHE_DIR = DEFAULT_RUNTIME_DIR / "runs"
+RESULT_FILE = DEFAULT_RUNTIME_DIR / "results" / "redeem-result.txt"
 MAX_CODES = 200
 MAX_TEXT_BYTES = 8000
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
@@ -75,8 +78,6 @@ def read_codes(path: Path) -> list[str]:
                 raise RedeemError("卡密文件必须是 UTF-8 或 GB18030 编码") from exc
     except OSError as exc:
         raise RedeemError(f"读取卡密文件失败：{exc}") from exc
-    except UnicodeDecodeError as exc:
-        raise RedeemError("卡密文件必须是 UTF-8 编码") from exc
     if not raw:
         raise RedeemError(f"卡密文件为空：{shown(path)}")
     if len(raw) > MAX_TEXT_BYTES:
@@ -97,6 +98,11 @@ def read_codes(path: Path) -> list[str]:
     if len("\n".join(codes).encode("utf-8")) > MAX_TEXT_BYTES:
         raise RedeemError(f"卡密内容超过网页的 {MAX_TEXT_BYTES} 字节限制")
     return codes
+
+
+def validate(input_file: Path) -> None:
+    """只校验卡密文件，不访问兑换站。"""
+    read_codes(input_file.expanduser().resolve())
 
 
 def multipart(fields: dict[str, str]) -> tuple[bytes, str]:
@@ -180,14 +186,8 @@ class RedeemClient:
         try:
             return self.opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            body = exc.read(4096).decode("utf-8", "replace")
-            try:
-                parsed = json.loads(body)
-                detail = parsed.get("error", "") if isinstance(parsed, dict) else ""
-            except (TypeError, ValueError):
-                detail = ""
-            suffix = f"：{detail}" if detail else ""
-            raise RedeemError(f"兑换站请求失败（HTTP {exc.code}）{suffix}") from exc
+            exc.close()
+            raise RedeemError(f"兑换站请求失败（HTTP {exc.code}）") from exc
         except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
             raise RedeemError(f"连接兑换站失败：{exc}") from exc
 
@@ -411,17 +411,20 @@ def write_manifest(
         raise RedeemError(f"写入 manifest 失败：{exc}") from exc
 
 
-def run(args: argparse.Namespace) -> int:
-    input_path = args.input_file or CODES_FILE
-    result_file = Path(getattr(args, "result_file", None) or RESULT_FILE)
-    cache_dir = Path(getattr(args, "cache_dir", None) or CACHE_DIR)
-    requested_run_dir = getattr(args, "run_dir", None)
-    manifest_file = getattr(args, "manifest_file", None)
+def process(
+    input_path: Path,
+    *,
+    action: str,
+    cache_dir: Path,
+    result_file: Path,
+    requested_run_dir: Path | None = None,
+    manifest_file: Path | None = None,
+) -> int:
     codes = read_codes(input_path)
     print(f"已读取 {len(codes)} 个卡密：{shown(input_path)}")
     client = RedeemClient()
     client.start()
-    task_id = client.submit(codes, args.action)
+    task_id = client.submit(codes, action)
     payload = client.wait(task_id)
     if not isinstance(payload, dict):
         raise RedeemError("兑换站返回了无效任务结果")
@@ -435,7 +438,7 @@ def run(args: argparse.Namespace) -> int:
     save_result(result_file, rows)
     print(f"结果已覆盖写入：{shown(result_file)}")
 
-    if args.action == "check":
+    if action == "check":
         if manifest_file:
             write_manifest(
                 Path(manifest_file),
@@ -480,9 +483,47 @@ def run(args: argparse.Namespace) -> int:
     return 0 if rows and all(row.get("ok") is True for row in rows) else 2
 
 
+def execute(
+    input_file: Path | None = None,
+    *,
+    action: str = "sub2api",
+    cache_dir: Path = CACHE_DIR,
+    run_dir: Path | None = None,
+    result_file: Path = RESULT_FILE,
+    manifest_file: Path | None = None,
+) -> int:
+    input_path = (input_file or CODES_FILE).expanduser().resolve()
+    cache_path = cache_dir.expanduser().resolve()
+    result_path = result_file.expanduser().resolve()
+    run_path = run_dir.expanduser().resolve() if run_dir is not None else None
+    manifest_path = (
+        manifest_file.expanduser().resolve() if manifest_file is not None else None
+    )
+    try:
+        return process(
+            input_path,
+            action=action,
+            cache_dir=cache_path,
+            result_file=result_path,
+            requested_run_dir=run_path,
+            manifest_file=manifest_path,
+        )
+    except (RedeemError, OSError, ValueError) as exc:
+        print(f"失败：{exc}", file=sys.stderr)
+        try:
+            save_result(result_path, [])
+            print(f"结果已覆盖写入：{shown(result_path)}", file=sys.stderr)
+        except RedeemError as result_error:
+            print(f"结果文件也写入失败：{result_error}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="提交卡密，下载并解压账号包；不传文件时读取 redeem-codes.txt。"
+        description=(
+            "提交卡密，下载并解压账号包；不传文件时读取 "
+            "account-pipeline/input/redeem-codes.txt。"
+        )
     )
     parser.add_argument("input_file", nargs="?", type=Path)
     parser.add_argument(
@@ -496,16 +537,14 @@ def main() -> int:
     parser.add_argument("--result-file", type=Path, default=RESULT_FILE)
     parser.add_argument("--manifest-file", type=Path)
     args = parser.parse_args()
-    try:
-        return run(args)
-    except (RedeemError, OSError, ValueError) as exc:
-        print(f"失败：{exc}", file=sys.stderr)
-        try:
-            save_result(args.result_file, [])
-            print(f"结果已覆盖写入：{shown(args.result_file)}", file=sys.stderr)
-        except RedeemError as result_error:
-            print(f"结果文件也写入失败：{result_error}", file=sys.stderr)
-        return 1
+    return execute(
+        args.input_file,
+        action=args.action,
+        cache_dir=args.cache_dir,
+        run_dir=args.run_dir,
+        result_file=args.result_file,
+        manifest_file=args.manifest_file,
+    )
 
 
 if __name__ == "__main__":

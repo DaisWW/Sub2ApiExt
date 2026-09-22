@@ -1,7 +1,6 @@
 import base64
 import json
 import re
-import sys
 from pathlib import Path
 
 
@@ -130,31 +129,3 @@ def load_records():
         records.append(record)
 
     return records
-
-
-def main() -> int:
-    if sys.argv[1:] != ["--for-importer"] or sys.stdout.isatty():
-        print(
-            json.dumps(
-                {"error": "请通过 import-codex-accounts.ps1 调用此组件"},
-                ensure_ascii=True,
-            )
-        )
-        return 1
-
-    try:
-        payload = {"records": load_records()}
-        exit_code = 0
-    except SourceError as error:
-        payload = {"error": str(error)}
-        exit_code = 1
-    except Exception:
-        payload = {"error": "读取 Cockpit Tools Codex 账号时发生未预期错误"}
-        exit_code = 1
-
-    print(json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
-    return exit_code
-
-
-if __name__ == "__main__":
-    sys.exit(main())

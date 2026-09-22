@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import hashlib
 import json
 import os
 import sys
@@ -159,6 +158,24 @@ def nested_claim(claims: Dict[str, Any], keys: Iterable[str]) -> Optional[str]:
     return None
 
 
+def first_claim(
+    sources: Iterable[Dict[str, Any]],
+    direct_keys: Iterable[str],
+    nested_keys: Iterable[str] = (),
+) -> Optional[str]:
+    """按来源顺序查找直接字段，再查找常见嵌套 claim。"""
+    source_list = tuple(sources)
+    for source in source_list:
+        value = pick_string(source, direct_keys)
+        if value:
+            return value
+    for source in source_list:
+        value = nested_claim(source, nested_keys)
+        if value:
+            return value
+    return None
+
+
 def canonical_record(record: Dict[str, Any], number: int) -> Dict[str, Any]:
     record_type = text_value(record.get("type"))
     if record_type and record_type.lower() not in SUPPORTED_TYPES:
@@ -173,40 +190,15 @@ def canonical_record(record: Dict[str, Any], number: int) -> Dict[str, Any]:
     id_claims = decode_jwt_claims(id_token)
     claim_sets = (record, claims, id_claims)
 
-    email = None
-    for source in claim_sets:
-        email = pick_string(source, EMAIL_KEYS)
-        if email:
-            break
-    if not email:
-        email = nested_claim(record, ("email", "user_email", "preferred_username"))
-    if not email:
-        email = nested_claim(claims, ("email", "user_email", "preferred_username"))
-    if not email:
-        email = nested_claim(id_claims, ("email", "user_email", "preferred_username"))
+    email = first_claim(
+        claim_sets,
+        EMAIL_KEYS,
+        ("email", "user_email", "preferred_username"),
+    )
     if not email:
         raise NormalizeError(f"第 {number} 个账号缺少 email，无法同时导入两个目标")
 
-    account_id = None
-    for source in claim_sets:
-        account_id = pick_string(source, ACCOUNT_ID_KEYS)
-        if account_id:
-            break
-    if not account_id:
-        account_id = nested_claim(
-            record,
-            ("account_id", "accountId", "chatgpt_account_id"),
-        )
-    if not account_id:
-        account_id = nested_claim(
-            claims,
-            ("account_id", "accountId", "chatgpt_account_id"),
-        )
-    if not account_id:
-        account_id = nested_claim(
-            id_claims,
-            ("account_id", "accountId", "chatgpt_account_id"),
-        )
+    account_id = first_claim(claim_sets, ACCOUNT_ID_KEYS, ACCOUNT_ID_KEYS)
 
     refresh_token = pick_string(record, REFRESH_KEYS)
     if not refresh_token:
@@ -237,11 +229,8 @@ def deduplicate(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         email = text_value(record.get("email"))
         if account_id:
             key = "id:" + account_id.lower()
-        elif email:
-            key = "email:" + email.lower()
         else:
-            digest = hashlib.sha256(record["access_token"].encode("utf-8")).hexdigest()
-            key = "token:" + digest
+            key = "email:" + email.lower()
         if key in seen:
             continue
         seen.add(key)

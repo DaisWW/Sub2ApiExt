@@ -1,1 +1,0 @@
-"""Card-code redemption adapter."""
