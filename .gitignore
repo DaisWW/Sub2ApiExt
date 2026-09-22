@@ -36,3 +36,9 @@ runtime/
 # Local agent state
 .claude/
 .serena/
+
+# Redeem account import local data
+Tools/codex-account-import/redeem-codes.txt
+Tools/codex-account-import/redeem-result.txt
+Tools/codex-account-import/cache/
+Tools/codex-account-import/__pycache__/

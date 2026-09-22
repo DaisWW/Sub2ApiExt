@@ -1,0 +1,2 @@
+# 复制为 redeem-codes.txt 后填写卡密；一行一个卡密。
+# 例如：PLUS-XXX-XXXXXX
