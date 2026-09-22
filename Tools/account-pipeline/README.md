@@ -100,4 +100,6 @@ manifest 保存路径、数量、任务号、阶段状态和账号来源标识�
 
 主流程有两个独立外部输入：`input\redeem-codes.txt` 保存卡密，`input\accounts.txt` 保存已有账户 JSON 文本。账户文本中的每个对象必须是完整 JSON，但对象之间可以空行；支持单个对象、数组、JSONL 和连续对象。截图中常见的 `type: "oauth"` 且 `platform: "openai"` 会统一转换为 `type: "codex"`。
 
-有卡密时先由 `redeem` 下载并解压；随后 `normalize` 同时读取解压目录和账户文本，按邮箱去重，生成 `normalized\sub2api-accounts.json` 和 `normalized\cockpit-accounts.json`。这两个 JSON 是各自导入器的单独重跑输入。标准化要求每个账号有 `access_token` 和可识别的邮箱。
+有卡密时先由 `redeem` 下载并解压；随后 `normalize` 同时读取解压目录和账户文本，按邮箱去重，生成 `normalized\sub2api-accounts.json` 和 `normalized\cockpit-accounts.json`。日志会列出兑换来源、账户文本来源、重复数和合并后的总数；这两个 JSON 是各自导入器的单独重跑输入。标准化要求每个账号有 `access_token` 和可识别的邮箱。
+
+兑换结果中有失效卡密时，已下载的账号和 `accounts.txt` 仍会继续合并导入。增量模式会暂缓本轮删除并保留未确认移除的旧账号，等下一次兑换结果完整后再处理；把失效卡密注释掉后，后续运行才会按增量规则清理对应账号。这个情况仍视为导入完成，运行记录会标记为 `success_with_redeem_warnings`。

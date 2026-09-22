@@ -348,6 +348,7 @@ def run(args: argparse.Namespace) -> int:
         write_json(pipeline_manifest, manifest)
         redeem_code = 0
         data_dir: Optional[Path] = None
+        deletion_blocked = False
         if has_codes:
             redeem_code = redeem_module.execute(
                 codes_file,
@@ -371,10 +372,13 @@ def run(args: argparse.Namespace) -> int:
             }
             if redeem_code == 2:
                 if args.incremental:
-                    raise PipelineError(
-                        "卡密结果包含失败项；增量模式已停止，避免把未下载账号误判为删除"
+                    deletion_blocked = True
+                    print(
+                        "[兑换] 结果包含失效或异常卡密；继续合并已下载账号和账户文本，"
+                        "本轮不执行删除。"
                     )
-                print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
+                else:
+                    print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
         elif codes_file is not None:
             redeem_module.save_result(result_file, [])
             print("[兑换] 卡密文件没有启用的卡密；跳过兑换，并检查上一轮账号删除。")
@@ -390,8 +394,19 @@ def run(args: argparse.Namespace) -> int:
             allow_empty=args.incremental and not has_codes,
         )
         manifest["normalized"] = normalized
+        manifest["deletion_blocked"] = deletion_blocked
         write_json(pipeline_manifest, manifest)
-        print(f"标准化完成：{normalized['accounts']} 个账号")
+        source_counts = normalized.get("source_counts", {})
+        redeem_accounts = int(source_counts.get("redeem", 0) or 0)
+        account_file_accounts = int(source_counts.get("accounts-file", 0) or 0)
+        overlap_accounts = int(source_counts.get("overlap", 0) or 0)
+        print(
+            "[流水线] 输入合并："
+            f"兑换来源 {redeem_accounts} 个，"
+            f"账户文本 {account_file_accounts} 个，"
+            f"重复 {overlap_accounts} 个，"
+            f"合并后 {normalized['accounts']} 个。"
+        )
 
         incremental_delta = None
         baseline_sub2api_ids: Dict[str, int] = {}
@@ -465,7 +480,13 @@ def run(args: argparse.Namespace) -> int:
                     manifest, pipeline_manifest, "sub2api", sub2api_code, "Sub2API 导入未完成"
                 )
             if args.incremental and incremental_delta is not None:
-                if incremental_delta.removed:
+                if deletion_blocked:
+                    if incremental_delta.removed:
+                        print(
+                            "[增量] 兑换存在失效或异常卡密，跳过 Sub2API 删除；"
+                            "待下次兑换结果完整后再处理移除账号。"
+                        )
+                elif incremental_delta.removed:
                     removed_ids = sub2api_module.resolve_account_ids(
                         sub2api_config,
                         incremental_delta.removed,
@@ -543,17 +564,34 @@ def run(args: argparse.Namespace) -> int:
             )
             managed_current_keys.update(baseline_sub2api_ids)
             managed_current_keys.update(summary_ids)
+            state_records = list(incremental_delta.current.values())
+            state_source_keys = dict(source_keys)
+            if deletion_blocked:
+                preserved = [
+                    (key, item)
+                    for key, item in incremental_delta.previous.items()
+                    if key not in incremental_delta.current
+                ]
+                if preserved:
+                    print(
+                        "[增量] 保留 "
+                        f"{len(preserved)} 个未确认移除账号，等待下次完整兑换结果。"
+                    )
+                state_records.extend(item for _, item in preserved)
+                managed_current_keys.update(key for key, _ in preserved)
+                for key, item in preserved:
+                    state_source_keys.setdefault(key, item.get("sources", []))
             state_value = incremental_module.build_state(
-                incremental_delta.current.values(),
+                state_records,
                 source_scope,
                 sub2api_ids,
                 managed_keys=managed_current_keys,
-                source_keys=source_keys,
+                source_keys=state_source_keys,
             )
             pending_file = runtime_dir / "results" / "cockpit-pending-deletions.txt"
             pending_count = incremental_module.update_pending_deletions(
                 pending_file,
-                incremental_delta.removed,
+                [] if deletion_blocked else incremental_delta.removed,
                 incremental_delta.current.values(),
             )
             if pending_count:
@@ -564,16 +602,34 @@ def run(args: argparse.Namespace) -> int:
             incremental_module.write_state(incremental_state_file, state_value)
             print(f"[增量] 快照已更新：{incremental_state_file}")
 
-        final_code = 2 if redeem_code == 2 else 0
+        redeem_warning = redeem_code == 2
+        final_code = (
+            0
+            if args.incremental and deletion_blocked
+            else 2
+            if redeem_warning
+            else 0
+        )
         manifest.update(
             {
-                "status": "partial" if final_code == 2 else "success",
+                "status": (
+                    "success_with_redeem_warnings"
+                    if redeem_warning and final_code == 0
+                    else "partial"
+                    if final_code == 2
+                    else "success"
+                ),
                 "finished_at": datetime.now().isoformat(timespec="seconds"),
                 "exit_code": final_code,
             }
         )
         write_json(pipeline_manifest, manifest)
-        if final_code == 2:
+        if redeem_warning and final_code == 0:
+            print(
+                "流水线完成：已继续导入；兑换结果含异常，删除已暂缓。"
+                f"运行记录：{pipeline_manifest}"
+            )
+        elif final_code == 2:
             print(f"流水线完成，但有卡密失败；运行记录：{pipeline_manifest}")
         else:
             print(f"流水线完成。运行记录：{pipeline_manifest}")

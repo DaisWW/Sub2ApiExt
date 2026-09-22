@@ -715,6 +715,11 @@ def process(
         if isinstance(raw_rows, list)
         else []
     )
+    normal_count = sum(1 for row in rows if row.get("ok") is True)
+    print(
+        "[兑换] 结果整理："
+        f"共 {len(rows)} 条，正常 {normal_count}，异常 {len(rows) - normal_count}。"
+    )
     show_results(rows)
     save_result(result_file, rows)
     print(f"[兑换] 结果已覆盖写入：{shown(result_file)}")

@@ -149,6 +149,10 @@ class IncrementalOwnershipTests(unittest.TestCase):
             metadata = normalize.normalize(downloaded, root / "out", account_text)
             self.assertEqual(metadata["accounts"], 2)
             self.assertEqual(
+                metadata["source_counts"],
+                {"redeem": 1, "accounts-file": 2, "overlap": 1},
+            )
+            self.assertEqual(
                 metadata["source_keys"]["email:same@example.com"],
                 ["accounts-file", "redeem"],
             )
@@ -156,6 +160,97 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 metadata["source_keys"]["email:direct@example.com"],
                 ["accounts-file"],
             )
+
+    def test_partial_redeem_merges_sources_and_defers_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            codes.write_text("PLUS-VALID\nPLUS-EXPIRED\n", encoding="utf-8")
+            accounts = root / "accounts.txt"
+            accounts.write_text(json.dumps(record("direct@example.com")), encoding="utf-8")
+            scope = incremental.input_scope(codes, accounts)
+            state_path = root / "cache" / "state" / "incremental.json"
+            incremental.write_state(
+                state_path,
+                incremental.build_state(
+                    [record("old@example.com")],
+                    scope,
+                    {"email:old@example.com": 7},
+                    source_keys={"email:old@example.com": ["redeem"]},
+                ),
+            )
+            imported: list[str] = []
+            cockpit_imported: list[str] = []
+
+            def fake_redeem(_input, **kwargs):
+                data_dir = kwargs["run_dir"] / "data"
+                data_dir.mkdir(parents=True)
+                data_dir.joinpath("redeemed.json").write_text(
+                    json.dumps(record("redeemed@example.com")), encoding="utf-8"
+                )
+                manifest_file = kwargs["manifest_file"]
+                manifest_file.parent.mkdir(parents=True, exist_ok=True)
+                manifest_file.write_text(
+                    json.dumps(
+                        {
+                            "data_dir": str(data_dir),
+                            "total": 2,
+                            "success": 1,
+                            "failed": 1,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 2
+
+            def fake_sub2api(input_path, _config, *, summary_file=None, **_kwargs):
+                payload = json.loads(input_path.read_text(encoding="utf-8"))
+                imported.extend(
+                    item["credentials"]["email"] for item in payload["accounts"]
+                )
+                sub2api.write_managed_summary(
+                    summary_file,
+                    {
+                        "email:redeemed@example.com": 8,
+                        "email:direct@example.com": 9,
+                    },
+                )
+                return 0
+
+            def fake_cockpit(input_path, **_kwargs):
+                cockpit_imported.extend(
+                    item["email"]
+                    for item in json.loads(input_path.read_text(encoding="utf-8"))
+                )
+                return 0
+
+            with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
+                pipeline.redeem_module, "execute", side_effect=fake_redeem
+            ), patch.object(
+                pipeline.sub2api_module, "execute", side_effect=fake_sub2api
+            ), patch.object(
+                pipeline.cockpit_module, "execute", side_effect=fake_cockpit
+            ):
+                self.assertEqual(
+                    pipeline.run(self.pipeline_args(root, codes=codes, accounts=accounts)),
+                    0,
+                )
+
+            self.assertEqual(
+                set(imported), {"redeemed@example.com", "direct@example.com"}
+            )
+            self.assertEqual(set(cockpit_imported), set(imported))
+            state = incremental.read_state(state_path)
+            self.assertEqual(
+                set(state["accounts"]),
+                {
+                    "email:old@example.com",
+                    "email:redeemed@example.com",
+                    "email:direct@example.com",
+                },
+            )
+            pending = root / "cache" / "results" / "cockpit-pending-deletions.txt"
+            self.assertNotIn("old@example.com", pending.read_text(encoding="utf-8-sig"))
 
     def test_manual_account_is_never_updated_or_recorded(self):
         with tempfile.TemporaryDirectory() as directory:

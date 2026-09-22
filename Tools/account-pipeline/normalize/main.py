@@ -375,6 +375,13 @@ def normalize(
         "version": 1,
         "source_files": len(files),
         "accounts": len(records),
+        "source_counts": {
+            "redeem": sum("redeem" in values for values in sources.values()),
+            "accounts-file": sum(
+                "accounts-file" in values for values in sources.values()
+            ),
+            "overlap": sum(len(values) > 1 for values in sources.values()),
+        },
         "sub2api_input": str(sub2api_path.resolve()),
         "cockpit_input": str(cockpit_path.resolve()),
         "source_keys": {
@@ -400,7 +407,14 @@ def main() -> int:
     except (NormalizeError, OSError, ValueError, TypeError, KeyError) as exc:
         print(f"标准化模块失败：{exc}", file=sys.stderr)
         return 1
-    print(f"已标准化 {metadata['accounts']} 个账号")
+    counts = metadata["source_counts"]
+    print(
+        "输入合并："
+        f"兑换来源 {counts['redeem']} 个，"
+        f"账户文本 {counts['accounts-file']} 个，"
+        f"重复 {counts['overlap']} 个，"
+        f"合并后 {metadata['accounts']} 个。"
+    )
     print(f"Sub2API 输入：{metadata['sub2api_input']}")
     print(f"Cockpit 输入：{metadata['cockpit_input']}")
     return 0
