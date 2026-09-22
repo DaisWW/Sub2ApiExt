@@ -56,6 +56,25 @@ STATUS_NAMES = {
     "quota_full": "额度已满",
 }
 
+CHECK_PHASE_NAMES = {
+    "check",
+    "checking",
+    "detect",
+    "detection",
+    "repair",
+    "repairing",
+    "recover",
+    "recovery",
+    "verify",
+    "verification",
+}
+EXTRACT_PHASE_NAMES = {
+    "download",
+    "extract",
+    "extraction",
+    "sub2api",
+}
+
 
 class RedeemError(RuntimeError):
     pass
@@ -227,10 +246,14 @@ class RedeemClient:
         ) as response:
             event = ""
             data = []
-            last_phase = None
+            stage_number = 0
+            stage_kind = None
+            stage_label = None
+            stage_total = "?"
             last_progress = None
             last_done = None
-            inferred_phase = None
+            last_total = None
+            unknown_phases = set()
             while True:
                 line = response.readline()
                 if not line:
@@ -246,51 +269,97 @@ class RedeemClient:
                     except json.JSONDecodeError as exc:
                         raise RedeemError("兑换站返回了无效任务结果") from exc
                     data = []
+                    if not isinstance(payload, dict):
+                        raise RedeemError("兑换站返回了无效任务事件")
                     if event == "progress":
-                        phase = str(payload.get("phase") or "").strip().lower()
-                        if action == "check" or phase == "check":
-                            phase_key = "check"
-                            phase_label = "账号检测"
-                        elif phase == "extract":
-                            phase_key = "extract"
-                            phase_label = "账号提取"
-                        elif not phase and inferred_phase == "followup":
-                            phase_key = "followup"
-                            phase_label = "后续检测"
-                        else:
-                            phase_key = phase or "extract"
-                            phase_label = "账号处理"
                         done = payload.get("done", "?")
                         total = payload.get("total", "?")
-                        try:
-                            done_number = int(done)
-                        except (TypeError, ValueError):
-                            done_number = None
-                        if (
-                            not phase
+                        done_number = progress_number(done)
+                        total_number = progress_number(total)
+                        raw_phase = field(payload.get("phase")).lower()
+                        declared_kind = progress_phase(raw_phase)
+                        if raw_phase and declared_kind is None and raw_phase not in unknown_phases:
+                            print(f"[兑换] 兑换站返回未识别阶段“{raw_phase}”，将按进度自动判断。")
+                            unknown_phases.add(raw_phase)
+
+                        reset = (
+                            done_number is not None
                             and last_done is not None
-                            and done_number is not None
                             and done_number < last_done
-                        ):
-                            phase_key = "followup"
-                            phase_label = "后续检测"
-                            inferred_phase = "followup"
-                        elif phase:
-                            inferred_phase = None
+                        )
+                        completed_reset = (
+                            done_number is not None
+                            and total_number is not None
+                            and last_done is not None
+                            and last_total is not None
+                            and last_done >= last_total
+                            and done_number <= 1
+                        )
+                        kind_changed = (
+                            action != "check"
+                            and declared_kind is not None
+                            and stage_kind is not None
+                            and declared_kind != stage_kind
+                        )
+                        new_stage = stage_number == 0 or reset or completed_reset or kind_changed
+                        if new_stage:
+                            if stage_number:
+                                print(
+                                    f"[兑换] 阶段 {stage_number} 完成："
+                                    f"{last_done if last_done is not None else '?'}/"
+                                    f"{stage_total}。"
+                                )
+                            stage_number += 1
+                            if action == "check":
+                                stage_kind = "check"
+                            elif declared_kind is not None:
+                                stage_kind = declared_kind
+                            elif stage_number == 1:
+                                stage_kind = "extract"
+                            else:
+                                stage_kind = "check"
+                            if stage_kind == "check":
+                                stage_label = "账号检测"
+                            elif stage_number > 1 and (reset or completed_reset):
+                                stage_label = "后续检测"
+                            else:
+                                stage_label = "账号提取"
+                            stage_total = str(total)
+                            reason = ""
+                            if stage_number > 1 and (reset or completed_reset):
+                                reason = "（服务进度重新计数）"
+                            print(
+                                f"[兑换] 阶段 {stage_number}：{stage_label}"
+                                f"（共 {stage_total} 个）{reason}"
+                            )
+
+                        phase_key = (stage_number, stage_kind)
                         code = field(payload.get("code"))
                         progress = (phase_key, str(done), str(total), code)
                         if progress == last_progress:
                             event = ""
                             continue
-                        if phase_key != last_phase:
-                            print(f"[兑换] 开始{phase_label}阶段（共 {total} 个）")
-                            last_phase = phase_key
                         suffix = f"；当前卡密：{code}" if code else ""
-                        print(f"[兑换][{phase_label}] 进度：{done}/{total}{suffix}")
+                        print(
+                            f"[兑换][阶段 {stage_number}][{stage_label}] "
+                            f"进度：{done}/{total}{suffix}"
+                        )
                         last_progress = progress
-                        if done_number is not None:
-                            last_done = done_number
+                        last_done = done_number
+                        last_total = total_number
                     elif event == "done":
+                        if stage_number:
+                            print(
+                                f"[兑换] 阶段 {stage_number} 完成："
+                                f"{last_done if last_done is not None else '?'}/"
+                                f"{stage_total}。"
+                            )
+                        summary = []
+                        for key, label in (("success", "成功"), ("fail", "失败")):
+                            if key in payload:
+                                summary.append(f"{label} {payload[key]}")
+                        suffix = f"（{'，'.join(summary)}）" if summary else ""
+                        print(f"[兑换] 兑换站任务已完成{suffix}。")
                         return payload
                     elif event == "fail":
                         raise RedeemError(str(payload.get("message") or "任务失败"))
@@ -370,6 +439,29 @@ def field(value) -> str:
     return re.sub(r"\\([@_])", r"\1", text)
 
 
+def progress_phase(value) -> str | None:
+    """把兑换站可能返回的阶段名称归一化。"""
+    phase = field(value).lower().replace("-", "_").replace(" ", "_")
+    if not phase:
+        return None
+    if phase in CHECK_PHASE_NAMES or any(
+        token in phase for token in ("check", "detect", "repair", "recover", "verify")
+    ):
+        return "check"
+    if phase in EXTRACT_PHASE_NAMES or any(
+        token in phase for token in ("extract", "download")
+    ):
+        return "extract"
+    return None
+
+
+def progress_number(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def status(row: dict) -> str:
     if row.get("ok") is True:
         return "正常"
@@ -404,12 +496,13 @@ def save_result(path: Path, rows: list[dict]) -> None:
 
 
 def display_width(value: str) -> int:
-    width = 0
-    for char in value:
-        if unicodedata.combining(char):
-            continue
-        width += 2 if unicodedata.east_asian_width(char) in "WFA" else 1
-    return width
+    return sum(character_width(char) for char in value)
+
+
+def character_width(value: str) -> int:
+    if unicodedata.combining(value):
+        return 0
+    return 2 if unicodedata.east_asian_width(value) in "WFA" else 1
 
 
 def fit_column(value: str, width: int) -> str:
@@ -420,9 +513,7 @@ def fit_column(value: str, width: int) -> str:
     result = []
     used = 0
     for char in value:
-        char_width = 0 if unicodedata.combining(char) else (
-            2 if unicodedata.east_asian_width(char) in "WFA" else 1
-        )
+        char_width = character_width(char)
         if used + char_width > width - 1:
             break
         result.append(char)
@@ -430,6 +521,38 @@ def fit_column(value: str, width: int) -> str:
     result.append("…")
     text = "".join(result)
     return text + " " * max(0, width - display_width(text))
+
+
+def wrap_column(value: str, width: int) -> list[str]:
+    """按终端显示宽度换行，避免说明列撑开整张表。"""
+    if width <= 1:
+        return [fit_column(value, width)]
+    lines = []
+    remaining = value
+    while display_width(remaining) > width:
+        used = 0
+        end = 0
+        for index, char in enumerate(remaining):
+            char_width = character_width(char)
+            if used + char_width > width:
+                break
+            used += char_width
+            end = index + 1
+        if end == 0:
+            end = 1
+        break_at = -1
+        for index in range(end - 1, -1, -1):
+            if remaining[index].isspace():
+                break_at = index
+                break
+        if break_at > 0:
+            lines.append(remaining[:break_at].rstrip())
+            remaining = remaining[break_at:].lstrip()
+        else:
+            lines.append(remaining[:end])
+            remaining = remaining[end:]
+    lines.append(remaining)
+    return lines
 
 
 def result_rows(rows: list[dict]) -> list[list[str]]:
@@ -446,29 +569,68 @@ def result_rows(rows: list[dict]) -> list[list[str]]:
     ]
 
 
-def show_results(rows: list[dict]) -> None:
-    print(f"\n检测结果（{len(rows)} 个）：")
+def result_widths(values: list[list[str]], terminal_columns: int | None) -> list[int]:
     headers = list(RESULT_COLUMNS[:6])
-    values = result_rows(rows)
     maximums = (22, 36, 19, 12, 8, 48)
+    minimums = (16, 20, 19, 12, 6, 18)
     widths = []
     for index, header in enumerate(headers):
         width = display_width(header)
         for values_row in values:
             width = max(width, display_width(values_row[index]))
-        widths.append(min(max(width, 1), maximums[index]))
+        widths.append(min(max(width, minimums[index]), maximums[index]))
+
+    separator_width = 3 * (len(headers) - 1)
+    fallback_width = shutil.get_terminal_size((120, 24)).columns
+    budget = max(
+        sum(minimums) + separator_width,
+        (terminal_columns or fallback_width) - 2,
+    )
+    shrink_order = (5, 1, 0, 3, 4, 2)
+    excess = sum(widths) + separator_width - budget
+    for index in shrink_order:
+        if excess <= 0:
+            break
+        reduction = min(widths[index] - minimums[index], excess)
+        widths[index] -= reduction
+        excess -= reduction
+    return widths
+
+
+def format_results(rows: list[dict], terminal_columns: int | None = None) -> str:
+    values = result_rows(rows)
+    headers = list(RESULT_COLUMNS[:6])
+    widths = result_widths(values, terminal_columns)
 
     def render(values_row: list[str]) -> str:
         return " | ".join(
             fit_column(value, widths[index]) for index, value in enumerate(values_row)
         )
 
-    print(render(headers))
-    print("-+-".join("-" * width for width in widths))
+    lines = [
+        f"检测结果（{len(rows)} 个）：",
+        render(headers),
+        "-+-".join("-" * width for width in widths),
+    ]
     for values_row in values:
-        print(render(values_row))
+        wrapped = [
+            wrap_column(value, widths[index]) if index in (0, 1, 5) else [value]
+            for index, value in enumerate(values_row)
+        ]
+        for line_number in range(max(len(column) for column in wrapped)):
+            row = [
+                column[line_number] if line_number < len(column) else ""
+                for column in wrapped
+            ]
+            lines.append(render(row))
     normal = sum(1 for row in rows if row.get("ok") is True)
-    print(f"结果汇总：正常 {normal}，异常 {len(rows) - normal}")
+    lines.append(f"结果汇总：正常 {normal}，异常 {len(rows) - normal}")
+    return "\n".join(lines)
+
+
+def show_results(rows: list[dict], terminal_columns: int | None = None) -> None:
+    print()
+    print(format_results(rows, terminal_columns))
 
 
 def write_manifest(
