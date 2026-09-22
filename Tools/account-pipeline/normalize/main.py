@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
 MAX_JSON_BYTES = 32 * 1024 * 1024
@@ -115,12 +115,14 @@ def parse_documents(text: str, label: str) -> List[Any]:
     return values
 
 
-def read_json(path: Path, label: str = "JSON 文件") -> List[Any]:
+def read_json(
+    path: Path, label: str = "JSON 文件", *, allow_empty: bool = False
+) -> List[Any]:
     try:
         raw = path.read_bytes()
     except OSError as exc:
         raise NormalizeError(f"读取{label}失败：{path}") from exc
-    if not raw:
+    if not raw and not allow_empty:
         raise NormalizeError(f"{label}为空：{path}")
     if len(raw) > MAX_JSON_BYTES:
         raise NormalizeError(
@@ -130,6 +132,8 @@ def read_json(path: Path, label: str = "JSON 文件") -> List[Any]:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
         raise NormalizeError(f"{label}不是有效 UTF-8 JSON：{path}") from exc
+    if not text.strip() and allow_empty:
+        return []
     return parse_documents(text, f"{label} {path} ")
 
 
@@ -248,20 +252,35 @@ def canonical_record(record: Dict[str, Any], number: int) -> Dict[str, Any]:
     return normalized
 
 
-def deduplicate(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def record_key(record: Dict[str, Any]) -> str:
+    email = text_value(record.get("email"))
+    if email:
+        return "email:" + email.casefold()
+    account_id = text_value(record.get("account_id"))
+    if account_id:
+        return "id:" + account_id.casefold()
+    raise NormalizeError("标准化账号缺少 email/account_id，无法建立来源标识")
+
+
+def deduplicate_with_sources(
+    records: Iterable[Tuple[Dict[str, Any], str]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Set[str]]]:
     result: List[Dict[str, Any]] = []
     seen: Set[str] = set()
-    for record in records:
-        account_id = text_value(record.get("account_id"))
-        email = text_value(record.get("email"))
-        if account_id:
-            key = "id:" + account_id.lower()
-        else:
-            key = "email:" + email.lower()
+    sources: Dict[str, Set[str]] = {}
+    for record, source in records:
+        key = record_key(record)
+        sources.setdefault(key, set()).add(source)
         if key in seen:
             continue
         seen.add(key)
         result.append(record)
+    return result, sources
+
+
+def deduplicate(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """保留模块原有的去重入口，来源信息由新入口额外返回。"""
+    result, _ = deduplicate_with_sources((record, "unknown") for record in records)
     return result
 
 
@@ -289,11 +308,13 @@ def records_from_values(values: Iterable[Any]) -> List[Dict[str, Any]]:
     return records
 
 
-def validate_input_file(path: Path) -> None:
+def validate_input_file(path: Path, *, allow_empty: bool = False) -> None:
     """校验独立账户文本，不访问网络也不写输出。"""
-    values = read_json(path.expanduser().resolve(), "账户文本")
+    values = read_json(
+        path.expanduser().resolve(), "账户文本", allow_empty=allow_empty
+    )
     raw_records = records_from_values(values)
-    if not raw_records:
+    if not raw_records and not allow_empty:
         raise NormalizeError(f"账户文本中没有找到包含 access_token 的账号：{path}")
     if len(raw_records) > MAX_ACCOUNTS:
         raise NormalizeError(f"账户文本中的账号数量超过 {MAX_ACCOUNTS} 个")
@@ -305,31 +326,42 @@ def normalize(
     data_dir: Optional[Path],
     output_dir: Path,
     account_file: Optional[Path] = None,
+    *,
+    allow_empty: bool = False,
 ) -> Dict[str, Any]:
     files = (
         source_files(data_dir, allow_empty=account_file is not None)
         if data_dir is not None
         else []
     )
-    if not files and account_file is None:
+    if not files and account_file is None and not allow_empty:
         raise NormalizeError("没有提供兑换解压目录或独立账户文本")
-    raw_records: List[Dict[str, Any]] = []
+    source_records: List[Tuple[Dict[str, Any], str]] = []
     for path in files:
-        raw_records.extend(records_from_values(read_json(path, "下载文件")))
+        source_records.extend(
+            (record, "redeem")
+            for record in records_from_values(read_json(path, "下载文件"))
+        )
     account_path: Optional[Path] = None
     if account_file is not None:
         account_path = account_file.expanduser().resolve()
-        raw_records.extend(records_from_values(read_json(account_path, "账户文本")))
-    if not raw_records:
+        source_records.extend(
+            (record, "accounts-file")
+            for record in records_from_values(
+                read_json(account_path, "账户文本", allow_empty=True)
+            )
+        )
+    if not source_records and not allow_empty:
         raise NormalizeError("输入中没有找到包含 access_token 的 Codex 账号")
-    if len(raw_records) > MAX_ACCOUNTS:
+    if len(source_records) > MAX_ACCOUNTS:
         raise NormalizeError(f"账号数量超过 {MAX_ACCOUNTS} 个")
 
-    records = deduplicate(
-        canonical_record(record, index)
-        for index, record in enumerate(raw_records, start=1)
+    canonical_sources = (
+        (canonical_record(record, index), source)
+        for index, (record, source) in enumerate(source_records, start=1)
     )
-    if not records:
+    records, sources = deduplicate_with_sources(canonical_sources)
+    if not records and not allow_empty:
         raise NormalizeError("标准化后没有可导入账号")
 
     sub2api_accounts = [
@@ -351,6 +383,9 @@ def normalize(
         "accounts": len(records),
         "sub2api_input": str(sub2api_path.resolve()),
         "cockpit_input": str(cockpit_path.resolve()),
+        "source_keys": {
+            key: sorted(values) for key, values in sorted(sources.items())
+        },
     }
     if account_path is not None:
         metadata["account_file"] = str(account_path)

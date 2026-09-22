@@ -177,15 +177,21 @@ def validate_layout(
     codes_file: Optional[Path],
     accounts_file: Optional[Path],
     sub2api_config: Optional[Path],
-) -> None:
+    *,
+    incremental: bool = False,
+) -> bool:
     if sys.version_info < (3, 8):
         raise PipelineError("需要 Python 3.8 或更高版本")
+    has_codes = False
     if codes_file is not None:
-        redeem_module.validate(codes_file)
+        has_codes = bool(
+            redeem_module.read_codes(codes_file, allow_empty=incremental)
+        )
     if accounts_file is not None:
-        normalize_module.validate_input_file(accounts_file)
+        normalize_module.validate_input_file(accounts_file, allow_empty=True)
     if sub2api_config is not None:
         sub2api_module.validate_config(sub2api_config)
+    return has_codes
 
 
 def read_redeem_manifest(path: Path, fallback_data_dir: Path) -> Dict[str, Any]:
@@ -297,7 +303,9 @@ def run(args: argparse.Namespace) -> int:
     if not 10 <= wait_seconds <= 300:
         raise PipelineError("Cockpit 等待时间必须在 10 到 300 秒之间")
 
-    validate_layout(codes_file, accounts_file, sub2api_config)
+    has_codes = validate_layout(
+        codes_file, accounts_file, sub2api_config, incremental=args.incremental
+    )
     if codes_file is not None:
         print(f"卡密输入：{codes_file}")
     else:
@@ -335,12 +343,12 @@ def run(args: argparse.Namespace) -> int:
         "skip_cockpit": bool(args.skip_cockpit),
         "incremental": bool(args.incremental),
     }
-    stage = "redeem" if codes_file is not None else "normalize"
+    stage = "redeem" if has_codes else "normalize"
     try:
         write_json(pipeline_manifest, manifest)
         redeem_code = 0
         data_dir: Optional[Path] = None
-        if codes_file is not None:
+        if has_codes:
             redeem_code = redeem_module.execute(
                 codes_file,
                 action="sub2api",
@@ -367,13 +375,19 @@ def run(args: argparse.Namespace) -> int:
                         "卡密结果包含失败项；增量模式已停止，避免把未下载账号误判为删除"
                     )
                 print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
+        elif codes_file is not None:
+            redeem_module.save_result(result_file, [])
+            print("[兑换] 卡密文件没有启用的卡密；跳过兑换，并检查上一轮账号删除。")
         else:
             print("未提供卡密，跳过兑换阶段。")
 
         stage = "normalize"
         print("[流水线] 开始标准化账号数据……")
         normalized = normalize_module.normalize(
-            data_dir, normalized_dir, accounts_file
+            data_dir,
+            normalized_dir,
+            accounts_file,
+            allow_empty=args.incremental and not has_codes,
         )
         manifest["normalized"] = normalized
         write_json(pipeline_manifest, manifest)
@@ -381,6 +395,7 @@ def run(args: argparse.Namespace) -> int:
 
         incremental_delta = None
         baseline_sub2api_ids: Dict[str, int] = {}
+        source_keys = normalized["source_keys"]
         source_scope = incremental_module.input_scope(codes_file, accounts_file)
         if args.incremental:
             records = normalized_records(Path(normalized["cockpit_input"]))
@@ -395,14 +410,21 @@ def run(args: argparse.Namespace) -> int:
             if is_baseline:
                 stage = "incremental-baseline"
                 baseline_sub2api_ids = sub2api_module.resolve_account_ids(
-                    sub2api_config, records
+                    sub2api_config, records, require_managed=True
                 )
+                baseline_keys = set(baseline_sub2api_ids)
+                incremental_delta.current = {
+                    key: record
+                    for key, record in incremental_delta.current.items()
+                    if key in baseline_keys
+                }
                 incremental_delta.added = []
                 incremental_delta.removed = []
-                incremental_delta.unchanged = len(records)
+                incremental_delta.unchanged = len(incremental_delta.current)
                 print(
-                    "[增量] 首次运行仅建立基线，不导入或删除账号；"
-                    f"已匹配 {len(baseline_sub2api_ids)} 个 Sub2API 账户。"
+                    "[增量] 首次运行仅建立安全基线，不导入或删除账号；"
+                    f"已匹配 {len(baseline_sub2api_ids)} 个工具维护的 Sub2API 账户，"
+                    f"忽略 {len(records) - len(baseline_sub2api_ids)} 个未带归属标记的账户。"
                 )
             incremental_files = incremental_module.write_delta(
                 incremental_dir, incremental_delta
@@ -434,7 +456,7 @@ def run(args: argparse.Namespace) -> int:
                 sub2api_code = sub2api_module.execute(
                     Path(normalized["sub2api_input"]),
                     sub2api_config,
-                    summary_file=sub2api_summary_file if args.incremental else None,
+                    summary_file=sub2api_summary_file,
                 )
             manifest["sub2api_exit_code"] = sub2api_code
             write_json(pipeline_manifest, manifest)
@@ -444,15 +466,27 @@ def run(args: argparse.Namespace) -> int:
                 )
             if args.incremental and incremental_delta is not None:
                 if incremental_delta.removed:
-                    delete_ids = set(
-                        sub2api_module.resolve_account_ids(
-                            sub2api_config,
-                            incremental_delta.removed,
-                            require_stored_id=True,
-                        ).values()
+                    removed_ids = sub2api_module.resolve_account_ids(
+                        sub2api_config,
+                        incremental_delta.removed,
+                        require_stored_id=True,
+                        require_managed=True,
                     )
+                    active_ids = {
+                        item.get("sub2api_id")
+                        for key, item in incremental_delta.previous.items()
+                        if key in incremental_delta.current
+                    }
+                    active_ids.update(managed_sub2api_ids(sub2api_summary_file).values())
+                    delete_ids = set(removed_ids.values()) - active_ids
+                    if len(delete_ids) != len(set(removed_ids.values())):
+                        print("[增量] 待删除账号仍被当前输入引用，已保留对应 Sub2API 账户。")
                     if delete_ids:
-                        sub2api_module.delete_account_ids(sub2api_config, delete_ids)
+                        sub2api_module.delete_account_ids(
+                            sub2api_config,
+                            delete_ids,
+                            expected_records=incremental_delta.removed,
+                        )
                     else:
                         print(
                             "[增量] Sub2API 没有找到可验证的待删除账号；"
@@ -463,13 +497,27 @@ def run(args: argparse.Namespace) -> int:
 
         if not args.skip_cockpit:
             stage = "cockpit"
-            if args.incremental and incremental_delta is not None and not incremental_delta.added:
-                print("[增量] Cockpit 没有新增账号，跳过导入。")
+            cockpit_input = Path(normalized["cockpit_input"])
+            cockpit_records = normalized_records(cockpit_input)
+            if not args.skip_sub2api and cockpit_records:
+                owned_ids = managed_sub2api_ids(sub2api_summary_file)
+                cockpit_records = [
+                    record
+                    for record in cockpit_records
+                    if incremental_module.account_key(record) in owned_ids
+                ]
+                managed_cockpit_input = cockpit_input.with_name(
+                    "cockpit-managed-accounts.json"
+                )
+                incremental_module.write_json(managed_cockpit_input, cockpit_records)
+                cockpit_input = managed_cockpit_input
+            if not cockpit_records:
+                print("[流水线] 没有本工具可导入 Cockpit 的新增账号，跳过导入。")
                 cockpit_code = 0
             else:
                 print("[流水线] 开始导入 Cockpit（可能需要较长时间）……")
                 cockpit_code = cockpit_module.execute(
-                    Path(normalized["cockpit_input"]), wait_seconds=wait_seconds
+                    cockpit_input, wait_seconds=wait_seconds
                 )
             manifest["cockpit_exit_code"] = cockpit_code
             write_json(pipeline_manifest, manifest)
@@ -488,9 +536,19 @@ def run(args: argparse.Namespace) -> int:
                 if item.get("sub2api_id") is not None
             }
             sub2api_ids.update(baseline_sub2api_ids)
-            sub2api_ids.update(managed_sub2api_ids(sub2api_summary_file))
+            summary_ids = managed_sub2api_ids(sub2api_summary_file)
+            sub2api_ids.update(summary_ids)
+            managed_current_keys = (
+                set(incremental_delta.previous) & set(incremental_delta.current)
+            )
+            managed_current_keys.update(baseline_sub2api_ids)
+            managed_current_keys.update(summary_ids)
             state_value = incremental_module.build_state(
-                incremental_delta.current.values(), source_scope, sub2api_ids
+                incremental_delta.current.values(),
+                source_scope,
+                sub2api_ids,
+                managed_keys=managed_current_keys,
+                source_keys=source_keys,
             )
             pending_file = runtime_dir / "results" / "cockpit-pending-deletions.txt"
             pending_count = incremental_module.update_pending_deletions(

@@ -38,7 +38,11 @@ incremental.bat [拖入卡密或账户文本]
 
 ## 增量同步
 
-`incremental.bat` 固定读取与完整流程相同的输入。第一次运行只建立基线，并只读查询当前 Sub2API 账号 ID，不导入或删除；以后运行会输出新增、删除、跳过数量。新增账号按“Sub2API 后 Cockpit”的顺序导入，已有账号完全跳过。Sub2API 只删除快照明确保存了数据库 ID 且本次输入已经不存在的账号，不按邮箱猜测删除。
+`incremental.bat` 固定读取与完整流程相同的输入。第一次运行只建立安全基线，并只读查询当前带有本工具归属标记的 Sub2API 账号，不导入或删除；以后运行会输出新增、删除、跳过数量。新增账号按“Sub2API 后 Cockpit”的顺序导入，未变化账号跳过。Sub2API 只删除快照明确保存了数据库 ID、当前输入已经不存在、并且删除前仍带本工具归属标记且标识一致的账号，不按邮箱猜测删除。
+
+Sub2API 导入成功的账号会在 `extra.account_pipeline_managed` 写入固定值 `account-pipeline-v1`。同邮箱但没有这个标记的中转账户视为手动账户，脚本会显示“跳过手动账户”，不会更新、写入增量快照或删除。兑换来源和 `accounts.txt` 来源都属于脚本主动导入范围；修改输入文件范围时会重新建立安全基线，不会据此批量删除旧账号。旧版没有归属标记的增量快照也只会触发安全基线。
+
+把卡密行改成 `# PLUS-...` 后，它不再参与本轮输入；下一次增量运行会清理对应的工具维护账号。即使所有卡密都被注释，也会跳过兑换并继续计算删除；完全空白的卡密文件仍会报错，防止误清理。若同一个账号仍在 `accounts.txt` 中，或其 Sub2API ID 仍被其他当前输入引用，则会保留。没有归属标记的账号也不会发送到 Cockpit 自动导入。
 
 Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。脚本会把待删除邮箱累计写入 `cache\results\cockpit-pending-deletions.txt`，供你在 Cockpit Tools 中删除，不会直接修改其加密存储。为保证一个快照代表两个目标的同一状态，增量模式不接受 `--skip-sub2api` 或 `--skip-cockpit`。
 
@@ -73,7 +77,7 @@ Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。
    └─ cockpit-pending-deletions.txt  Cockpit 待手动删除账号
 ```
 
-manifest 只保存路径、数量、任务号和阶段状态，不保存卡密、Token、密码或账号凭据。`normalized` 下的 JSON 含凭据，只保存在本机运行目录。
+manifest 保存路径、数量、任务号、阶段状态和账号来源标识（邮箱），不保存卡密、Token、密码或账号凭据。`normalized` 下的 JSON 含凭据，只保存在本机运行目录。
 
 缓存和过渡文件的实际位置如下：
 
@@ -96,4 +100,4 @@ manifest 只保存路径、数量、任务号和阶段状态，不保存卡密�
 
 主流程有两个独立外部输入：`input\redeem-codes.txt` 保存卡密，`input\accounts.txt` 保存已有账户 JSON 文本。账户文本中的每个对象必须是完整 JSON，但对象之间可以空行；支持单个对象、数组、JSONL 和连续对象。截图中常见的 `type: "oauth"` 且 `platform: "openai"` 会统一转换为 `type: "codex"`。
 
-有卡密时先由 `redeem` 下载并解压；随后 `normalize` 同时读取解压目录和账户文本，按账号 ID 或邮箱去重，生成 `normalized\sub2api-accounts.json` 和 `normalized\cockpit-accounts.json`。这两个 JSON 是各自导入器的单独重跑输入。标准化要求每个账号有 `access_token` 和可识别的邮箱。
+有卡密时先由 `redeem` 下载并解压；随后 `normalize` 同时读取解压目录和账户文本，按邮箱去重，生成 `normalized\sub2api-accounts.json` 和 `normalized\cockpit-accounts.json`。这两个 JSON 是各自导入器的单独重跑输入。标准化要求每个账号有 `access_token` 和可识别的邮箱。

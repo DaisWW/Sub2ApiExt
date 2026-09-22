@@ -82,7 +82,7 @@ def shown(path: Path) -> str:
     return str(path.resolve())
 
 
-def read_codes(path: Path) -> list[str]:
+def read_codes(path: Path, *, allow_empty: bool = False) -> list[str]:
     if not path.is_file():
         raise RedeemError(f"找不到卡密文件：{shown(path)}")
     try:
@@ -109,7 +109,10 @@ def read_codes(path: Path) -> list[str]:
         if any(char.isspace() for char in code):
             raise RedeemError(f"第 {number} 行包含空格；请一行只填写一个卡密")
         codes.append(code)
-    if not codes:
+    if not codes and (
+        not allow_empty
+        or not any(line.lstrip().startswith("#") for line in text.splitlines())
+    ):
         raise RedeemError(f"卡密文件没有可用内容：{shown(path)}")
     if len(codes) > MAX_CODES:
         raise RedeemError(f"一次最多支持 {MAX_CODES} 个卡密")

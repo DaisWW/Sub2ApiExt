@@ -46,12 +46,17 @@ def input_scope(codes_file: Optional[Path], accounts_file: Optional[Path]) -> Di
 
 def read_state(path: Path) -> Dict[str, Any]:
     if not path.is_file():
-        return {"version": 1, "scope": None, "accounts": {}}
+        return {"version": 2, "scope": None, "accounts": {}}
     try:
         value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise IncrementalError(f"增量快照无法读取：{path}") from exc
-    if not isinstance(value, dict) or value.get("version") != 1:
+    if not isinstance(value, dict):
+        raise IncrementalError(f"增量快照格式无效：{path}")
+    if value.get("version") == 1:
+        # v1 没有来源归属，不能安全地把其中的账号当成自动维护账号。
+        return {"version": 2, "scope": None, "accounts": {}}
+    if value.get("version") != 2:
         raise IncrementalError(f"增量快照版本无效：{path}")
     accounts = value.get("accounts", {})
     if not isinstance(accounts, dict):
@@ -71,10 +76,18 @@ def _state_accounts(value: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
             sub2api_id = int(item.get("sub2api_id", 0) or 0)
         except (TypeError, ValueError):
             sub2api_id = 0
+        sources = item.get("sources", [])
+        if not isinstance(sources, list):
+            sources = []
         result[key] = {
             "email": text(item.get("email")),
             "account_id": text(item.get("account_id")),
             "sub2api_id": sub2api_id if sub2api_id > 0 else None,
+            "sources": sorted(
+                value.strip()
+                for value in sources
+                if isinstance(value, str) and value.strip()
+            ),
         }
     return result
 
@@ -153,14 +166,26 @@ def build_state(
     records: Iterable[Dict[str, Any]],
     scope: Mapping[str, str],
     sub2api_ids: Mapping[str, Any],
+    managed_keys: Optional[Iterable[str]] = None,
+    source_keys: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> Dict[str, Any]:
+    managed_key_set = set(managed_keys) if managed_keys is not None else None
     accounts: Dict[str, Dict[str, Any]] = {}
     for record in records:
         key = account_key(record)
+        if managed_key_set is not None and key not in managed_key_set:
+            continue
         item: Dict[str, Any] = {
             "email": text(record.get("email")),
             "account_id": text(record.get("account_id")),
         }
+        if source_keys is not None:
+            values = source_keys.get(key, ())
+            item["sources"] = sorted(
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            )
         remote_id = sub2api_ids.get(key)
         if remote_id is not None:
             try:
@@ -168,7 +193,7 @@ def build_state(
             except (TypeError, ValueError):
                 pass
         accounts[key] = item
-    return {"version": 1, "scope": dict(scope), "accounts": accounts}
+    return {"version": 2, "scope": dict(scope), "accounts": accounts}
 
 
 def write_state(path: Path, state: Mapping[str, Any]) -> None:
