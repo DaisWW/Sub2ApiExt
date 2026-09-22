@@ -2,6 +2,12 @@
 
 适用于把 CLI Proxy API 的 Codex Auth JSON、Sub2API 数据包或本机 Cockpit Tools 的 Codex 账号导入 Sub2API 0.2.3。脚本通过 Sub2API Admin API 创建或更新账号，同时设置分组、代理、并发、优先级、倍率和 Codex 高级选项；不直接写 PostgreSQL。
 
+需要把卡密兑换、JSON 标准化并连续导入 Sub2API 与 Cockpit 时，请使用上级的 [account-pipeline](../account-pipeline/README.md)；本目录入口继续保留用于单独导入和兼容旧用法。
+
+## 卡密提取缓存
+
+需要从 `https://redeem.plusproteam.xyz/` 提取账号时，使用同目录的 `redeem-account-import.bat`。双击读取 gitignored 的 `redeem-codes.txt`，或把一行一个卡密的文本文件拖到 BAT 上；结果会覆盖写入 `redeem-result.txt`，下载包和解压数据放在 `cache/`。详细格式见 [redeem-account-import.md](redeem-account-import.md)。
+
 Sub2API 的普通数据包导入不会随账号绑定分组。数据包里没有明确填写的代理、倍率和高级选项也会使用默认值。因此，需要一次设置完整配置时，应使用本脚本调用原生 Codex Session 导入接口。
 
 ## 配置与输入选择

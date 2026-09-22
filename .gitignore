@@ -42,3 +42,12 @@ Tools/codex-account-import/redeem-codes.txt
 Tools/codex-account-import/redeem-result.txt
 Tools/codex-account-import/cache/
 Tools/codex-account-import/__pycache__/
+
+# Unified account pipeline local input and configuration
+Tools/account-pipeline/input/redeem-codes.txt
+Tools/account-pipeline/config.json
+Tools/account-pipeline/runs/
+Tools/account-pipeline/results/
+Tools/account-pipeline/logs/
+Tools/account-pipeline/**/__pycache__/
+Tools/account-pipeline/**/.pytest_cache/
