@@ -270,8 +270,6 @@ def run(args: argparse.Namespace) -> int:
             )
             manifest["redeem_exit_code"] = redeem_code
             manifest["redeem_result_file"] = str(result_file)
-            if result_file.is_file():
-                print(f"本次结果已覆盖写入：{result_file}")
             if redeem_code not in (0, 2):
                 return stage_error(manifest, pipeline_manifest, "redeem", redeem_code, "兑换未完成")
 
@@ -288,6 +286,7 @@ def run(args: argparse.Namespace) -> int:
             print("未提供卡密，跳过兑换阶段。")
 
         stage = "normalize"
+        print("[流水线] 开始标准化账号数据……")
         normalized = normalize_module.normalize(
             data_dir, normalized_dir, accounts_file
         )
@@ -297,6 +296,7 @@ def run(args: argparse.Namespace) -> int:
 
         if not args.skip_sub2api:
             stage = "sub2api"
+            print("[流水线] 开始导入 Sub2API……")
             sub2api_code = sub2api_module.execute(
                 Path(normalized["sub2api_input"]), sub2api_config
             )
@@ -311,6 +311,7 @@ def run(args: argparse.Namespace) -> int:
 
         if not args.skip_cockpit:
             stage = "cockpit"
+            print("[流水线] 开始导入 Cockpit（可能需要较长时间）……")
             cockpit_code = cockpit_module.execute(
                 Path(normalized["cockpit_input"]), wait_seconds=wait_seconds
             )

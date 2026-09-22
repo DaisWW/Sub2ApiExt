@@ -19,4 +19,4 @@ Tools/
 
 根目录只保留一个总入口 BAT；各模块目录中的 `run.bat` 是对应模块的快捷入口，会复用总入口的 Python 启动检查。
 
-缓存、解压目录、标准化 JSON 和运行 manifest 存放在 `C:\ProgramData\Sub2API\account-pipeline\runs`，不写入 Git 工作区。完整参数和单模块用法见 [account-pipeline/README.md](account-pipeline/README.md)。
+下载缓存、解压目录、标准化 JSON 和运行 manifest 存放在 `C:\ProgramData\Sub2API\account-pipeline\runs`，最近一次结果在同级 `results`，不写入 Git 工作区。完整路径、清理方式和单模块用法见 [account-pipeline/README.md](account-pipeline/README.md)。

@@ -13,6 +13,7 @@ import secrets
 import shutil
 import socket
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -214,10 +215,10 @@ class RedeemClient:
             r"[A-Za-z0-9_-]{8,128}", task_id
         ):
             raise RedeemError("兑换站没有返回有效任务编号")
-        print(f"任务已提交：{task_id}（共 {result.get('total', len(codes))} 个）")
+        print(f"[兑换] 任务已提交：{task_id}（共 {result.get('total', len(codes))} 个）")
         return task_id
 
-    def wait(self, task_id: str) -> dict:
+    def wait(self, task_id: str, *, action: str = "sub2api") -> dict:
         with self.request(
             "GET",
             f"/extract/events/{task_id}",
@@ -226,6 +227,10 @@ class RedeemClient:
         ) as response:
             event = ""
             data = []
+            last_phase = None
+            last_progress = None
+            last_done = None
+            inferred_phase = None
             while True:
                 line = response.readline()
                 if not line:
@@ -242,10 +247,49 @@ class RedeemClient:
                         raise RedeemError("兑换站返回了无效任务结果") from exc
                     data = []
                     if event == "progress":
-                        print(
-                            f"处理进度：{payload.get('done', '?')}"
-                            f"/{payload.get('total', '?')}"
-                        )
+                        phase = str(payload.get("phase") or "").strip().lower()
+                        if action == "check" or phase == "check":
+                            phase_key = "check"
+                            phase_label = "账号检测"
+                        elif phase == "extract":
+                            phase_key = "extract"
+                            phase_label = "账号提取"
+                        elif not phase and inferred_phase == "followup":
+                            phase_key = "followup"
+                            phase_label = "后续检测"
+                        else:
+                            phase_key = phase or "extract"
+                            phase_label = "账号处理"
+                        done = payload.get("done", "?")
+                        total = payload.get("total", "?")
+                        try:
+                            done_number = int(done)
+                        except (TypeError, ValueError):
+                            done_number = None
+                        if (
+                            not phase
+                            and last_done is not None
+                            and done_number is not None
+                            and done_number < last_done
+                        ):
+                            phase_key = "followup"
+                            phase_label = "后续检测"
+                            inferred_phase = "followup"
+                        elif phase:
+                            inferred_phase = None
+                        code = field(payload.get("code"))
+                        progress = (phase_key, str(done), str(total), code)
+                        if progress == last_progress:
+                            event = ""
+                            continue
+                        if phase_key != last_phase:
+                            print(f"[兑换] 开始{phase_label}阶段（共 {total} 个）")
+                            last_phase = phase_key
+                        suffix = f"；当前卡密：{code}" if code else ""
+                        print(f"[兑换][{phase_label}] 进度：{done}/{total}{suffix}")
+                        last_progress = progress
+                        if done_number is not None:
+                            last_done = done_number
                     elif event == "done":
                         return payload
                     elif event == "fail":
@@ -322,7 +366,8 @@ def extract_zip(blob: bytes, destination: Path) -> list[Path]:
 def field(value) -> str:
     if value is None:
         return ""
-    return str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+    text = str(value).replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+    return re.sub(r"\\([@_])", r"\1", text)
 
 
 def status(row: dict) -> str:
@@ -358,22 +403,72 @@ def save_result(path: Path, rows: list[dict]) -> None:
         raise RedeemError(f"写入结果文件失败：{exc}") from exc
 
 
+def display_width(value: str) -> int:
+    width = 0
+    for char in value:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in "WFA" else 1
+    return width
+
+
+def fit_column(value: str, width: int) -> str:
+    if display_width(value) <= width:
+        return value + " " * (width - display_width(value))
+    if width <= 1:
+        return "…"[:width]
+    result = []
+    used = 0
+    for char in value:
+        char_width = 0 if unicodedata.combining(char) else (
+            2 if unicodedata.east_asian_width(char) in "WFA" else 1
+        )
+        if used + char_width > width - 1:
+            break
+        result.append(char)
+        used += char_width
+    result.append("…")
+    text = "".join(result)
+    return text + " " * max(0, width - display_width(text))
+
+
+def result_rows(rows: list[dict]) -> list[list[str]]:
+    return [
+        [
+            field(row.get("code")) or "-",
+            field(row.get("account")) or "-",
+            field(row.get("extracted_at")) or "-",
+            field(row.get("warranty_left")) or "-",
+            status(row),
+            field(row.get("message")) or "-",
+        ]
+        for row in rows
+    ]
+
+
 def show_results(rows: list[dict]) -> None:
     print(f"\n检测结果（{len(rows)} 个）：")
-    print("\t".join(RESULT_COLUMNS[:6]))
-    for row in rows:
-        print(
-            "\t".join(
-                (
-                    field(row.get("code")),
-                    field(row.get("account")) or "-",
-                    field(row.get("extracted_at")) or "-",
-                    field(row.get("warranty_left")) or "-",
-                    status(row),
-                    field(row.get("message")) or "-",
-                )
-            )
+    headers = list(RESULT_COLUMNS[:6])
+    values = result_rows(rows)
+    maximums = (22, 36, 19, 12, 8, 48)
+    widths = []
+    for index, header in enumerate(headers):
+        width = display_width(header)
+        for values_row in values:
+            width = max(width, display_width(values_row[index]))
+        widths.append(min(max(width, 1), maximums[index]))
+
+    def render(values_row: list[str]) -> str:
+        return " | ".join(
+            fit_column(value, widths[index]) for index, value in enumerate(values_row)
         )
+
+    print(render(headers))
+    print("-+-".join("-" * width for width in widths))
+    for values_row in values:
+        print(render(values_row))
+    normal = sum(1 for row in rows if row.get("ok") is True)
+    print(f"结果汇总：正常 {normal}，异常 {len(rows) - normal}")
 
 
 def write_manifest(
@@ -421,11 +516,14 @@ def process(
     manifest_file: Path | None = None,
 ) -> int:
     codes = read_codes(input_path)
-    print(f"已读取 {len(codes)} 个卡密：{shown(input_path)}")
+    print(f"[兑换] 已读取 {len(codes)} 个卡密：{shown(input_path)}")
     client = RedeemClient()
+    print("[兑换] 正在连接兑换站……")
     client.start()
+    print(f"[兑换] 正在提交任务（操作：{action}）……")
     task_id = client.submit(codes, action)
-    payload = client.wait(task_id)
+    print("[兑换] 等待兑换站处理……")
+    payload = client.wait(task_id, action=action)
     if not isinstance(payload, dict):
         raise RedeemError("兑换站返回了无效任务结果")
     raw_rows = payload.get("rows", [])
@@ -436,7 +534,7 @@ def process(
     )
     show_results(rows)
     save_result(result_file, rows)
-    print(f"结果已覆盖写入：{shown(result_file)}")
+    print(f"[兑换] 结果已覆盖写入：{shown(result_file)}")
 
     if action == "check":
         if manifest_file:
@@ -450,6 +548,7 @@ def process(
 
     temporary_archive = None
     try:
+        print("[兑换] 正在下载账号 ZIP……")
         filename, blob = client.download(task_id)
         run_dir = Path(requested_run_dir) if requested_run_dir else cache_dir / (
             f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{task_id[:8]}"
@@ -460,6 +559,7 @@ def process(
         temporary_archive.write_bytes(blob)
         os.replace(temporary_archive, archive_path)
         data_dir = run_dir / "data"
+        print("[兑换] 正在安全解压 ZIP……")
         files = extract_zip(blob, data_dir)
     except (RedeemError, OSError, ValueError) as exc:
         if temporary_archive is not None:
@@ -469,8 +569,8 @@ def process(
                 pass
         print(f"下载或解压失败：{exc}", file=sys.stderr)
         return 1
-    print(f"压缩包已缓存：{shown(archive_path)}")
-    print(f"已解压 {len(files)} 个文件：{shown(data_dir)}")
+    print(f"[兑换] 压缩包已缓存：{shown(archive_path)}")
+    print(f"[兑换] 已解压 {len(files)} 个文件：{shown(data_dir)}")
     if manifest_file:
         write_manifest(
             Path(manifest_file),

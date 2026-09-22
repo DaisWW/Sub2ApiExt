@@ -2,7 +2,7 @@
 
 总入口 `run.bat` 启动 Python 编排器。完整流程支持两种输入：一行一个卡密的 TXT，以及可连续放置多个账户 JSON 对象的账户文本。两个输入同时存在时会合并、去重后生成统一数据，再分别导入 Sub2API 和 Cockpit。编排器依次调用四个独立模块：
 
-1. `redeem`：提交卡密，显示逐卡结果，覆盖写入固定结果 TXT，下载 ZIP 并安全解压。
+1. `redeem`：提交卡密，按提取/检测阶段显示逐卡结果，覆盖写入固定结果 TXT，下载 ZIP 并安全解压。
 2. `normalize`：读取解压目录中的账号 JSON 和可选账户文本，去重并生成两个目标输入文件。
 3. `sub2api`：读取标准化的 `sub2api-accounts.json`，调用 Sub2API Admin API，按账号执行幂等导入并显示变更字段。
 4. `cockpit`：通过回环一次性 HTTP 链接把标准化 JSON 交给 Cockpit Tools。
@@ -61,6 +61,18 @@ cockpit\run.bat <cockpit-accounts.json>
 ```
 
 manifest 只保存路径、数量、任务号和阶段状态，不保存卡密、Token、密码或账号凭据。`normalized` 下的 JSON 含凭据，只保存在本机运行目录。
+
+缓存和过渡文件的实际位置如下：
+
+| 内容 | 默认位置 |
+| --- | --- |
+| 下载的 ZIP | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\redeem\` |
+| ZIP 解压出的账号 JSON | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\redeem\data\` |
+| 给 Sub2API 和 Cockpit 的标准化 JSON | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\normalized\` |
+| 本次运行 manifest | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\manifest.json` |
+| 最近一次卡密结果 | `C:\ProgramData\Sub2API\account-pipeline\results\redeem-result.txt` |
+
+这些缓存不写入 Git 工作区。若需要换到其他非 Git 目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input\redeem-codes.txt` 和 `input\accounts.txt` 是用户输入源，不是自动生成的缓存，仓库已将它们加入忽略规则。
 
 ## Sub2API 配置
 
