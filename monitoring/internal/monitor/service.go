@@ -11,6 +11,7 @@ import (
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/config"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/notify"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/probe"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/store"
 )
@@ -20,6 +21,7 @@ type Service struct {
 	store     *store.Store
 	prober    *probe.Prober
 	log       *slog.Logger
+	costEmail *notify.EmailSender
 	pruneMu   sync.Mutex
 	lastPrune time.Time
 	running   atomic.Bool
@@ -33,8 +35,9 @@ func New(cfg config.Config, repository *store.Store, logger *slog.Logger) *Servi
 		logger = slog.Default()
 	}
 	return &Service{
-		cfg:   cfg,
-		store: repository,
+		cfg:       cfg,
+		store:     repository,
+		costEmail: notify.NewEmailSender(cfg.CostAlerts.Email),
 		prober: probe.New(probe.Config{
 			Timeout:          cfg.RequestTimeout,
 			DefaultModel:     cfg.DefaultModel,

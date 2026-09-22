@@ -139,6 +139,21 @@ manage.bat start
 
 容器没有指向 Git 工程的绑定挂载，部署后启动和重启不依赖本仓库。
 
+费用异常分析只读取已完成的 `usage_logs`，按用户、API Key、模型和渠道的滚动窗口判断单条请求成本过高、缓存骤降、实际倍率异常、每百万 Tokens 成本异常及可选的个人预算燃烧。它不会读取提示词或响应正文，也不会修改网关路由、账户状态或额度。请求完成并写入数据库后，默认在一个监控周期内分析；同一异常按冷却时间合并通知。
+
+QQ 邮箱通知使用 SMTP 授权码，不使用 QQ 登录密码。默认连接 `smtp.qq.com:465` 的隐式 TLS；需要 587 端口时将安全模式改为 `starttls`。把以下变量写入 `C:\ProgramData\Sub2API\extensions\monitoring\settings.env`：
+
+```text
+MONITORING_COST_EMAIL_USERNAME=your-account@qq.com
+MONITORING_COST_EMAIL_PASSWORD=QQ SMTP 授权码
+MONITORING_COST_EMAIL_FROM=your-account@qq.com
+MONITORING_COST_EMAIL_TO=admin@example.com
+```
+
+保存后在该目录运行 `docker compose up -d --force-recreate monitoring`，使新的邮箱变量进入容器。`MONITORING_COST_DAILY_BUDGET=0` 时不启用个人预算燃烧告警；缓存、倍率和单位成本规则仍然工作。日预算按监控容器 `TZ` 的本地自然日计算。未配置完整 SMTP 参数时费用分析不会启动。单位成本和缓存规则需要同一用户/API Key、模型、渠道的历史基线和足够样本；倍率规则没有历史基线时按绝对倍率判断。邮件通知失败不会影响健康探测和面板服务，并会按冷却时间再次尝试；不会记录 SMTP 密码。
+
+费用告警优先使用 `usage_logs.user_id + api_key_id` 作为范围；没有 API Key ID 时退化为用户范围。它不会把同一个用户不同 API Key 的成本混在一起，但仍不能在同一个 Key 内区分多个没有任务标识的进程。
+
 ## 配置项
 
 | 变量 | 默认值 | 说明 |
@@ -153,5 +168,29 @@ manage.bat start
 | `MONITORING_RECOVERY_THRESHOLD` | `1` | 连续成功达到该次数后恢复告警 |
 | `MONITORING_ALLOW_PRIVATE_HOSTS` | `false` | 是否允许显式配置的内网上游地址 |
 | `MONITORING_FRAME_ANCESTORS` | `'self'` | 允许嵌入监控面板的来源，使用空格或逗号分隔的 `http://` / `https://` 来源；不允许 `*` |
+| `MONITORING_COST_ALERTS_ENABLED` | `true` | 是否启用费用异常分析 |
+| `MONITORING_COST_WINDOW` | `15m` | 当前费用分析窗口 |
+| `MONITORING_COST_BASELINE` | `168h` | 历史基线窗口；必须大于当前窗口 |
+| `MONITORING_COST_COOLDOWN` | `30m` | 同一异常重复邮件的最短间隔 |
+| `MONITORING_COST_MIN_REQUESTS` | `3` | 缓存/单位成本窗口的最少请求数；倍率异常仍可由单条请求触发 |
+| `MONITORING_COST_MIN_TOKENS` | `100000` | 费用异常最少 Tokens 数 |
+| `MONITORING_COST_MIN_COST` | `0.5` | 窗口费用异常最低成本门槛，单位与 `usage_logs.actual_cost` 相同 |
+| `MONITORING_COST_SINGLE_REQUEST_COST` | `5` | 单条请求成本上限；0 表示关闭单条请求告警 |
+| `MONITORING_COST_MIN_BASE_COST` | `0.1` | 倍率异常的最低原始成本门槛；避免小数值噪声 |
+| `MONITORING_COST_CACHE_BASELINE_MIN` | `0.60` | 缓存告警要求的历史最低命中率 |
+| `MONITORING_COST_CACHE_CURRENT_MAX` | `0.20` | 缓存告警要求的当前最高命中率 |
+| `MONITORING_COST_CACHE_COST_RATIO` | `1.5` | 缓存异常相对历史单位成本倍数 |
+| `MONITORING_COST_UNIT_COST_RATIO` | `1.5` | 单位成本异常相对历史倍数 |
+| `MONITORING_COST_MULTIPLIER_RATIO` | `2.0` | 实际倍率相对历史基线的倍数；没有历史基线时按绝对倍率判断 |
+| `MONITORING_COST_DAILY_BUDGET` | `0` | 每个用户/API Key 的日预算，单位与 `actual_cost` 相同；0 表示关闭预算燃烧告警 |
+| `MONITORING_COST_BURN_RATIO` | `1.5` | 近窗口燃烧速度相对日预算速度倍数 |
+| `MONITORING_COST_EMAIL_HOST` | `smtp.qq.com` | SMTP 主机 |
+| `MONITORING_COST_EMAIL_PORT` | `465` | SMTP 端口 |
+| `MONITORING_COST_EMAIL_SECURITY` | `implicit_tls` | `implicit_tls` 或 `starttls` |
+| `MONITORING_COST_EMAIL_USERNAME` | 空 | SMTP 登录邮箱；留空则关闭邮件发送 |
+| `MONITORING_COST_EMAIL_PASSWORD` | 空 | SMTP 授权码，不要填写登录密码 |
+| `MONITORING_COST_EMAIL_FROM` | 登录邮箱 | 发件地址 |
+| `MONITORING_COST_EMAIL_TO` | 空 | 收件地址，多个地址用逗号分隔 |
+| `MONITORING_COST_EMAIL_TIMEOUT` | `15s` | 单次 SMTP 连接和发送超时 |
 
 支持的 OAuth 账户会读取现有访问令牌，并使用与主网关一致的提供商端点和认证形状。API Key 账户的 `base_url` / `endpoint`、`monitor_model` 和兼容字段 `model` 会被尊重。令牌刷新仍由主网关负责；监控不会回写账户凭据或路由状态。

@@ -50,6 +50,9 @@ func (s *Service) runCycle(ctx context.Context) error {
 		return nil
 	}
 	defer release()
+	if err := s.runCostAlerts(ctx); err != nil {
+		s.log.Warn("cost anomaly notification failed", "error", err)
+	}
 
 	snapshot, err := s.store.LoadSnapshot(ctx)
 	if err != nil {
