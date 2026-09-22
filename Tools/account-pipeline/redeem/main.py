@@ -543,7 +543,7 @@ def fit_column(value: str, width: int) -> str:
 
 
 def wrap_column(value: str, width: int) -> list[str]:
-    """按终端显示宽度换行说明文本，不参与主表格边框。"""
+    """按显示宽度换行单元格，确保内容不会以省略号丢失。"""
     if width <= 1:
         return [fit_column(value, width)]
     lines = []
@@ -589,9 +589,9 @@ def result_rows(rows: list[dict]) -> list[list[str]]:
 
 
 def result_widths(values: list[list[str]], terminal_columns: int | None) -> list[int]:
-    headers = ("序号", "卡密", "账号", "首次提取时间", "质保", "结果")
-    maximums = (4, 22, 36, 19, 12, 8)
-    minimums = (4, 16, 14, 19, 6, 4)
+    headers = ("序号", "卡密", "账号", "首次提取时间", "质保", "结果", "说明")
+    maximums = (4, 22, 36, 19, 12, 8, 56)
+    minimums = (4, 16, 22, 19, 6, 4, 20)
     widths = []
     for index, header in enumerate(headers):
         width = display_width(header)
@@ -606,7 +606,8 @@ def result_widths(values: list[list[str]], terminal_columns: int | None) -> list
         sum(minimums) + separator_width,
         (terminal_columns or fallback_width) - 2,
     )
-    shrink_order = (2, 1, 4, 5, 0, 3)
+    # 保留身份列的可读性，把可换行的说明列优先压缩。
+    shrink_order = (6, 2, 1, 4, 5, 0, 3)
     excess = sum(widths) + separator_width - budget
     for index in shrink_order:
         if excess <= 0:
@@ -623,7 +624,7 @@ def format_results(rows: list[dict], terminal_columns: int | None = None) -> str
         [str(index), *row[:5], row[5]]
         for index, row in enumerate(raw_values, start=1)
     ]
-    headers = ("序号", "卡密", "账号", "首次提取时间", "质保", "结果")
+    headers = ("序号", "卡密", "账号", "首次提取时间", "质保", "结果", "说明")
     widths = result_widths(values, terminal_columns)
 
     def render(values_row: list[str]) -> str:
@@ -637,15 +638,22 @@ def format_results(rows: list[dict], terminal_columns: int | None = None) -> str
         "-+-".join("-" * width for width in widths),
     ]
     for values_row in values:
-        lines.append(render(values_row[:6]))
-        message = values_row[6] or "-"
-        description_width = max(
-            20,
-            (terminal_columns or shutil.get_terminal_size((120, 24)).columns) - 10,
-        )
-        for line_number, line in enumerate(wrap_column(message, description_width)):
-            prefix = "  说明：" if line_number == 0 else "        "
-            lines.append(prefix + line)
+        wrapped = []
+        for index, value in enumerate(values_row):
+            if index < len(values_row) - 1:
+                wrapped.append([value or "-"])
+            else:
+                wrapped.append(wrap_column(value or "-", widths[index]))
+        row_height = max(len(column) for column in wrapped)
+        for line_number in range(row_height):
+            lines.append(
+                render(
+                    [
+                        column[line_number] if line_number < len(column) else ""
+                        for column in wrapped
+                    ]
+                )
+            )
     normal = sum(1 for row in rows if row.get("ok") is True)
     lines.append(f"结果汇总：正常 {normal}，异常 {len(rows) - normal}")
     return "\n".join(lines)
