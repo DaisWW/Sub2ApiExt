@@ -1,22 +1,21 @@
 # Tools 工具目录
 
-各子目录是可以单独运行的模块；需要完整处理时使用 `account-pipeline` 总入口。
+`account-pipeline` 是账号处理的唯一总目录，四个子目录各自只负责一个模块：
 
 ```text
 Tools/
-├─ account-pipeline/                 总流程：卡密 → JSON → 两个导入目标
-│  ├─ run.bat                         总流程启动 BAT
-│  ├─ run.py                          Python 编排器
-│  ├─ input/                          本地卡密输入（gitignored）
-│  └─ modules/
-│     ├─ redeem/                      兑换适配器
-│     ├─ normalize/                   JSON 标准化
-│     ├─ sub2api/                     Sub2API 适配器
-│     └─ cockpit/                     Cockpit 适配器和 PowerShell bridge
-├─ codex-account-import/              原有 Sub2API 导入器和兼容旧入口
-└─ cockpit-tools-import/              原有 Cockpit 单独导入入口
+├─ README.md
+└─ account-pipeline/
+   ├─ run.bat                         一键：兑换 → 解压 → 标准化 → 双目标导入
+   ├─ run.py                          Python 流程编排
+   ├─ run-python.bat                  所有快捷入口共用的 Python 启动器
+   ├─ input/                          卡密输入（本地文件被 gitignore）
+   ├─ redeem/                         兑换、结果文件、下载和安全解压
+   ├─ normalize/                      账号 JSON 标准化
+   ├─ sub2api/                        Sub2API Admin API 导入
+   └─ cockpit/                        Cockpit Tools 本地导入
 ```
 
-日常使用：把卡密文本拖到 `Tools\account-pipeline\run.bat`，或在 `account-pipeline\input\redeem-codes.txt` 填好后双击。完整目录说明、缓存位置和中间文件格式见 [account-pipeline/README.md](account-pipeline/README.md)。
+把卡密文件拖到 `account-pipeline\run.bat`，或把卡密逐行写入 `input\redeem-codes.txt` 后双击。结果会显示在窗口，并覆盖保存到 `C:\ProgramData\Sub2API\account-pipeline\results\redeem-result.txt`。
 
-旧目录不会被总流程删除或覆盖，方便已有脚本继续使用；新流程只把用户已有 Cockpit bridge 复制到自己的模块目录中维护。
+缓存、解压目录、标准化 JSON 和运行 manifest 存放在 `C:\ProgramData\Sub2API\account-pipeline\runs`，不写入 Git 工作区。完整参数和单模块用法见 [account-pipeline/README.md](account-pipeline/README.md)。
