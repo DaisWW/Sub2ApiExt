@@ -987,6 +987,10 @@ def resolve_account_ids(
             account_id = account_database_id({"id": record["sub2api_id"]})
             detail = account_detail(client, token, account_id, allow_missing=True)
             if detail is None:
+                # 账户已被手动删除时，交给删除操作的幂等路径清理快照。
+                key = record_key(record)
+                if key:
+                    resolved[key] = account_id
                 continue
             key = record_key(record)
             if key in account_keys(detail) and (

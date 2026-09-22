@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 class IncrementalError(RuntimeError):
@@ -238,3 +238,35 @@ def update_pending_deletions(
             pass
         raise IncrementalError(f"写入 Cockpit 待删除清单失败：{path}") from exc
     return len(pending)
+
+
+def write_sub2api_pending_deletions(
+    path: Path,
+    entries: Iterable[Tuple[Mapping[str, Any], str]],
+) -> int:
+    """写出无法自动删除的 Sub2API 账户清单，不包含凭据。"""
+    lines = ["# Sub2API 自动删除未完成；请按 ID 或邮箱手动处理\n"]
+    count = 0
+    for record, reason in entries:
+        raw_account_id = record.get("sub2api_id")
+        account_id = str(raw_account_id).strip() if raw_account_id is not None else ""
+        identity = text(record.get("email")) or text(record.get("account_id"))
+        if not account_id and not identity:
+            continue
+        clean_reason = str(reason).replace("\t", " ").replace("\r", " ").replace("\n", " ")
+        lines.append(
+            f"ID={account_id or '-'}\t账号={identity or '-'}\t原因={clean_reason}\n"
+        )
+        count += 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text("".join(lines), encoding="utf-8-sig")
+        os.replace(temporary, path)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise IncrementalError(f"写入 Sub2API 待删除清单失败：{path}") from exc
+    return count

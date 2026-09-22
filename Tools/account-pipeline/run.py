@@ -326,6 +326,8 @@ def run(args: argparse.Namespace) -> int:
     incremental_state_file = runtime_dir / "state" / "incremental.json"
     sub2api_summary_file = incremental_dir / "sub2api-accounts.json"
     result_file = runtime_dir / "results" / "redeem-result.txt"
+    sub2api_pending_file = runtime_dir / "results" / "sub2api-pending-deletions.txt"
+    cockpit_pending_file = runtime_dir / "results" / "cockpit-pending-deletions.txt"
     redeem_manifest = run_dir / "redeem-manifest.json"
     pipeline_manifest = run_dir / "manifest.json"
     manifest: Dict[str, Any] = {
@@ -349,6 +351,7 @@ def run(args: argparse.Namespace) -> int:
         redeem_code = 0
         data_dir: Optional[Path] = None
         deletion_blocked = False
+        sub2api_pending_entries: list[tuple[Dict[str, Any], str]] = []
         if has_codes:
             redeem_code = redeem_module.execute(
                 codes_file,
@@ -487,39 +490,124 @@ def run(args: argparse.Namespace) -> int:
                             "待下次兑换结果完整后再处理移除账号。"
                         )
                 elif incremental_delta.removed:
-                    removed_ids = sub2api_module.resolve_account_ids(
-                        sub2api_config,
-                        incremental_delta.removed,
-                        require_stored_id=True,
-                        require_managed=True,
-                    )
-                    active_ids = {
-                        item.get("sub2api_id")
-                        for key, item in incremental_delta.previous.items()
-                        if key in incremental_delta.current
+                    removed_by_key = {
+                        incremental_module.account_key(record): record
+                        for record in incremental_delta.removed
                     }
-                    active_ids.update(managed_sub2api_ids(sub2api_summary_file).values())
-                    delete_ids = set(removed_ids.values()) - active_ids
-                    if len(delete_ids) != len(set(removed_ids.values())):
-                        print("[增量] 待删除账号仍被当前输入引用，已保留对应 Sub2API 账户。")
-                    if delete_ids:
-                        sub2api_module.delete_account_ids(
+                    try:
+                        removed_ids = sub2api_module.resolve_account_ids(
                             sub2api_config,
-                            delete_ids,
-                            expected_records=incremental_delta.removed,
+                            incremental_delta.removed,
+                            require_stored_id=True,
+                            require_managed=True,
+                        )
+                    except sub2api_module.Sub2ApiError as exc:
+                        sub2api_pending_entries = [
+                            (record, f"删除前校验失败：{exc}")
+                            for record in incremental_delta.removed
+                        ]
+                        print(
+                            "[增量] Sub2API 删除前校验失败；"
+                            f"已记录人工处理清单：{sub2api_pending_file}"
                         )
                     else:
-                        print(
-                            "[增量] Sub2API 没有找到可验证的待删除账号；"
-                            "不会按不确定信息删除。"
+                        active_ids = {
+                            item.get("sub2api_id")
+                            for key, item in incremental_delta.previous.items()
+                            if key in incremental_delta.current
+                        }
+                        active_ids.update(
+                            managed_sub2api_ids(sub2api_summary_file).values()
                         )
+                        delete_ids = set(removed_ids.values()) - active_ids
+                        if len(delete_ids) != len(set(removed_ids.values())):
+                            print(
+                                "[增量] 待删除账号仍被当前输入引用，"
+                                "已保留对应 Sub2API 账户。"
+                            )
+                        sub2api_pending_entries.extend(
+                            (
+                                removed_by_key[key],
+                                "未找到仍受本工具维护的可验证账户 ID",
+                            )
+                            for key in removed_by_key
+                            if key not in removed_ids
+                            and removed_by_key[key].get("sub2api_id")
+                        )
+                        attempted_records = [
+                            removed_by_key[key]
+                            for key, account_id in removed_ids.items()
+                            if account_id in delete_ids and key in removed_by_key
+                        ]
+                        if delete_ids:
+                            try:
+                                sub2api_module.delete_account_ids(
+                                    sub2api_config,
+                                    delete_ids,
+                                    expected_records=incremental_delta.removed,
+                                )
+                            except sub2api_module.Sub2ApiError as exc:
+                                sub2api_pending_entries.extend(
+                                    (record, f"自动删除失败：{exc}")
+                                    for record in attempted_records
+                                )
+                                print(
+                                    "[增量] Sub2API 自动删除失败；"
+                                    f"已记录人工处理清单：{sub2api_pending_file}"
+                                )
+                        elif not sub2api_pending_entries:
+                            print("[增量] Sub2API 没有需要删除的可验证账户。")
+                    if sub2api_pending_entries:
+                        pending_count = incremental_module.write_sub2api_pending_deletions(
+                            sub2api_pending_file, sub2api_pending_entries
+                        )
+                        print(
+                            "[增量] Sub2API 待人工处理账户："
+                            f"{pending_count} 个；清单：{sub2api_pending_file}"
+                        )
+                    else:
+                        incremental_module.write_sub2api_pending_deletions(
+                            sub2api_pending_file, []
+                        )
+            if args.incremental and incremental_delta is not None and not incremental_delta.removed:
+                incremental_module.write_sub2api_pending_deletions(
+                    sub2api_pending_file, []
+                )
         else:
             print("已跳过 Sub2API 导入。")
+
+        if args.incremental and incremental_delta is not None:
+            if deletion_blocked:
+                cockpit_pending_count = incremental_module.update_pending_deletions(
+                    cockpit_pending_file,
+                    [],
+                    incremental_delta.current.values(),
+                )
+                if incremental_delta.removed:
+                    print(
+                        "[Cockpit] 兑换结果不完整，暂不登记待删除账号；"
+                        f"待下次完整结果后再生成清单（当前待处理 {cockpit_pending_count} 个）。"
+                    )
+            else:
+                cockpit_pending_count = incremental_module.update_pending_deletions(
+                    cockpit_pending_file,
+                    incremental_delta.removed,
+                    incremental_delta.current.values(),
+                )
+                if cockpit_pending_count:
+                    print(
+                        "[Cockpit] 外部接口不支持删除；"
+                        f"待手动删除 {cockpit_pending_count} 个账号："
+                        f"{cockpit_pending_file}"
+                    )
+                else:
+                    print("[Cockpit] 没有待手动删除的账号。")
 
         if not args.skip_cockpit:
             stage = "cockpit"
             cockpit_input = Path(normalized["cockpit_input"])
             cockpit_records = normalized_records(cockpit_input)
+            normalized_cockpit_count = len(cockpit_records)
             if not args.skip_sub2api and cockpit_records:
                 owned_ids = managed_sub2api_ids(sub2api_summary_file)
                 cockpit_records = [
@@ -532,14 +620,28 @@ def run(args: argparse.Namespace) -> int:
                 )
                 incremental_module.write_json(managed_cockpit_input, cockpit_records)
                 cockpit_input = managed_cockpit_input
+                print(
+                    "[Cockpit] 账号归属过滤："
+                    f"标准化 {normalized_cockpit_count} 个，"
+                    f"本工具可导入 {len(cockpit_records)} 个，"
+                    f"跳过 {normalized_cockpit_count - len(cockpit_records)} 个。"
+                )
             if not cockpit_records:
-                print("[流水线] 没有本工具可导入 Cockpit 的新增账号，跳过导入。")
+                if args.incremental:
+                    reason = "本轮没有新增账号或新增账号未通过 Sub2API 归属校验"
+                else:
+                    reason = "没有可导入账号"
+                print(f"[Cockpit] {reason}，跳过导入。")
                 cockpit_code = 0
             else:
-                print("[流水线] 开始导入 Cockpit（可能需要较长时间）……")
+                print(
+                    "[流水线] 开始导入 Cockpit "
+                    f"（{len(cockpit_records)} 个账号，可能需要较长时间）……"
+                )
                 cockpit_code = cockpit_module.execute(
                     cockpit_input, wait_seconds=wait_seconds
                 )
+                print(f"[Cockpit] 已提交 {len(cockpit_records)} 个账号。")
             manifest["cockpit_exit_code"] = cockpit_code
             write_json(pipeline_manifest, manifest)
             if cockpit_code != 0:
@@ -566,6 +668,7 @@ def run(args: argparse.Namespace) -> int:
             managed_current_keys.update(summary_ids)
             state_records = list(incremental_delta.current.values())
             state_source_keys = dict(source_keys)
+            preserved: list[tuple[str, Dict[str, Any]]] = []
             if deletion_blocked:
                 preserved = [
                     (key, item)
@@ -577,10 +680,26 @@ def run(args: argparse.Namespace) -> int:
                         "[增量] 保留 "
                         f"{len(preserved)} 个未确认移除账号，等待下次完整兑换结果。"
                     )
-                state_records.extend(item for _, item in preserved)
-                managed_current_keys.update(key for key, _ in preserved)
-                for key, item in preserved:
-                    state_source_keys.setdefault(key, item.get("sources", []))
+            elif sub2api_pending_entries:
+                pending_keys = {
+                    incremental_module.account_key(record)
+                    for record, _ in sub2api_pending_entries
+                }
+                preserved = [
+                    (key, item)
+                    for key, item in incremental_delta.previous.items()
+                    if key in pending_keys and key not in incremental_delta.current
+                ]
+                if preserved:
+                    print(
+                        "[增量] 保留 "
+                        f"{len(preserved)} 个 Sub2API 删除失败账号，"
+                        "等待下次重试或人工处理。"
+                    )
+            state_records.extend(item for _, item in preserved)
+            managed_current_keys.update(key for key, _ in preserved)
+            for key, item in preserved:
+                state_source_keys.setdefault(key, item.get("sources", []))
             state_value = incremental_module.build_state(
                 state_records,
                 source_scope,
@@ -588,17 +707,6 @@ def run(args: argparse.Namespace) -> int:
                 managed_keys=managed_current_keys,
                 source_keys=state_source_keys,
             )
-            pending_file = runtime_dir / "results" / "cockpit-pending-deletions.txt"
-            pending_count = incremental_module.update_pending_deletions(
-                pending_file,
-                [] if deletion_blocked else incremental_delta.removed,
-                incremental_delta.current.values(),
-            )
-            if pending_count:
-                print(
-                    "[增量] Cockpit 外部接口不支持删除；"
-                    f"待手动删除 {pending_count} 个账号：{pending_file}"
-                )
             incremental_module.write_state(incremental_state_file, state_value)
             print(f"[增量] 快照已更新：{incremental_state_file}")
 
