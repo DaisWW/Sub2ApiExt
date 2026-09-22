@@ -422,6 +422,7 @@ type CostAlertEvent struct {
 	Model                string
 	ChannelName          string
 	AccountName          string
+	AccountID            int64
 	Requests             int64
 	TotalTokens          int64
 	MaxRequestCost       float64

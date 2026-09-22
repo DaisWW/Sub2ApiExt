@@ -23,6 +23,8 @@ func TestBuildCostAlertMessageContainsBreakdownWithoutPassword(t *testing.T) {
 		APIKeyID:             7,
 		Model:                "gpt-5.6-sol",
 		ChannelName:          "渠道 A",
+		AccountName:          "owner@example.com",
+		AccountID:            75,
 		Requests:             3,
 		TotalTokens:          120_000,
 		InputTokens:          80_000,
@@ -47,13 +49,31 @@ func TestBuildCostAlertMessageContainsBreakdownWithoutPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(message)
-	for _, fragment := range []string{"实际倍率异常", "API Key ID: 7", "Tokens 分项: 输入 80000，输出 20000，缓存写入 10000，缓存读取 10000", "缓存写入 0.8000", "倍率相对历史基线翻倍"} {
+	for _, fragment := range []string{"实际倍率异常", "API Key ID: 7", "账户: owner@example.com #75", "Tokens 分项: 输入 80000，输出 20000，缓存写入 10000，缓存读取 10000", "缓存写入 0.8000", "倍率相对历史基线翻倍"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("email is missing %q: %s", fragment, text)
 		}
 	}
 	if strings.Contains(text, password) {
 		t.Fatal("email contains SMTP password")
+	}
+}
+
+func TestBuildCostAlertMessageFallsBackToAccountID(t *testing.T) {
+	message, err := buildCostAlertMessage(config.EmailConfig{
+		From: "sender@qq.com",
+		To:   []string{"admin@example.com"},
+	}, []model.CostAlertEvent{{
+		Severity:  "warning",
+		Title:     "单位成本异常",
+		UserKey:   "42",
+		AccountID: 75,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(message), "账户: 账户 #75") {
+		t.Fatalf("email does not contain account ID fallback: %s", message)
 	}
 }
 

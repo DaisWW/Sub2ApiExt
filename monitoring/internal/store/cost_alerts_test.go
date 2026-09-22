@@ -67,7 +67,7 @@ func testCostAlertPolicy() config.CostAlertConfig {
 func TestEvaluateCostUsageGroupDetectsCacheAndUnitCostAnomalies(t *testing.T) {
 	policy := testCostAlertPolicy()
 	group := costUsageGroup{
-		userKey: "42", model: "gpt-4.1", channelID: 7, channelName: "渠道 A", accountID: 9,
+		userKey: "42", model: "gpt-4.1", channelID: 7, channelName: "渠道 A", accountID: 9, accountName: "owner@example.com",
 		current: costUsageMetrics{
 			Requests: 3, InputTokens: 300_000, CacheReadTokens: 20_000,
 			ActualCost: 4.5,
@@ -86,6 +86,9 @@ func TestEvaluateCostUsageGroupDetectsCacheAndUnitCostAnomalies(t *testing.T) {
 		seen[event.Kind] = true
 		if event.TargetKey == "" || event.AlertKey == "" {
 			t.Fatalf("event keys are empty: %+v", event)
+		}
+		if event.AccountID != 9 || event.AccountName != "owner@example.com" {
+			t.Fatalf("event account = %q #%d", event.AccountName, event.AccountID)
 		}
 	}
 	if !seen[model.CostAlertCacheDegraded] || !seen[model.CostAlertUnitCost] {

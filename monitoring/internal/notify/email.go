@@ -91,8 +91,14 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 		if event.ChannelName != "" {
 			body.WriteString(fmt.Sprintf("渠道: %s\n", event.ChannelName))
 		}
-		if event.AccountName != "" {
-			body.WriteString(fmt.Sprintf("账户: %s\n", event.AccountName))
+		accountName := strings.TrimSpace(event.AccountName)
+		if event.AccountID > 0 {
+			if accountName == "" || accountName == "未归属账户" {
+				accountName = "账户"
+			}
+			body.WriteString(fmt.Sprintf("账户: %s #%d\n", accountName, event.AccountID))
+		} else if accountName != "" {
+			body.WriteString(fmt.Sprintf("账户: %s\n", accountName))
 		}
 		if !event.WindowStart.IsZero() && !event.WindowEnd.IsZero() {
 			body.WriteString(fmt.Sprintf("分析窗口: %s 至 %s\n",
