@@ -89,12 +89,6 @@ def read_dotenv(path: Path) -> Dict[str, str]:
     return values
 
 
-def required_string(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise Sub2ApiError(f"{label}缺失")
-    return value.strip()
-
-
 def optional_string(value: Any) -> Optional[str]:
     return value.strip() if isinstance(value, str) and value.strip() else None
 

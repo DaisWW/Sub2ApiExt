@@ -278,12 +278,6 @@ def deduplicate_with_sources(
     return result, sources
 
 
-def deduplicate(records: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """保留模块原有的去重入口，来源信息由新入口额外返回。"""
-    result, _ = deduplicate_with_sources((record, "unknown") for record in records)
-    return result
-
-
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
