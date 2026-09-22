@@ -18,6 +18,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from cockpit import main as cockpit_module  # noqa: E402
+import incremental as incremental_module  # noqa: E402
 from normalize import main as normalize_module  # noqa: E402
 from redeem import main as redeem_module  # noqa: E402
 from sub2api import main as sub2api_module  # noqa: E402
@@ -213,6 +214,37 @@ def read_redeem_manifest(path: Path, fallback_data_dir: Path) -> Dict[str, Any]:
     return value
 
 
+def normalized_records(path: Path) -> list[Dict[str, Any]]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineError(f"无法读取标准化账号：{path}") from exc
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise PipelineError(f"标准化账号格式无效：{path}")
+    return value
+
+
+def managed_sub2api_ids(path: Path) -> Dict[str, int]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PipelineError(f"无法读取 Sub2API 增量映射：{path}") from exc
+    accounts = value.get("accounts") if isinstance(value, dict) else None
+    if not isinstance(accounts, dict):
+        raise PipelineError(f"Sub2API 增量映射格式无效：{path}")
+    result: Dict[str, int] = {}
+    for key, account_id in accounts.items():
+        try:
+            number = int(account_id)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(key, str) and number > 0:
+            result[key] = number
+    return result
+
+
 def stage_error(
     manifest: Dict[str, Any],
     path: Path,
@@ -236,6 +268,8 @@ def stage_error(
 
 def run(args: argparse.Namespace) -> int:
     config = load_pipeline_config()
+    if args.incremental and (args.skip_sub2api or args.skip_cockpit):
+        raise PipelineError("增量模式需要同时同步 Sub2API 和 Cockpit，不能使用跳过选项")
     codes_file, accounts_file = choose_inputs(
         args.input_file, args.codes_file, args.accounts_file
     )
@@ -280,6 +314,9 @@ def run(args: argparse.Namespace) -> int:
     run_dir = make_run_dir(runtime_dir)
     redeem_dir = run_dir / "redeem"
     normalized_dir = run_dir / "normalized"
+    incremental_dir = run_dir / "incremental"
+    incremental_state_file = runtime_dir / "state" / "incremental.json"
+    sub2api_summary_file = incremental_dir / "sub2api-accounts.json"
     result_file = runtime_dir / "results" / "redeem-result.txt"
     redeem_manifest = run_dir / "redeem-manifest.json"
     pipeline_manifest = run_dir / "manifest.json"
@@ -296,6 +333,7 @@ def run(args: argparse.Namespace) -> int:
         "normalized_dir": str(normalized_dir),
         "skip_sub2api": bool(args.skip_sub2api),
         "skip_cockpit": bool(args.skip_cockpit),
+        "incremental": bool(args.incremental),
     }
     stage = "redeem" if codes_file is not None else "normalize"
     try:
@@ -324,6 +362,10 @@ def run(args: argparse.Namespace) -> int:
                 if key in redeem_info
             }
             if redeem_code == 2:
+                if args.incremental:
+                    raise PipelineError(
+                        "卡密结果包含失败项；增量模式已停止，避免把未下载账号误判为删除"
+                    )
                 print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
         else:
             print("未提供卡密，跳过兑换阶段。")
@@ -337,27 +379,98 @@ def run(args: argparse.Namespace) -> int:
         write_json(pipeline_manifest, manifest)
         print(f"标准化完成：{normalized['accounts']} 个账号")
 
+        incremental_delta = None
+        baseline_sub2api_ids: Dict[str, int] = {}
+        source_scope = incremental_module.input_scope(codes_file, accounts_file)
+        if args.incremental:
+            records = normalized_records(Path(normalized["cockpit_input"]))
+            incremental_state = incremental_module.read_state(incremental_state_file)
+            incremental_delta = incremental_module.compare(
+                records, incremental_state, source_scope
+            )
+            is_baseline = (
+                incremental_state.get("scope") is None
+                or incremental_delta.scope_changed
+            )
+            if is_baseline:
+                stage = "incremental-baseline"
+                baseline_sub2api_ids = sub2api_module.resolve_account_ids(
+                    sub2api_config, records
+                )
+                incremental_delta.added = []
+                incremental_delta.removed = []
+                incremental_delta.unchanged = len(records)
+                print(
+                    "[增量] 首次运行仅建立基线，不导入或删除账号；"
+                    f"已匹配 {len(baseline_sub2api_ids)} 个 Sub2API 账户。"
+                )
+            incremental_files = incremental_module.write_delta(
+                incremental_dir, incremental_delta
+            )
+            if incremental_delta.scope_changed:
+                print("[增量] 输入文件范围发生变化，本次按首次运行处理，不执行删除。")
+            print(
+                "[增量] 比较完成："
+                f"新增 {len(incremental_delta.added)}，"
+                f"删除 {len(incremental_delta.removed)}，"
+                f"跳过 {incremental_delta.unchanged}。"
+            )
+            manifest["incremental_delta"] = {
+                "added": len(incremental_delta.added),
+                "removed": len(incremental_delta.removed),
+                "unchanged": incremental_delta.unchanged,
+                "scope_changed": incremental_delta.scope_changed,
+            }
+            write_json(pipeline_manifest, manifest)
+            normalized = {**normalized, **incremental_files}
+
         if not args.skip_sub2api:
             stage = "sub2api"
-            print("[流水线] 开始导入 Sub2API……")
-            sub2api_code = sub2api_module.execute(
-                Path(normalized["sub2api_input"]), sub2api_config
-            )
+            if args.incremental and incremental_delta is not None and not incremental_delta.added:
+                print("[增量] Sub2API 没有新增账号，跳过导入。")
+                sub2api_code = 0
+            else:
+                print("[流水线] 开始导入 Sub2API……")
+                sub2api_code = sub2api_module.execute(
+                    Path(normalized["sub2api_input"]),
+                    sub2api_config,
+                    summary_file=sub2api_summary_file if args.incremental else None,
+                )
             manifest["sub2api_exit_code"] = sub2api_code
             write_json(pipeline_manifest, manifest)
             if sub2api_code != 0:
                 return stage_error(
                     manifest, pipeline_manifest, "sub2api", sub2api_code, "Sub2API 导入未完成"
                 )
+            if args.incremental and incremental_delta is not None:
+                if incremental_delta.removed:
+                    delete_ids = set(
+                        sub2api_module.resolve_account_ids(
+                            sub2api_config,
+                            incremental_delta.removed,
+                            require_stored_id=True,
+                        ).values()
+                    )
+                    if delete_ids:
+                        sub2api_module.delete_account_ids(sub2api_config, delete_ids)
+                    else:
+                        print(
+                            "[增量] Sub2API 没有找到可验证的待删除账号；"
+                            "不会按不确定信息删除。"
+                        )
         else:
             print("已跳过 Sub2API 导入。")
 
         if not args.skip_cockpit:
             stage = "cockpit"
-            print("[流水线] 开始导入 Cockpit（可能需要较长时间）……")
-            cockpit_code = cockpit_module.execute(
-                Path(normalized["cockpit_input"]), wait_seconds=wait_seconds
-            )
+            if args.incremental and incremental_delta is not None and not incremental_delta.added:
+                print("[增量] Cockpit 没有新增账号，跳过导入。")
+                cockpit_code = 0
+            else:
+                print("[流水线] 开始导入 Cockpit（可能需要较长时间）……")
+                cockpit_code = cockpit_module.execute(
+                    Path(normalized["cockpit_input"]), wait_seconds=wait_seconds
+                )
             manifest["cockpit_exit_code"] = cockpit_code
             write_json(pipeline_manifest, manifest)
             if cockpit_code != 0:
@@ -366,6 +479,32 @@ def run(args: argparse.Namespace) -> int:
                 )
         else:
             print("已跳过 Cockpit 导入。")
+
+        if args.incremental and incremental_delta is not None:
+            stage = "incremental-state"
+            sub2api_ids = {
+                key: item.get("sub2api_id")
+                for key, item in incremental_delta.previous.items()
+                if item.get("sub2api_id") is not None
+            }
+            sub2api_ids.update(baseline_sub2api_ids)
+            sub2api_ids.update(managed_sub2api_ids(sub2api_summary_file))
+            state_value = incremental_module.build_state(
+                incremental_delta.current.values(), source_scope, sub2api_ids
+            )
+            pending_file = runtime_dir / "results" / "cockpit-pending-deletions.txt"
+            pending_count = incremental_module.update_pending_deletions(
+                pending_file,
+                incremental_delta.removed,
+                incremental_delta.current.values(),
+            )
+            if pending_count:
+                print(
+                    "[增量] Cockpit 外部接口不支持删除；"
+                    f"待手动删除 {pending_count} 个账号：{pending_file}"
+                )
+            incremental_module.write_state(incremental_state_file, state_value)
+            print(f"[增量] 快照已更新：{incremental_state_file}")
 
         final_code = 2 if redeem_code == 2 else 0
         manifest.update(
@@ -386,6 +525,7 @@ def run(args: argparse.Namespace) -> int:
         ValueError,
         TypeError,
         KeyError,
+        incremental_module.IncrementalError,
         normalize_module.NormalizeError,
         redeem_module.RedeemError,
         sub2api_module.Sub2ApiError,
@@ -416,6 +556,11 @@ def main() -> int:
     parser.add_argument("--wait-seconds", type=int, help="Cockpit 导入等待秒数")
     parser.add_argument("--skip-sub2api", action="store_true", help="跳过 Sub2API 导入")
     parser.add_argument("--skip-cockpit", action="store_true", help="跳过 Cockpit 导入")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="只处理相对上次快照新增或已删除的账号",
+    )
     parser.add_argument("--log-file", type=Path, help="覆盖本次流水线日志路径")
     parser.add_argument("--dry-run", action="store_true", help="只检查本地文件，不访问网络")
     args = parser.parse_args()
@@ -437,6 +582,7 @@ def main() -> int:
         ValueError,
         TypeError,
         KeyError,
+        incremental_module.IncrementalError,
         normalize_module.NormalizeError,
         redeem_module.RedeemError,
         sub2api_module.Sub2ApiError,

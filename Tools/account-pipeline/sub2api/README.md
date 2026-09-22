@@ -10,3 +10,5 @@ import-from-cockpit-tools.bat [--what-if]
 ```
 
 `run.bat` 用于导入 JSON；`import-from-cockpit-tools.bat` 才会读取当前 Windows 用户的 Cockpit Tools 加密账号，需要安装 `requirements.txt` 中的 `cryptography` 包。后者不会被总流程自动调用。
+
+总目录的 `incremental.bat` 会使用本模块查询已管理账号的数据库 ID，并通过官方 `POST /api/v1/admin/accounts/batch-delete` 删除快照中存在、当前输入已不存在且仍能验证匹配的账号。不会按模糊名称或未知 ID 猜测删除。

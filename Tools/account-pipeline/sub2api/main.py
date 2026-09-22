@@ -361,6 +361,51 @@ def get_accounts(client: ApiClient, token: str) -> List[Dict[str, Any]]:
             return accounts
 
 
+def record_key(record: Dict[str, Any]) -> Optional[str]:
+    email = optional_string(record.get("email"))
+    if email:
+        return "email:" + email.casefold()
+    account_id = optional_string(record.get("account_id"))
+    return "id:" + account_id.casefold() if account_id else None
+
+
+def account_emails(account: Dict[str, Any]) -> List[str]:
+    values = []
+    for key in ("email", "name"):
+        value = optional_string(account.get(key))
+        if value and EMAIL_PATTERN.fullmatch(value):
+            values.append(value)
+    credentials = account.get("credentials")
+    if isinstance(credentials, str):
+        try:
+            credentials = json.loads(credentials)
+        except (TypeError, ValueError):
+            credentials = None
+    if isinstance(credentials, dict):
+        value = optional_string(credentials.get("email"))
+        if value and EMAIL_PATTERN.fullmatch(value):
+            values.append(value)
+    return list(dict.fromkeys(values))
+
+
+def write_managed_summary(path: Path, account_ids: Dict[str, int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text(
+            json.dumps({"version": 1, "accounts": account_ids}, ensure_ascii=False, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise Sub2ApiError(f"写入 Sub2API 增量映射失败：{path}") from exc
+
+
 def comparable(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -447,33 +492,23 @@ def expires_timestamp(value: Any) -> Optional[int]:
     return int(parsed.timestamp())
 
 
-def run_import(
-    input_file: Optional[Path],
+def admin_session(
     config_file: Optional[Path],
-    *,
-    cockpit_tools: bool = False,
-    what_if: bool = False,
-) -> int:
+) -> tuple[Path, Dict[str, Any], ApiClient, str]:
     config_path = resolve_config(config_file)
     config_value = json_file(config_path, "Sub2API 导入配置")
     if not isinstance(config_value, dict):
         raise Sub2ApiError("Sub2API 导入配置必须是 JSON 对象")
-    config_dir = config_path.parent
-    runtime_env_value = config_value.get("runtime_env_path", str(DEFAULT_RUNTIME_ENV))
-    runtime_env_text = optional_string(runtime_env_value)
-    if not runtime_env_text:
-        runtime_env = DEFAULT_RUNTIME_ENV
-    else:
-        runtime_env = Path(runtime_env_text).expanduser()
-        if not runtime_env.is_absolute():
-            runtime_env = config_dir / runtime_env
-        runtime_env = runtime_env.resolve()
-    runtime = read_dotenv(runtime_env)
+    runtime_env_text = optional_string(
+        config_value.get("runtime_env_path", str(DEFAULT_RUNTIME_ENV))
+    )
+    runtime_env = Path(runtime_env_text or str(DEFAULT_RUNTIME_ENV)).expanduser()
+    if not runtime_env.is_absolute():
+        runtime_env = config_path.parent / runtime_env
+    runtime = read_dotenv(runtime_env.resolve())
     if not runtime.get("ADMIN_EMAIL") or not runtime.get("ADMIN_PASSWORD"):
         raise Sub2ApiError("Sub2API 环境文件缺少 ADMIN_EMAIL 或 ADMIN_PASSWORD")
-    base_url = loopback_url(str(config_value.get("sub2api_url", "")), runtime)
-    batches = build_batches(config_value, config_dir, input_file, cockpit_tools)
-    client = ApiClient(base_url)
+    client = ApiClient(loopback_url(str(config_value.get("sub2api_url", "")), runtime))
     login = client.request(
         "POST",
         "/auth/login",
@@ -481,7 +516,23 @@ def run_import(
     )
     token = optional_string(property_value(login, "access_token"))
     if not token:
-        raise Sub2ApiError("管理员登录未返回 access_token；如已启用二次验证，请先在 Sub2API 中完成登录")
+        raise Sub2ApiError(
+            "管理员登录未返回 access_token；如已启用二次验证，请先在 Sub2API 中完成登录"
+        )
+    return config_path, config_value, client, token
+
+
+def run_import(
+    input_file: Optional[Path],
+    config_file: Optional[Path],
+    *,
+    cockpit_tools: bool = False,
+    what_if: bool = False,
+    summary_file: Optional[Path] = None,
+) -> int:
+    config_path, config_value, client, token = admin_session(config_file)
+    config_dir = config_path.parent
+    batches = build_batches(config_value, config_dir, input_file, cockpit_tools)
 
     groups_value = client.request("GET", "/admin/groups/all?include_inactive=true", token=token)
     groups = groups_value if isinstance(groups_value, list) else []
@@ -539,10 +590,14 @@ def run_import(
         if name not in ("imported_at", "access_token_sha256")
     )
     account_snapshots: Dict[str, Dict[str, Any]] = {}
+    managed_ids: Dict[str, int] = {}
     if not what_if:
         for account in get_accounts(client, token):
             current = snapshot(account, managed_extra)
             account_snapshots[str(current["id"])] = current
+            if current["id"] > 0:
+                for email in account_emails(account):
+                    managed_ids["email:" + email.casefold()] = current["id"]
 
     created = modified = unchanged = skipped = 0
     what_if_summaries = []
@@ -616,6 +671,9 @@ def run_import(
                 account_id = int(item.get("account_id", 0) or 0)
             except (TypeError, ValueError):
                 account_id = 0
+            key = record_key(record)
+            if key is not None and account_id > 0:
+                managed_ids[key] = account_id
             fallback_name = str(item.get("name", name))
             before = account_snapshots.get(str(account_id))
             after = None
@@ -657,7 +715,92 @@ def run_import(
     else:
         suffix = f"，跳过 {skipped}" if skipped else ""
         print(f"导入完成：新增 {created}，修改 {modified}，无变化 {unchanged}{suffix}")
+        if summary_file is not None:
+            write_managed_summary(summary_file, managed_ids)
     return 0
+
+
+def delete_account_ids(
+    config_file: Optional[Path],
+    account_ids: Iterable[int],
+) -> int:
+    """删除增量快照明确记录的 Sub2API 账户。"""
+    ids = set()
+    for value in account_ids:
+        try:
+            account_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if account_id > 0:
+            ids.add(account_id)
+    ids = sorted(ids)
+    if not ids:
+        print("Sub2API：没有需要删除的账户。")
+        return 0
+
+    _, _, client, token = admin_session(config_file)
+    result = client.request(
+        "POST",
+        "/admin/accounts/batch-delete",
+        token=token,
+        body={"account_ids": ids},
+    )
+    if not isinstance(result, dict):
+        raise Sub2ApiError("Sub2API 删除接口返回格式无效")
+    try:
+        failed = int(result.get("failed", 0) or 0)
+        success = int(result.get("success", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise Sub2ApiError("Sub2API 删除接口返回格式无效") from exc
+    if failed:
+        failed_ids = result.get("failed_ids", [])
+        detail = ", ".join(str(value) for value in failed_ids) if isinstance(failed_ids, list) else "未知账户"
+        raise Sub2ApiError(f"Sub2API 删除失败 {failed} 个账户（ID：{detail}）")
+    if success != len(ids):
+        raise Sub2ApiError(
+            f"Sub2API 删除结果数量不一致：请求 {len(ids)} 个，成功 {success} 个"
+        )
+    print(f"Sub2API 删除完成：{success} 个账户。")
+    return 0
+
+
+def resolve_account_ids(
+    config_file: Optional[Path],
+    records: Iterable[Dict[str, Any]],
+    *,
+    require_stored_id: bool = False,
+) -> Dict[str, int]:
+    """只读查询输入账号对应的 Sub2API 数据库 ID。"""
+    record_list = list(records)
+    wanted: Dict[str, Optional[int]] = {}
+    for record in record_list:
+        key = record_key(record)
+        if key is None:
+            continue
+        try:
+            remote_id = int(record.get("sub2api_id", 0) or 0)
+        except (TypeError, ValueError):
+            remote_id = 0
+        if require_stored_id and remote_id <= 0:
+            continue
+        wanted[key] = remote_id if remote_id > 0 else None
+    if not wanted:
+        return {}
+    _, _, client, token = admin_session(config_file)
+    result: Dict[str, int] = {}
+    for account in get_accounts(client, token):
+        try:
+            account_id = int(account.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if account_id <= 0:
+            continue
+        account_keys = {"email:" + email.casefold() for email in account_emails(account)}
+        for key in account_keys & wanted.keys():
+            expected_id = wanted[key]
+            if expected_id is None or expected_id == account_id:
+                result[key] = account_id
+    return result
 
 
 def resolve_config(config_file: Optional[Path]) -> Path:
@@ -687,12 +830,14 @@ def execute(
     *,
     cockpit_tools: bool = False,
     what_if: bool = False,
+    summary_file: Optional[Path] = None,
 ) -> int:
     return run_import(
         input_file.expanduser().resolve() if input_file is not None else None,
         config_file,
         cockpit_tools=cockpit_tools,
         what_if=what_if,
+        summary_file=summary_file,
     )
 
 
@@ -702,6 +847,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--cockpit-tools", action="store_true")
     parser.add_argument("--what-if", action="store_true")
+    parser.add_argument("--summary-file", type=Path)
     args = parser.parse_args()
     try:
         return execute(
@@ -709,6 +855,7 @@ def main() -> int:
             args.config,
             cockpit_tools=args.cockpit_tools,
             what_if=args.what_if,
+            summary_file=args.summary_file,
         )
     except (Sub2ApiError, OSError, ValueError, TypeError, KeyError) as exc:
         print(f"Sub2API 导入失败：{exc}", file=sys.stderr)
