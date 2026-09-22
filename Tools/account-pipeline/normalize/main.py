@@ -20,7 +20,8 @@ EMAIL_KEYS = ("email", "user_email", "account_email", "accountEmail", "username"
 REFRESH_KEYS = ("refresh_token", "refreshToken")
 ID_TOKEN_KEYS = ("id_token", "idToken")
 ACCOUNT_ID_KEYS = ("account_id", "accountId", "chatgpt_account_id")
-SUPPORTED_TYPES = {"codex"}
+SUPPORTED_TYPES = {"codex", "oauth"}
+SUPPORTED_PLATFORMS = {"openai", "codex"}
 
 
 class NormalizeError(RuntimeError):
@@ -60,16 +61,16 @@ def candidate_records(value: Any) -> Iterable[Dict[str, Any]]:
     if not isinstance(value, dict):
         return
 
-    if has_token(value):
-        yield value
-        return
-
     credentials = value.get("credentials")
     if isinstance(credentials, dict):
         merged = merge_record(value, credentials)
         if has_token(merged):
             yield merged
             return
+
+    if has_token(value):
+        yield value
+        return
 
     accounts = value.get("accounts")
     if isinstance(accounts, list):
@@ -93,24 +94,46 @@ def candidate_records(value: Any) -> Iterable[Dict[str, Any]]:
             yield from candidate_records(nested)
 
 
-def read_json(path: Path) -> Any:
+def parse_documents(text: str, label: str) -> List[Any]:
+    """读取一个或多个连续 JSON 文档，文档之间允许空行。"""
+    decoder = json.JSONDecoder()
+    values: List[Any] = []
+    offset = 0
+    length = len(text)
+    while offset < length:
+        while offset < length and text[offset].isspace():
+            offset += 1
+        if offset >= length:
+            break
+        try:
+            value, next_offset = decoder.raw_decode(text, offset)
+        except json.JSONDecodeError as exc:
+            line = text.count("\n", 0, exc.pos) + 1
+            raise NormalizeError(f"{label}第 {line} 行附近不是完整 JSON") from exc
+        values.append(value)
+        offset = next_offset
+    return values
+
+
+def read_json(path: Path, label: str = "JSON 文件") -> List[Any]:
     try:
         raw = path.read_bytes()
     except OSError as exc:
-        raise NormalizeError(f"读取下载文件失败：{path}") from exc
+        raise NormalizeError(f"读取{label}失败：{path}") from exc
     if not raw:
-        raise NormalizeError(f"下载文件为空：{path}")
+        raise NormalizeError(f"{label}为空：{path}")
     if len(raw) > MAX_JSON_BYTES:
-        raise NormalizeError(f"下载文件超过 {MAX_JSON_BYTES // (1024 * 1024)} MiB：{path}")
+        raise NormalizeError(
+            f"{label}超过 {MAX_JSON_BYTES // (1024 * 1024)} MiB：{path}"
+        )
     try:
-        if path.suffix.lower() == ".jsonl":
-            return [json.loads(line) for line in raw.decode("utf-8-sig").splitlines() if line.strip()]
-        return json.loads(raw.decode("utf-8-sig"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise NormalizeError(f"下载文件不是有效 UTF-8 JSON：{path}") from exc
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise NormalizeError(f"{label}不是有效 UTF-8 JSON：{path}") from exc
+    return parse_documents(text, f"{label} {path} ")
 
 
-def source_files(data_dir: Path) -> List[Path]:
+def source_files(data_dir: Path, *, allow_empty: bool = False) -> List[Path]:
     if not data_dir.is_dir():
         raise NormalizeError(f"找不到解压目录：{data_dir}")
     files = sorted(
@@ -120,7 +143,7 @@ def source_files(data_dir: Path) -> List[Path]:
     )
     if len(files) > MAX_SOURCE_FILES:
         raise NormalizeError(f"下载包中的 JSON 文件超过 {MAX_SOURCE_FILES} 个")
-    if not files:
+    if not files and not allow_empty:
         raise NormalizeError(f"解压目录中没有 JSON 文件：{data_dir}")
     return files
 
@@ -180,6 +203,10 @@ def canonical_record(record: Dict[str, Any], number: int) -> Dict[str, Any]:
     record_type = text_value(record.get("type"))
     if record_type and record_type.lower() not in SUPPORTED_TYPES:
         raise NormalizeError(f"第 {number} 个账号类型不受支持：{record_type}")
+    if record_type and record_type.lower() == "oauth":
+        platform = text_value(record.get("platform"))
+        if platform and platform.lower() not in SUPPORTED_PLATFORMS:
+            raise NormalizeError(f"第 {number} 个账号平台不受支持：{platform}")
 
     access_token = pick_string(record, TOKEN_KEYS)
     if not access_token:
@@ -255,14 +282,46 @@ def write_json(path: Path, value: Any) -> None:
         raise NormalizeError(f"写入标准化文件失败：{path}") from exc
 
 
-def normalize(data_dir: Path, output_dir: Path) -> Dict[str, Any]:
-    files = source_files(data_dir)
+def records_from_values(values: Iterable[Any]) -> List[Dict[str, Any]]:
+    records: List[Dict[str, Any]] = []
+    for value in values:
+        records.extend(candidate_records(value))
+    return records
+
+
+def validate_input_file(path: Path) -> None:
+    """校验独立账户文本，不访问网络也不写输出。"""
+    values = read_json(path.expanduser().resolve(), "账户文本")
+    raw_records = records_from_values(values)
+    if not raw_records:
+        raise NormalizeError(f"账户文本中没有找到包含 access_token 的账号：{path}")
+    if len(raw_records) > MAX_ACCOUNTS:
+        raise NormalizeError(f"账户文本中的账号数量超过 {MAX_ACCOUNTS} 个")
+    for index, record in enumerate(raw_records, start=1):
+        canonical_record(record, index)
+
+
+def normalize(
+    data_dir: Optional[Path],
+    output_dir: Path,
+    account_file: Optional[Path] = None,
+) -> Dict[str, Any]:
+    files = (
+        source_files(data_dir, allow_empty=account_file is not None)
+        if data_dir is not None
+        else []
+    )
+    if not files and account_file is None:
+        raise NormalizeError("没有提供兑换解压目录或独立账户文本")
     raw_records: List[Dict[str, Any]] = []
     for path in files:
-        value = read_json(path)
-        raw_records.extend(candidate_records(value))
+        raw_records.extend(records_from_values(read_json(path, "下载文件")))
+    account_path: Optional[Path] = None
+    if account_file is not None:
+        account_path = account_file.expanduser().resolve()
+        raw_records.extend(records_from_values(read_json(account_path, "账户文本")))
     if not raw_records:
-        raise NormalizeError("下载包中没有找到包含 access_token 的 Codex 账号")
+        raise NormalizeError("输入中没有找到包含 access_token 的 Codex 账号")
     if len(raw_records) > MAX_ACCOUNTS:
         raise NormalizeError(f"账号数量超过 {MAX_ACCOUNTS} 个")
 
@@ -293,17 +352,22 @@ def normalize(data_dir: Path, output_dir: Path) -> Dict[str, Any]:
         "sub2api_input": str(sub2api_path.resolve()),
         "cockpit_input": str(cockpit_path.resolve()),
     }
+    if account_path is not None:
+        metadata["account_file"] = str(account_path)
     write_json(output_dir / "manifest.json", metadata)
     return metadata
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="标准化下载的账号 JSON")
-    parser.add_argument("--data-dir", required=True, type=Path)
+    parser = argparse.ArgumentParser(description="标准化下载的账号 JSON 或账户文本")
+    parser.add_argument("--data-dir", type=Path, help="兑换 ZIP 的解压目录")
+    parser.add_argument("--input-file", type=Path, help="可含多个 JSON 对象的账户文本")
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
     try:
-        metadata = normalize(args.data_dir, args.output_dir)
+        if args.data_dir is None and args.input_file is None:
+            parser.error("--data-dir 和 --input-file 至少提供一个")
+        metadata = normalize(args.data_dir, args.output_dir, args.input_file)
     except (NormalizeError, OSError, ValueError, TypeError, KeyError) as exc:
         print(f"标准化模块失败：{exc}", file=sys.stderr)
         return 1

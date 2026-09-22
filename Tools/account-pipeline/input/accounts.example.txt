@@ -1,0 +1,13 @@
+{
+  "type": "oauth",
+  "platform": "openai",
+  "email": "account-one@example.invalid",
+  "access_token": "replace-with-account-one-access-token"
+}
+
+{
+  "type": "oauth",
+  "platform": "openai",
+  "email": "account-two@example.invalid",
+  "access_token": "replace-with-account-two-access-token"
+}

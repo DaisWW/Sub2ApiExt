@@ -1,4 +1,4 @@
-"""账号完整流水线：兑换、标准化、Sub2API 导入、Cockpit 导入。"""
+"""账号完整流水线：合并卡密兑换结果和账户文本后双目标导入。"""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from sub2api import main as sub2api_module  # noqa: E402
 
 
 NEW_CODES_FILE = BASE_DIR / "input" / "redeem-codes.txt"
+NEW_ACCOUNTS_FILE = BASE_DIR / "input" / "accounts.txt"
 DEFAULT_RUNTIME_DIR = Path(
     os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
 ) / "Sub2API" / "account-pipeline"
@@ -58,22 +59,52 @@ def load_pipeline_config() -> Dict[str, Any]:
     return value
 
 
-def choose_input(argument: Optional[Path]) -> Path:
+def looks_like_account_text(path: Path) -> bool:
+    """识别拖入总入口的账户 JSON 文本；卡密仍按普通文本处理。"""
+    if path.suffix.lower() in {".json", ".jsonl"}:
+        return True
+    try:
+        sample = path.read_bytes()[:4096].decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return sample.lstrip().startswith(("{", "["))
+
+
+def choose_inputs(
+    argument: Optional[Path],
+    codes_argument: Optional[Path],
+    accounts_argument: Optional[Path],
+) -> tuple[Optional[Path], Optional[Path]]:
+    if argument is not None and codes_argument is not None:
+        raise PipelineError("位置参数不能与 --codes-file 同时使用")
+
+    codes_file = resolved(codes_argument) if codes_argument is not None else None
+    accounts_file = (
+        resolved(accounts_argument) if accounts_argument is not None else None
+    )
+
     if argument is not None:
         path = resolved(argument)
         if not path.is_file():
-            raise PipelineError(f"找不到拖入的卡密文件：{path}")
-        if path.suffix.lower() in {".json", ".jsonl"}:
-            raise PipelineError(
-                "总流程输入必须是卡密 TXT；JSON 请交给 normalize、sub2api 或 cockpit 模块"
-            )
-        return path
-    if NEW_CODES_FILE.is_file():
-        return resolved(NEW_CODES_FILE)
-    raise PipelineError(
-        "没有找到卡密 TXT；请把文件拖到 run.bat，或创建 "
-        f"{NEW_CODES_FILE}"
-    )
+            raise PipelineError(f"找不到拖入的输入文件：{path}")
+        if accounts_argument is not None:
+            codes_file = path
+        elif looks_like_account_text(path):
+            accounts_file = path
+        else:
+            codes_file = path
+
+    if argument is None and codes_argument is None and accounts_argument is None:
+        if codes_file is None and NEW_CODES_FILE.is_file():
+            codes_file = resolved(NEW_CODES_FILE)
+        if accounts_file is None and NEW_ACCOUNTS_FILE.is_file():
+            accounts_file = resolved(NEW_ACCOUNTS_FILE)
+    if codes_file is None and accounts_file is None:
+        raise PipelineError(
+            "没有找到输入；请填写 input\\redeem-codes.txt 或 input\\accounts.txt，"
+            "也可以把卡密/账户文本拖到 run.bat"
+        )
+    return codes_file, accounts_file
 
 
 def make_run_dir(runtime_dir: Path) -> Path:
@@ -98,10 +129,17 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
         raise PipelineError(f"写入流水线 manifest 失败：{path}") from exc
 
 
-def validate_layout(input_file: Path, sub2api_config: Optional[Path]) -> None:
+def validate_layout(
+    codes_file: Optional[Path],
+    accounts_file: Optional[Path],
+    sub2api_config: Optional[Path],
+) -> None:
     if sys.version_info < (3, 8):
         raise PipelineError("需要 Python 3.8 或更高版本")
-    redeem_module.validate(input_file)
+    if codes_file is not None:
+        redeem_module.validate(codes_file)
+    if accounts_file is not None:
+        normalize_module.validate_input_file(accounts_file)
     if sub2api_config is not None:
         sub2api_module.validate_config(sub2api_config)
 
@@ -155,7 +193,9 @@ def stage_error(
 
 def run(args: argparse.Namespace) -> int:
     config = load_pipeline_config()
-    input_file = choose_input(args.input_file)
+    codes_file, accounts_file = choose_inputs(
+        args.input_file, args.codes_file, args.accounts_file
+    )
 
     if args.runtime_dir is not None:
         runtime_dir = resolved(args.runtime_dir)
@@ -180,8 +220,15 @@ def run(args: argparse.Namespace) -> int:
     if not 10 <= wait_seconds <= 300:
         raise PipelineError("Cockpit 等待时间必须在 10 到 300 秒之间")
 
-    validate_layout(input_file, sub2api_config)
-    print(f"卡密输入：{input_file}")
+    validate_layout(codes_file, accounts_file, sub2api_config)
+    if codes_file is not None:
+        print(f"卡密输入：{codes_file}")
+    else:
+        print("卡密输入：未提供（跳过兑换）")
+    if accounts_file is not None:
+        print(f"账户文本输入：{accounts_file}")
+    else:
+        print("账户文本输入：未提供")
     print(f"运行根目录：{runtime_dir}")
     if args.dry_run:
         print("检查通过；dry-run 未访问兑换站，也未执行导入。")
@@ -197,44 +244,52 @@ def run(args: argparse.Namespace) -> int:
         "version": 1,
         "status": "running",
         "started_at": datetime.now().isoformat(timespec="seconds"),
-        "input_file": str(input_file),
+        "input_file": str(codes_file or accounts_file),
+        "codes_file": str(codes_file) if codes_file is not None else None,
+        "accounts_file": str(accounts_file) if accounts_file is not None else None,
         "run_dir": str(run_dir),
-        "result_file": str(result_file),
-        "redeem_manifest": str(redeem_manifest),
+        "result_file": str(result_file) if codes_file is not None else None,
+        "redeem_manifest": str(redeem_manifest) if codes_file is not None else None,
         "normalized_dir": str(normalized_dir),
         "skip_sub2api": bool(args.skip_sub2api),
         "skip_cockpit": bool(args.skip_cockpit),
     }
-    stage = "redeem"
+    stage = "redeem" if codes_file is not None else "normalize"
     try:
         write_json(pipeline_manifest, manifest)
-        redeem_code = redeem_module.execute(
-            input_file,
-            action="sub2api",
-            cache_dir=runtime_dir / "runs",
-            run_dir=redeem_dir,
-            result_file=result_file,
-            manifest_file=redeem_manifest,
-        )
-        manifest["redeem_exit_code"] = redeem_code
-        manifest["redeem_result_file"] = str(result_file)
-        if result_file.is_file():
-            print(f"本次结果已覆盖写入：{result_file}")
-        if redeem_code not in (0, 2):
-            return stage_error(manifest, pipeline_manifest, "redeem", redeem_code, "兑换未完成")
+        redeem_code = 0
+        data_dir: Optional[Path] = None
+        if codes_file is not None:
+            redeem_code = redeem_module.execute(
+                codes_file,
+                action="sub2api",
+                cache_dir=runtime_dir / "runs",
+                run_dir=redeem_dir,
+                result_file=result_file,
+                manifest_file=redeem_manifest,
+            )
+            manifest["redeem_exit_code"] = redeem_code
+            manifest["redeem_result_file"] = str(result_file)
+            if result_file.is_file():
+                print(f"本次结果已覆盖写入：{result_file}")
+            if redeem_code not in (0, 2):
+                return stage_error(manifest, pipeline_manifest, "redeem", redeem_code, "兑换未完成")
 
-        redeem_info = read_redeem_manifest(redeem_manifest, redeem_dir)
-        manifest["redeem"] = {
-            key: redeem_info.get(key)
-            for key in ("task_id", "archive", "data_dir", "total", "success", "failed")
-            if key in redeem_info
-        }
-        if redeem_code == 2:
-            print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
+            redeem_info = read_redeem_manifest(redeem_manifest, redeem_dir)
+            data_dir = Path(redeem_info["data_dir"])
+            manifest["redeem"] = {
+                key: redeem_info.get(key)
+                for key in ("task_id", "archive", "data_dir", "total", "success", "failed")
+                if key in redeem_info
+            }
+            if redeem_code == 2:
+                print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
+        else:
+            print("未提供卡密，跳过兑换阶段。")
 
         stage = "normalize"
         normalized = normalize_module.normalize(
-            Path(redeem_info["data_dir"]), normalized_dir
+            data_dir, normalized_dir, accounts_file
         )
         manifest["normalized"] = normalized
         write_json(pipeline_manifest, manifest)
@@ -298,9 +353,20 @@ def run(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="兑换卡密、解压并标准化账号，然后导入 Sub2API 和 Cockpit"
+        description="处理卡密和账户 JSON 文本，标准化后导入 Sub2API 和 Cockpit"
     )
-    parser.add_argument("input_file", nargs="?", type=Path, help="卡密 TXT；也可拖到 run.bat")
+    parser.add_argument(
+        "input_file",
+        nargs="?",
+        type=Path,
+        help="拖入的卡密或账户 JSON 文本；也可分别使用下面两个选项",
+    )
+    parser.add_argument("--codes-file", type=Path, help="卡密 TXT（一行一个，允许空行）")
+    parser.add_argument(
+        "--accounts-file",
+        type=Path,
+        help="账户 JSON 文本（可连续放多个对象，允许空行）",
+    )
     parser.add_argument("--runtime-dir", type=Path, help="覆盖默认的 ProgramData 运行目录")
     parser.add_argument("--sub2api-config", type=Path, help="Sub2API 导入配置 JSON")
     parser.add_argument("--wait-seconds", type=int, help="Cockpit 导入等待秒数")
@@ -316,6 +382,7 @@ def main() -> int:
         ValueError,
         TypeError,
         KeyError,
+        normalize_module.NormalizeError,
         redeem_module.RedeemError,
         sub2api_module.Sub2ApiError,
     ) as exc:
