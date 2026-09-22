@@ -63,11 +63,15 @@ def choose_input(argument: Optional[Path]) -> Path:
         path = resolved(argument)
         if not path.is_file():
             raise PipelineError(f"找不到拖入的卡密文件：{path}")
+        if path.suffix.lower() in {".json", ".jsonl"}:
+            raise PipelineError(
+                "总流程输入必须是卡密 TXT；JSON 请交给 normalize、sub2api 或 cockpit 模块"
+            )
         return path
     if NEW_CODES_FILE.is_file():
         return resolved(NEW_CODES_FILE)
     raise PipelineError(
-        "没有找到卡密文件；请把文件拖到 run.bat，或创建 "
+        "没有找到卡密 TXT；请把文件拖到 run.bat，或创建 "
         f"{NEW_CODES_FILE}"
     )
 
@@ -296,7 +300,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="兑换卡密、解压并标准化账号，然后导入 Sub2API 和 Cockpit"
     )
-    parser.add_argument("input_file", nargs="?", type=Path, help="卡密文本；也可拖到 run.bat")
+    parser.add_argument("input_file", nargs="?", type=Path, help="卡密 TXT；也可拖到 run.bat")
     parser.add_argument("--runtime-dir", type=Path, help="覆盖默认的 ProgramData 运行目录")
     parser.add_argument("--sub2api-config", type=Path, help="Sub2API 导入配置 JSON")
     parser.add_argument("--wait-seconds", type=int, help="Cockpit 导入等待秒数")
