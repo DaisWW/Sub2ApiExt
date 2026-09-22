@@ -705,7 +705,12 @@ def process(
     client = RedeemClient()
     print("[兑换] 正在连接兑换站……")
     client.start()
-    print(f"[兑换] 正在提交任务（操作：{action}）……")
+    action_label = {
+        "sub2api": "Sub2API 账号包（供后续标准化）",
+        "cpa": "CPA 账号包",
+        "check": "仅检测，不下载",
+    }.get(action, action)
+    print(f"[兑换] 正在提交任务（兑换格式：{action_label}）……")
     task_id = client.submit(codes, action)
     print("[兑换] 等待兑换站处理……")
     payload = client.wait(task_id, action=action)
