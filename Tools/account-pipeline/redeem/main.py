@@ -373,7 +373,9 @@ class RedeemClient:
                         for key, label in (("success", "成功"), ("fail", "失败")):
                             if key in payload:
                                 summary.append(f"{label} {payload[key]}")
-                        suffix = f"（{'，'.join(summary)}）" if summary else ""
+                        suffix = (
+                            f"（服务统计：{'，'.join(summary)}）" if summary else ""
+                        )
                         print(f"[兑换] 兑换站任务已完成{suffix}。")
                         return payload
                     elif event == "fail":
