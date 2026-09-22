@@ -97,6 +97,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\Tools\codex-account-import
 
 校验通过后去掉 `-WhatIf` 正式导入。脚本为每条记录调用 `/api/v1/admin/accounts/import/codex-session`，并固定启用 `update_existing=true`；凭据身份匹配到已有 Codex 账号时更新，否则新建。更新已有账号不会修改名称和备注。记录逐条提交，中途失败时此前成功的记录不会回滚。
 
+正式导入会逐行输出新增和实际发生变化的账户，例如 `新增账户：codex-001（ID 123）`，或 `修改账户：codex-002（ID 124）；字段：凭据、分组、优先级`。已有账户由导入前后的只读账户快照判断变化；`updated_at` 和仅表示执行时间的 `extra.imported_at` 不算业务变化。没有业务变化的账户不逐行输出，只在末尾汇总为 `无变化 N`。凭据变化按脱敏字段及服务端保存的 Access Token 指纹判断，只显示字段名，不显示具体值；账户名称是邮箱时只显示账户 ID。
+
 输入文件支持以下三种结构：
 
 | 结构 | 示例形态 | 读取方式 |

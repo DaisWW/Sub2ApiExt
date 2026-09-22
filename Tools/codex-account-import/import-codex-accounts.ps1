@@ -145,6 +145,114 @@ function Invoke-Sub2Api {
     return Get-ApiData $response
 }
 
+function ConvertTo-ComparableJson {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return "null"
+    }
+    return ConvertTo-Json -InputObject $Value -Depth 50 -Compress
+}
+
+function Get-ImportAccounts {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [Parameter(Mandatory = $true)][string]$Token
+    )
+
+    $accounts = @()
+    $page = 1
+    do {
+        $data = Invoke-Sub2Api `
+            -Method Get `
+            -Path "/admin/accounts?page=$page&page_size=100&platform=openai&type=oauth" `
+            -BaseUrl $BaseUrl `
+            -Token $Token
+        $accounts += @(Get-JsonProperty $data "items" @())
+        $pages = [int](Get-JsonProperty $data "pages" 1)
+        $page++
+    } while ($page -le $pages)
+
+    return $accounts
+}
+
+function New-AccountImportSnapshot {
+    param(
+        [Parameter(Mandatory = $true)]$Account,
+        [string[]]$ManagedExtraNames = @()
+    )
+
+    $accountExtra = Get-JsonProperty $Account "extra" $null
+    $credentials = [pscustomobject]@{
+        values      = Get-JsonProperty $Account "credentials" $null
+        status      = Get-JsonProperty $Account "credentials_status" $null
+        token_hash  = if ($null -ne $accountExtra) { Get-JsonProperty $accountExtra "access_token_sha256" "" } else { "" }
+    }
+    $groupIds = @(Get-JsonProperty $Account "group_ids" @() | ForEach-Object { [int64]$_ } | Sort-Object)
+    $fields = [ordered]@{
+        "凭据"         = ConvertTo-ComparableJson $credentials
+        "代理"         = ConvertTo-ComparableJson (Get-JsonProperty $Account "proxy_id" $null)
+        "并发数"       = ConvertTo-ComparableJson (Get-JsonProperty $Account "concurrency" $null)
+        "优先级"       = ConvertTo-ComparableJson (Get-JsonProperty $Account "priority" $null)
+        "账户倍率"     = ConvertTo-ComparableJson (Get-JsonProperty $Account "rate_multiplier" $null)
+        "负载因子"     = ConvertTo-ComparableJson (Get-JsonProperty $Account "load_factor" $null)
+        "分组"         = ConvertTo-ComparableJson $groupIds
+        "到期时间"     = ConvertTo-ComparableJson (Get-JsonProperty $Account "expires_at" $null)
+        "到期自动暂停" = ConvertTo-ComparableJson (Get-JsonProperty $Account "auto_pause_on_expired" $null)
+    }
+    foreach ($extraName in $ManagedExtraNames) {
+        $extraValue = if ($null -ne $accountExtra) { Get-JsonProperty $accountExtra $extraName $null } else { $null }
+        $fields["extra.$extraName"] = ConvertTo-ComparableJson $extraValue
+    }
+
+    return [pscustomobject]@{
+        Id     = [int64](Get-JsonProperty $Account "id" 0)
+        Name   = [string](Get-JsonProperty $Account "name" "")
+        Fields = $fields
+    }
+}
+
+function Get-AccountImportChanges {
+    param(
+        [Parameter(Mandatory = $true)]$Before,
+        [Parameter(Mandatory = $true)]$After
+    )
+
+    $changes = @()
+    foreach ($field in $After.Fields.GetEnumerator()) {
+        if (-not [string]::Equals([string]$Before.Fields[$field.Key], [string]$field.Value, [StringComparison]::Ordinal)) {
+            $changes += [string]$field.Key
+        }
+    }
+    return $changes
+}
+
+function Format-AccountLogLabel {
+    param(
+        $Snapshot,
+        [int64]$AccountId,
+        [string]$FallbackName,
+        [int]$BatchIndex,
+        [int]$RecordIndex
+    )
+
+    $name = if ($null -ne $Snapshot -and $Snapshot.Name) { [string]$Snapshot.Name } else { $FallbackName }
+    $name = ($name -replace '[\p{Cc}]', ' ').Trim()
+    if ($name -match '(?i)[^@\s]+@[^@\s]+\.[^@\s]+') {
+        $name = ""
+    }
+    if ($name -and $AccountId -gt 0) {
+        return "$name（ID $AccountId）"
+    }
+    if ($AccountId -gt 0) {
+        return "ID $AccountId"
+    }
+    if ($name) {
+        return $name
+    }
+    return "批次 $BatchIndex 第 $RecordIndex 个账户"
+}
+
 function Resolve-UniqueByName {
     param(
         [Parameter(Mandatory = $true)][object[]]$Items,
@@ -379,10 +487,25 @@ if ($null -ne $loadFactor) {
 }
 
 $extra = Get-JsonProperty $config "extra" ([pscustomobject]@{})
+# 只比较本次配置管理的 extra 字段，忽略导入时间和服务运行态字段。
+$managedExtraNames = if ($null -eq $extra) {
+    @()
+}
+else {
+    @($extra.PSObject.Properties.Name | Where-Object { $_ -ne "imported_at" -and $_ -ne "access_token_sha256" } | Sort-Object)
+}
 $created = 0
-$updated = 0
+$modified = 0
+$unchanged = 0
 $skipped = 0
 $whatIfSummaries = @()
+$accountSnapshots = @{}
+if (-not $WhatIf) {
+    foreach ($account in @(Get-ImportAccounts -BaseUrl $baseUrl -Token $token)) {
+        $snapshot = New-AccountImportSnapshot -Account $account -ManagedExtraNames $managedExtraNames
+        $accountSnapshots[[string]$snapshot.Id] = $snapshot
+    }
+}
 
 foreach ($batch in $batchDefinitions) {
     $records = @($batch.Records)
@@ -430,11 +553,70 @@ foreach ($batch in $batchDefinitions) {
         }
 
         $result = Invoke-Sub2Api -Method Post -Path "/admin/accounts/import/codex-session" -BaseUrl $baseUrl -Token $token -Body $payload
-        $created += [int](Get-JsonProperty $result "created" 0)
-        $updated += [int](Get-JsonProperty $result "updated" 0)
-        $skipped += [int](Get-JsonProperty $result "skipped" 0)
         if ([int](Get-JsonProperty $result "failed" 0) -gt 0) {
             throw "第 $($batch.Index) 个批次第 $($index + 1) 个账号导入失败；凭据内容未输出，请在 Sub2API 操作日志中查看请求结果"
+        }
+
+        $resultItems = @(Get-JsonProperty $result "items" @())
+        $resultItem = if ($resultItems.Count -gt 0) { $resultItems[0] } else { $null }
+        $action = if ($null -ne $resultItem) { [string](Get-JsonProperty $resultItem "action" "") } else { "" }
+        if (-not $action) {
+            if ([int](Get-JsonProperty $result "created" 0) -gt 0) { $action = "created" }
+            elseif ([int](Get-JsonProperty $result "updated" 0) -gt 0) { $action = "updated" }
+            elseif ([int](Get-JsonProperty $result "skipped" 0) -gt 0) { $action = "skipped" }
+        }
+        $accountId = if ($null -ne $resultItem) { [int64](Get-JsonProperty $resultItem "account_id" 0) } else { [int64]0 }
+        $resultName = if ($null -ne $resultItem) { [string](Get-JsonProperty $resultItem "name" $name) } else { $name }
+        $beforeSnapshot = if ($accountId -gt 0) { $accountSnapshots[[string]$accountId] } else { $null }
+        $afterSnapshot = $null
+        if ($accountId -gt 0 -and ($action -eq "created" -or $action -eq "updated")) {
+            try {
+                $account = Invoke-Sub2Api -Method Get -Path "/admin/accounts/$accountId" -BaseUrl $baseUrl -Token $token
+                $afterSnapshot = New-AccountImportSnapshot -Account $account -ManagedExtraNames $managedExtraNames
+            }
+            catch {
+                Write-Warning "账户 ID $accountId 已导入，但无法读取导入后的账户明细：$($_.Exception.Message)"
+            }
+        }
+        $accountLabel = Format-AccountLogLabel `
+            -Snapshot $afterSnapshot `
+            -AccountId $accountId `
+            -FallbackName $resultName `
+            -BatchIndex $batch.Index `
+            -RecordIndex ($index + 1)
+
+        switch ($action) {
+            "created" {
+                $created++
+                if ($null -ne $afterSnapshot) {
+                    $accountSnapshots[[string]$accountId] = $afterSnapshot
+                }
+                Write-Host "新增账户：$accountLabel"
+            }
+            "updated" {
+                if ($null -ne $afterSnapshot -and $null -ne $beforeSnapshot) {
+                    $changes = @(Get-AccountImportChanges -Before $beforeSnapshot -After $afterSnapshot)
+                }
+                else {
+                    $changes = @("无法确定（缺少账户快照）")
+                }
+                if ($changes.Count -eq 0) {
+                    $unchanged++
+                }
+                else {
+                    $modified++
+                    Write-Host "修改账户：$accountLabel；字段：$($changes -join '、')"
+                }
+                if ($null -ne $afterSnapshot) {
+                    $accountSnapshots[[string]$accountId] = $afterSnapshot
+                }
+            }
+            "skipped" {
+                $skipped++
+            }
+            default {
+                throw "第 $($batch.Index) 个批次第 $($index + 1) 个账号返回了无法识别的导入结果"
+            }
         }
     }
 
@@ -451,5 +633,9 @@ if ($WhatIf) {
     }
 }
 else {
-    Write-Host "导入完成：创建 $created，更新 $updated，跳过 $skipped"
+    $summary = "导入完成：新增 $created，修改 $modified，无变化 $unchanged"
+    if ($skipped -gt 0) {
+        $summary += "，跳过 $skipped"
+    }
+    Write-Host $summary
 }
