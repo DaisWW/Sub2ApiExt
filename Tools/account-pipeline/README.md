@@ -38,11 +38,11 @@ cockpit\run.bat <cockpit-accounts.json>
 
 ## 运行目录
 
-默认运行目录是 `C:\ProgramData\Sub2API\account-pipeline`，可在本目录创建被 gitignore 的 `config.json` 覆盖：
+默认运行目录是工具目录下被 Git 忽略的 `cache`，即 `Tools\account-pipeline\cache`，可在本目录创建被 gitignore 的 `config.json` 覆盖：
 
 ```json
 {
-  "runtime_dir": "C:\\ProgramData\\Sub2API\\account-pipeline",
+  "runtime_dir": "cache",
   "sub2api_config": "",
   "cockpit_wait_seconds": 60
 }
@@ -57,6 +57,7 @@ cockpit\run.bat <cockpit-accounts.json>
 │  ├─ normalized/             两个导入目标 JSON
 │  ├─ redeem-manifest.json    兑换元数据
 │  └─ manifest.json           阶段状态和退出码
+├─ logs/pipeline-*.log        流水线日志
 └─ results/redeem-result.txt  最近一次逐卡结果（UTF-8 BOM TSV）
 ```
 
@@ -66,13 +67,14 @@ manifest 只保存路径、数量、任务号和阶段状态，不保存卡密�
 
 | 内容 | 默认位置 |
 | --- | --- |
-| 下载的 ZIP | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\redeem\` |
-| ZIP 解压出的账号 JSON | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\redeem\data\` |
-| 给 Sub2API 和 Cockpit 的标准化 JSON | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\normalized\` |
-| 本次运行 manifest | `C:\ProgramData\Sub2API\account-pipeline\runs\<run-id>\manifest.json` |
-| 最近一次卡密结果 | `C:\ProgramData\Sub2API\account-pipeline\results\redeem-result.txt` |
+| 下载的 ZIP | `Tools\account-pipeline\cache\runs\<run-id>\redeem\` |
+| ZIP 解压出的账号 JSON | `Tools\account-pipeline\cache\runs\<run-id>\redeem\data\` |
+| 给 Sub2API 和 Cockpit 的标准化 JSON | `Tools\account-pipeline\cache\runs\<run-id>\normalized\` |
+| 本次运行 manifest | `Tools\account-pipeline\cache\runs\<run-id>\manifest.json` |
+| 最近一次卡密结果 | `Tools\account-pipeline\cache\results\redeem-result.txt` |
+| 流水线日志 | `Tools\account-pipeline\cache\logs\` |
 
-这些缓存不写入 Git 工作区。若需要换到其他非 Git 目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input\redeem-codes.txt` 和 `input\accounts.txt` 是用户输入源，不是自动生成的缓存，仓库已将它们加入忽略规则。
+这些缓存不写入 Git 工作区。若需要换到其他目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input\redeem-codes.txt` 和 `input\accounts.txt` 是用户输入源，不是自动生成的缓存，仓库已将它们加入忽略规则。
 
 ## Sub2API 配置
 

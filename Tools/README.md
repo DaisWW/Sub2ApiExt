@@ -15,8 +15,8 @@ Tools/
    └─ cockpit/                        Cockpit Tools 本地导入
 ```
 
-把卡密文件拖到 `account-pipeline\run.bat`，或把卡密逐行写入 `input\redeem-codes.txt`；需要直接导入已有账户时，把多个 JSON 对象（对象之间可空行）写入 `input\accounts.txt`。两个文件同时存在时，一键流程会合并账号、整理格式，然后分别导入 Cockpit 和 Sub2API。结果会显示在窗口，并覆盖保存到 `C:\ProgramData\Sub2API\account-pipeline\results\redeem-result.txt`。
+把卡密文件拖到 `account-pipeline\run.bat`，或把卡密逐行写入 `input\redeem-codes.txt`；需要直接导入已有账户时，把多个 JSON 对象（对象之间可空行）写入 `input\accounts.txt`。两个文件同时存在时，一键流程会合并账号、整理格式，然后分别导入 Cockpit 和 Sub2API。结果会显示在窗口，并覆盖保存到 `account-pipeline\cache\results\redeem-result.txt`。
 
 根目录只保留一个总入口 BAT；各模块目录中的 `run.bat` 是对应模块的快捷入口，会复用总入口的 Python 启动检查。
 
-下载缓存、解压目录、标准化 JSON 和运行 manifest 存放在 `C:\ProgramData\Sub2API\account-pipeline\runs`，最近一次结果在同级 `results`，不写入 Git 工作区。完整路径、清理方式和单模块用法见 [account-pipeline/README.md](account-pipeline/README.md)。
+下载缓存、解压目录、标准化 JSON、日志和运行 manifest 存放在被 Git 忽略的 `account-pipeline\cache`，不写入 Git 工作区。完整路径、清理方式和单模块用法见 [account-pipeline/README.md](account-pipeline/README.md)。

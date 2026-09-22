@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -24,14 +25,46 @@ from sub2api import main as sub2api_module  # noqa: E402
 
 NEW_CODES_FILE = BASE_DIR / "input" / "redeem-codes.txt"
 NEW_ACCOUNTS_FILE = BASE_DIR / "input" / "accounts.txt"
-DEFAULT_RUNTIME_DIR = Path(
-    os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
-) / "Sub2API" / "account-pipeline"
+DEFAULT_RUNTIME_DIR = BASE_DIR / "cache"
 PIPELINE_CONFIG = BASE_DIR / "config.json"
 
 
 class PipelineError(RuntimeError):
     """流水线输入或运行状态错误。"""
+
+
+class TeeStream:
+    """同时保留控制台输出和本次运行日志。"""
+
+    def __init__(self, console, log_file):
+        self.console = console
+        self.log_file = log_file
+
+    def write(self, value: str) -> int:
+        self.console.write(value)
+        self.log_file.write(value)
+        return len(value)
+
+    def flush(self) -> None:
+        self.console.flush()
+        self.log_file.flush()
+
+    def isatty(self) -> bool:
+        return self.console.isatty()
+
+
+@contextmanager
+def capture_log(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", errors="replace", buffering=1) as log_file:
+        original_stdout, original_stderr = sys.stdout, sys.stderr
+        sys.stdout = TeeStream(original_stdout, log_file)
+        sys.stderr = TeeStream(original_stderr, log_file)
+        try:
+            yield
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
 
 
 def resolved(path: Path) -> Path:
@@ -57,6 +90,16 @@ def load_pipeline_config() -> Dict[str, Any]:
     if not isinstance(value, dict):
         raise PipelineError(f"流水线配置必须是 JSON 对象：{PIPELINE_CONFIG}")
     return value
+
+
+def runtime_dir_for_args(args: argparse.Namespace) -> Path:
+    if args.runtime_dir is not None:
+        return resolved(args.runtime_dir)
+    try:
+        config = load_pipeline_config()
+    except PipelineError:
+        return resolved(DEFAULT_RUNTIME_DIR)
+    return config_path(config.get("runtime_dir")) or resolved(DEFAULT_RUNTIME_DIR)
 
 
 def looks_like_account_text(path: Path) -> bool:
@@ -368,15 +411,26 @@ def main() -> int:
         type=Path,
         help="账户 JSON 文本（可连续放多个对象，允许空行）",
     )
-    parser.add_argument("--runtime-dir", type=Path, help="覆盖默认的 ProgramData 运行目录")
+    parser.add_argument("--runtime-dir", type=Path, help="覆盖默认的 account-pipeline 缓存目录")
     parser.add_argument("--sub2api-config", type=Path, help="Sub2API 导入配置 JSON")
     parser.add_argument("--wait-seconds", type=int, help="Cockpit 导入等待秒数")
     parser.add_argument("--skip-sub2api", action="store_true", help="跳过 Sub2API 导入")
     parser.add_argument("--skip-cockpit", action="store_true", help="跳过 Cockpit 导入")
+    parser.add_argument("--log-file", type=Path, help="覆盖本次流水线日志路径")
     parser.add_argument("--dry-run", action="store_true", help="只检查本地文件，不访问网络")
     args = parser.parse_args()
     try:
-        return run(args)
+        runtime_dir = runtime_dir_for_args(args)
+        log_file = (
+            resolved(args.log_file)
+            if args.log_file is not None
+            else runtime_dir
+            / "logs"
+            / f"pipeline-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.log"
+        )
+        with capture_log(log_file):
+            print(f"[日志] 本次流水线日志：{log_file}")
+            return run(args)
     except (
         PipelineError,
         OSError,

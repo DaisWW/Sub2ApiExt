@@ -41,7 +41,6 @@ runtime/
 Tools/account-pipeline/input/redeem-codes.txt
 Tools/account-pipeline/input/accounts.txt
 Tools/account-pipeline/config.json
-Tools/account-pipeline/runs/
-Tools/account-pipeline/results/
+Tools/account-pipeline/cache/
 Tools/account-pipeline/**/__pycache__/
 Tools/account-pipeline/**/.pytest_cache/

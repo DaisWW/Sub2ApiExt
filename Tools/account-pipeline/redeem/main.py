@@ -25,9 +25,7 @@ from pathlib import Path
 
 BASE_URL = "https://redeem.plusproteam.xyz"
 PIPELINE_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_RUNTIME_DIR = Path(
-    os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
-) / "Sub2API" / "account-pipeline"
+DEFAULT_RUNTIME_DIR = PIPELINE_DIR / "cache"
 CODES_FILE = PIPELINE_DIR / "input" / "redeem-codes.txt"
 CACHE_DIR = DEFAULT_RUNTIME_DIR / "runs"
 RESULT_FILE = DEFAULT_RUNTIME_DIR / "results" / "redeem-result.txt"
@@ -522,23 +520,25 @@ def character_width(value: str) -> int:
 def fit_column(value: str, width: int) -> str:
     if display_width(value) <= width:
         return value + " " * (width - display_width(value))
-    if width <= 1:
-        return "…"[:width]
+    marker = "…"
+    marker_width = character_width(marker)
+    if width < marker_width:
+        return "." * width
     result = []
     used = 0
     for char in value:
         char_width = character_width(char)
-        if used + char_width > width - 1:
+        if used + char_width > width - marker_width:
             break
         result.append(char)
         used += char_width
-    result.append("…")
+    result.append(marker)
     text = "".join(result)
     return text + " " * max(0, width - display_width(text))
 
 
 def wrap_column(value: str, width: int) -> list[str]:
-    """按终端显示宽度换行，避免说明列撑开整张表。"""
+    """按终端显示宽度换行说明文本，不参与主表格边框。"""
     if width <= 1:
         return [fit_column(value, width)]
     lines = []
@@ -584,14 +584,15 @@ def result_rows(rows: list[dict]) -> list[list[str]]:
 
 
 def result_widths(values: list[list[str]], terminal_columns: int | None) -> list[int]:
-    headers = list(RESULT_COLUMNS[:6])
-    maximums = (22, 36, 19, 12, 8, 48)
-    minimums = (16, 20, 19, 12, 6, 18)
+    headers = ("序号", "卡密", "账号", "首次提取时间", "质保", "结果")
+    maximums = (4, 22, 36, 19, 12, 8)
+    minimums = (4, 16, 14, 19, 6, 4)
     widths = []
     for index, header in enumerate(headers):
         width = display_width(header)
         for values_row in values:
-            width = max(width, display_width(values_row[index]))
+            value = values_row[index] if index < len(values_row) else ""
+            width = max(width, display_width(value))
         widths.append(min(max(width, minimums[index]), maximums[index]))
 
     separator_width = 3 * (len(headers) - 1)
@@ -600,7 +601,7 @@ def result_widths(values: list[list[str]], terminal_columns: int | None) -> list
         sum(minimums) + separator_width,
         (terminal_columns or fallback_width) - 2,
     )
-    shrink_order = (5, 1, 0, 3, 4, 2)
+    shrink_order = (2, 1, 4, 5, 0, 3)
     excess = sum(widths) + separator_width - budget
     for index in shrink_order:
         if excess <= 0:
@@ -612,8 +613,12 @@ def result_widths(values: list[list[str]], terminal_columns: int | None) -> list
 
 
 def format_results(rows: list[dict], terminal_columns: int | None = None) -> str:
-    values = result_rows(rows)
-    headers = list(RESULT_COLUMNS[:6])
+    raw_values = result_rows(rows)
+    values = [
+        [str(index), *row[:5], row[5]]
+        for index, row in enumerate(raw_values, start=1)
+    ]
+    headers = ("序号", "卡密", "账号", "首次提取时间", "质保", "结果")
     widths = result_widths(values, terminal_columns)
 
     def render(values_row: list[str]) -> str:
@@ -627,16 +632,15 @@ def format_results(rows: list[dict], terminal_columns: int | None = None) -> str
         "-+-".join("-" * width for width in widths),
     ]
     for values_row in values:
-        wrapped = [
-            wrap_column(value, widths[index]) if index in (0, 1, 5) else [value]
-            for index, value in enumerate(values_row)
-        ]
-        for line_number in range(max(len(column) for column in wrapped)):
-            row = [
-                column[line_number] if line_number < len(column) else ""
-                for column in wrapped
-            ]
-            lines.append(render(row))
+        lines.append(render(values_row[:6]))
+        message = values_row[6] or "-"
+        description_width = max(
+            20,
+            (terminal_columns or shutil.get_terminal_size((120, 24)).columns) - 10,
+        )
+        for line_number, line in enumerate(wrap_column(message, description_width)):
+            prefix = "  说明：" if line_number == 0 else "        "
+            lines.append(prefix + line)
     normal = sum(1 for row in rows if row.get("ok") is True)
     lines.append(f"结果汇总：正常 {normal}，异常 {len(rows) - normal}")
     return "\n".join(lines)
