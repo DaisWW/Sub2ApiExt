@@ -304,8 +304,15 @@ class RedeemClient:
                         new_stage = stage_number == 0 or reset or completed_reset or kind_changed
                         if new_stage:
                             if stage_number:
+                                transition_word = (
+                                    "完成"
+                                    if last_total is not None
+                                    and last_done is not None
+                                    and last_done >= last_total
+                                    else "切换"
+                                )
                                 print(
-                                    f"[兑换] 阶段 {stage_number} 完成："
+                                    f"[兑换] 阶段 {stage_number} {transition_word}："
                                     f"{last_done if last_done is not None else '?'}/"
                                     f"{stage_total}。"
                                 )
@@ -349,8 +356,15 @@ class RedeemClient:
                         last_total = total_number
                     elif event == "done":
                         if stage_number:
+                            transition_word = (
+                                "完成"
+                                if last_total is not None
+                                and last_done is not None
+                                and last_done >= last_total
+                                else "结束"
+                            )
                             print(
-                                f"[兑换] 阶段 {stage_number} 完成："
+                                f"[兑换] 阶段 {stage_number} {transition_word}："
                                 f"{last_done if last_done is not None else '?'}/"
                                 f"{stage_total}。"
                             )
