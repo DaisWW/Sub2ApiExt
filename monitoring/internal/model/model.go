@@ -406,9 +406,31 @@ const (
 	CostAlertBudgetBurn    = "budget_burn"
 )
 
+// CostAlertRequest is a bounded, metadata-only sample of a request that
+// contributed to a cost anomaly. Prompts, responses, credentials, and raw
+// client request identifiers are intentionally excluded.
+type CostAlertRequest struct {
+	UsageLogID          int64
+	CreatedAt           time.Time
+	Model               string
+	ChannelName         string
+	AccountName         string
+	AccountID           int64
+	InputTokens         int64
+	OutputTokens        int64
+	CacheCreationTokens int64
+	CacheReadTokens     int64
+	TotalTokens         int64
+	BaseCost            float64
+	ActualCost          float64
+	Multiplier          float64
+	CacheHitRate        float64
+	DurationMS          int64
+	FirstTokenMS        int64
+}
+
 // CostAlertEvent is an internal, notification-ready summary of a request-cost
-// anomaly. It intentionally contains token and cost aggregates only; request
-// prompts, responses, credentials, and raw request identifiers are excluded.
+// anomaly. RequestSamples contains at most a small current-window sample.
 type CostAlertEvent struct {
 	ID                   int64
 	AlertKey             string
@@ -418,7 +440,10 @@ type CostAlertEvent struct {
 	Title                string
 	Message              string
 	UserKey              string
+	UserName             string
+	UserEmail            string
 	APIKeyID             int64
+	APIKeyName           string
 	Model                string
 	ChannelName          string
 	AccountName          string
@@ -446,6 +471,7 @@ type CostAlertEvent struct {
 	ProjectedCost        float64
 	WindowStart          time.Time
 	WindowEnd            time.Time
+	RequestSamples       []CostAlertRequest
 	CreatedAt            time.Time
 }
 

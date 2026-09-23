@@ -20,7 +20,10 @@ func TestBuildCostAlertMessageContainsBreakdownWithoutPassword(t *testing.T) {
 		Severity:             "critical",
 		Title:                "实际倍率异常",
 		UserKey:              "42",
+		UserName:             "Owner",
+		UserEmail:            "owner@example.com",
 		APIKeyID:             7,
+		APIKeyName:           "Codex",
 		Model:                "gpt-5.6-sol",
 		ChannelName:          "渠道 A",
 		AccountName:          "owner@example.com",
@@ -49,7 +52,7 @@ func TestBuildCostAlertMessageContainsBreakdownWithoutPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(message)
-	for _, fragment := range []string{"实际倍率异常", "API Key ID: 7", "账户: owner@example.com #75", "Tokens 分项: 输入 80000，输出 20000，缓存写入 10000，缓存读取 10000", "缓存写入 0.8000", "倍率相对历史基线翻倍"} {
+	for _, fragment := range []string{"实际倍率异常", "用户: Owner <owner@example.com> #42", "API Key: Codex #7", "账户: owner@example.com #75", "Tokens 分项: 输入 80000，输出 20000，缓存写入 10000，缓存读取 10000", "缓存写入 0.8000", "倍率相对历史基线翻倍"} {
 		if !strings.Contains(text, fragment) {
 			t.Fatalf("email is missing %q: %s", fragment, text)
 		}
@@ -74,6 +77,49 @@ func TestBuildCostAlertMessageFallsBackToAccountID(t *testing.T) {
 	}
 	if !strings.Contains(string(message), "账户: 账户 #75") {
 		t.Fatalf("email does not contain account ID fallback: %s", message)
+	}
+}
+
+func TestBuildCostAlertMessageListsRequestSamples(t *testing.T) {
+	message, err := buildCostAlertMessage(config.EmailConfig{
+		From: "sender@qq.com",
+		To:   []string{"admin@example.com"},
+	}, []model.CostAlertEvent{{
+		Severity: "critical",
+		Title:    "每百万 Tokens 成本异常",
+		UserKey:  "7",
+		Requests: 2,
+		RequestSamples: []model.CostAlertRequest{{
+			UsageLogID: 123, CreatedAt: time.Date(2026, 9, 23, 2, 35, 0, 0, time.UTC),
+			InputTokens: 100, OutputTokens: 20, CacheReadTokens: 30, TotalTokens: 150,
+			BaseCost: 0.2, ActualCost: 0.8, Multiplier: 4, CacheHitRate: 23.1,
+			DurationMS: 800, FirstTokenMS: 120,
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(message)
+	for _, fragment := range []string{
+		"异常请求（当前窗口列出 1/2 条，按成本/倍率排序）:",
+		"时间(UTC): 2026-09-23T02:35:00Z",
+		"记录 #123",
+		"成本 0.8000",
+		"倍率 4.00x",
+		"首字 120ms，总耗时 800ms",
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("email is missing %q: %s", fragment, text)
+		}
+	}
+}
+
+func TestFormatIdentityKeepsIDAndUsesAvailableNames(t *testing.T) {
+	if got := formatIdentity("刘笑冬", "lxd@example.com", "7", "用户"); got != "刘笑冬 <lxd@example.com> #7" {
+		t.Fatalf("identity = %q", got)
+	}
+	if got := formatIdentity("", "", "82", "API Key"); got != "API Key #82" {
+		t.Fatalf("fallback identity = %q", got)
 	}
 }
 

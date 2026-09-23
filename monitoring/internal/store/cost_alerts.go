@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/config"
@@ -17,8 +18,11 @@ const costUsageQuery = `
 WITH usage AS (
     SELECT ul.created_at,
            COALESCE(NULLIF(BTRIM(ul.user_id::text), ''), 'unknown') AS user_key,
+           COALESCE(NULLIF(BTRIM(u.username), ''), '') AS user_name,
+           COALESCE(NULLIF(BTRIM(u.email), ''), '') AS user_email,
            COALESCE(NULLIF(BTRIM(ul.model), ''), 'unknown') AS model,
            COALESCE(ul.api_key_id, 0)::bigint AS api_key_id,
+           COALESCE(NULLIF(BTRIM(k.name), ''), '') AS api_key_name,
            COALESCE(ul.channel_id, 0)::bigint AS channel_id,
            COALESCE(NULLIF(BTRIM(c.name), ''), '未归属渠道') AS channel_name,
            COALESCE(ul.account_id, 0)::bigint AS account_id,
@@ -34,6 +38,8 @@ WITH usage AS (
            GREATEST(COALESCE(ul.cache_creation_cost, 0), 0)::double precision AS cache_creation_cost,
            GREATEST(COALESCE(ul.cache_read_cost, 0), 0)::double precision AS cache_read_cost
     FROM usage_logs ul
+    LEFT JOIN users u ON u.id = ul.user_id
+    LEFT JOIN api_keys k ON k.id = ul.api_key_id
     LEFT JOIN channels c ON c.id = ul.channel_id
     LEFT JOIN accounts a ON a.id = ul.account_id
     WHERE ul.created_at >= $3
@@ -41,8 +47,11 @@ WITH usage AS (
       AND ul.actual_cost > 0
 )
 SELECT user_key,
+       MAX(user_name) AS user_name,
+       MAX(user_email) AS user_email,
        model,
        api_key_id,
+       MAX(api_key_name) AS api_key_name,
        channel_id,
        MAX(channel_name) AS channel_name,
        account_id,
@@ -84,7 +93,10 @@ WITH bounds AS (
            $3::timestamptz AS day_start
 ), usage AS (
     SELECT COALESCE(NULLIF(BTRIM(ul.user_id::text), ''), 'unknown') AS user_key,
+           COALESCE(NULLIF(BTRIM(u.username), ''), '') AS user_name,
+           COALESCE(NULLIF(BTRIM(u.email), ''), '') AS user_email,
            COALESCE(ul.api_key_id, 0)::bigint AS api_key_id,
+           COALESCE(NULLIF(BTRIM(k.name), ''), '') AS api_key_name,
            ul.created_at,
            GREATEST(COALESCE(ul.actual_cost, 0), 0)::double precision AS actual_cost,
            (GREATEST(COALESCE(ul.input_tokens, 0), 0)::bigint +
@@ -92,13 +104,18 @@ WITH bounds AS (
             GREATEST(COALESCE(ul.cache_creation_tokens, 0), 0)::bigint +
             GREATEST(COALESCE(ul.cache_read_tokens, 0), 0)::bigint) AS total_tokens
     FROM usage_logs ul
+    LEFT JOIN users u ON u.id = ul.user_id
+    LEFT JOIN api_keys k ON k.id = ul.api_key_id
     CROSS JOIN bounds
     WHERE ul.created_at >= LEAST(bounds.window_start, bounds.day_start)
       AND ul.created_at < bounds.end_at
       AND ul.actual_cost > 0
 )
 SELECT usage.user_key,
+       MAX(usage.user_name) AS user_name,
+       MAX(usage.user_email) AS user_email,
        usage.api_key_id,
+       MAX(usage.api_key_name) AS api_key_name,
        bounds.day_start,
        COUNT(*) FILTER (WHERE usage.created_at >= GREATEST(bounds.window_start, bounds.day_start))::bigint AS window_requests,
        COALESCE(SUM(usage.total_tokens) FILTER (WHERE usage.created_at >= GREATEST(bounds.window_start, bounds.day_start)), 0)::bigint AS window_tokens,
@@ -109,10 +126,65 @@ CROSS JOIN bounds
 GROUP BY usage.user_key, usage.api_key_id, bounds.day_start
 ORDER BY usage.user_key, usage.api_key_id`
 
+// costAlertRequestQuery returns a bounded sample for both alert scopes. The
+// same row can be selected for its detailed model/channel/account group and
+// for its user/API-key budget scope; each scope is independently capped.
+const costAlertRequestQuery = `
+WITH raw AS (
+    SELECT ul.id AS usage_log_id,
+           COALESCE(NULLIF(BTRIM(ul.user_id::text), ''), 'unknown') AS user_key,
+           COALESCE(ul.api_key_id, 0)::bigint AS api_key_id,
+           COALESCE(NULLIF(BTRIM(ul.model), ''), 'unknown') AS model,
+           COALESCE(ul.channel_id, 0)::bigint AS channel_id,
+           COALESCE(NULLIF(BTRIM(c.name), ''), '未归属渠道') AS channel_name,
+           COALESCE(ul.account_id, 0)::bigint AS account_id,
+           COALESCE(NULLIF(BTRIM(a.name), ''), '未归属账户') AS account_name,
+           ul.created_at,
+           GREATEST(COALESCE(ul.input_tokens, 0), 0)::bigint AS input_tokens,
+           GREATEST(COALESCE(ul.output_tokens, 0), 0)::bigint AS output_tokens,
+           GREATEST(COALESCE(ul.cache_creation_tokens, 0), 0)::bigint AS cache_creation_tokens,
+           GREATEST(COALESCE(ul.cache_read_tokens, 0), 0)::bigint AS cache_read_tokens,
+           GREATEST(COALESCE(ul.total_cost, 0), 0)::double precision AS base_cost,
+           GREATEST(COALESCE(ul.actual_cost, 0), 0)::double precision AS actual_cost,
+           GREATEST(COALESCE(ul.duration_ms, 0), 0)::bigint AS duration_ms,
+           GREATEST(COALESCE(ul.first_token_ms, 0), 0)::bigint AS first_token_ms
+    FROM usage_logs ul
+    LEFT JOIN channels c ON c.id = ul.channel_id
+    LEFT JOIN accounts a ON a.id = ul.account_id
+    WHERE ul.created_at >= $1
+      AND ul.created_at < $2
+      AND ul.actual_cost > 0
+), ranked AS (
+    SELECT raw.*,
+           ROW_NUMBER() OVER (
+               PARTITION BY user_key, model, api_key_id, channel_id, account_id
+               ORDER BY actual_cost DESC,
+                        CASE WHEN base_cost > 0 THEN actual_cost / base_cost ELSE 0 END DESC,
+                        created_at DESC, usage_log_id DESC
+           ) AS group_rank,
+           ROW_NUMBER() OVER (
+               PARTITION BY user_key, api_key_id
+               ORDER BY actual_cost DESC,
+                        CASE WHEN base_cost > 0 THEN actual_cost / base_cost ELSE 0 END DESC,
+                        created_at DESC, usage_log_id DESC
+           ) AS user_rank
+    FROM raw
+)
+SELECT usage_log_id, user_key, api_key_id, model, channel_id, channel_name,
+       account_id, account_name, created_at,
+       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       base_cost, actual_cost, duration_ms, first_token_ms, group_rank, user_rank
+FROM ranked
+WHERE group_rank <= $3 OR user_rank <= $3
+ORDER BY user_key, api_key_id, model, channel_id, account_id, group_rank, user_rank`
+
 type costUsageGroup struct {
 	userKey                string
+	userName               string
+	userEmail              string
 	model                  string
 	apiKeyID               int64
+	apiKeyName             string
 	channelID              int64
 	channelName            string
 	accountID              int64
@@ -170,7 +242,10 @@ func (m costUsageMetrics) Multiplier() float64 {
 
 type costDailyUsage struct {
 	userKey        string
+	userName       string
+	userEmail      string
 	apiKeyID       int64
+	apiKeyName     string
 	dayStart       time.Time
 	windowRequests int64
 	windowTokens   int64
@@ -207,6 +282,9 @@ func (s *Store) AnalyzeCostAlerts(ctx context.Context, policy config.CostAlertCo
 	if len(candidates) == 0 {
 		return nil, nil
 	}
+	if err := s.attachCostAlertRequestSamples(ctx, candidates, currentStart, now); err != nil {
+		return nil, fmt.Errorf("load cost alert requests: %w", err)
+	}
 	return s.persistCostAlertCandidates(ctx, candidates, now, policy.Cooldown)
 }
 
@@ -221,7 +299,8 @@ func (s *Store) loadCostUsageGroups(ctx context.Context, currentStart, currentEn
 		var group costUsageGroup
 		var current, baseline costUsageMetrics
 		if err := rows.Scan(
-			&group.userKey, &group.model, &group.apiKeyID, &group.channelID, &group.channelName,
+			&group.userKey, &group.userName, &group.userEmail, &group.model, &group.apiKeyID, &group.apiKeyName,
+			&group.channelID, &group.channelName,
 			&group.accountID, &group.accountName,
 			&current.Requests, &current.InputTokens, &current.OutputTokens,
 			&current.CacheCreationTokens, &current.CacheReadTokens,
@@ -254,7 +333,8 @@ func (s *Store) loadCostDailyUsage(ctx context.Context, windowStart, end, daySta
 	for rows.Next() {
 		var item costDailyUsage
 		if err := rows.Scan(
-			&item.userKey, &item.apiKeyID, &item.dayStart, &item.windowRequests, &item.windowTokens,
+			&item.userKey, &item.userName, &item.userEmail, &item.apiKeyID, &item.apiKeyName,
+			&item.dayStart, &item.windowRequests, &item.windowTokens,
 			&item.windowCost, &item.dailyCost,
 		); err != nil {
 			return nil, err
@@ -269,6 +349,98 @@ func (s *Store) loadCostDailyUsage(ctx context.Context, windowStart, end, daySta
 	return usage, nil
 }
 
+const costAlertRequestSampleLimit = 8
+
+type costAlertRequestSamples struct {
+	byGroup map[string][]model.CostAlertRequest
+	byUser  map[string][]model.CostAlertRequest
+}
+
+func (s *Store) attachCostAlertRequestSamples(ctx context.Context, events []model.CostAlertEvent, start, end time.Time) error {
+	samples, err := s.loadCostAlertRequestSamples(ctx, start, end, costAlertRequestSampleLimit)
+	if err != nil {
+		return err
+	}
+	for index := range events {
+		if events[index].Kind == model.CostAlertBudgetBurn {
+			events[index].RequestSamples = samples.byUser[events[index].TargetKey]
+			continue
+		}
+		events[index].RequestSamples = samples.byGroup[events[index].TargetKey]
+	}
+	return nil
+}
+
+func (s *Store) loadCostAlertRequestSamples(ctx context.Context, start, end time.Time, limit int) (costAlertRequestSamples, error) {
+	if limit <= 0 {
+		limit = costAlertRequestSampleLimit
+	}
+	rows, err := s.db.QueryContext(ctx, costAlertRequestQuery, start, end, limit)
+	if err != nil {
+		return costAlertRequestSamples{}, err
+	}
+	defer rows.Close()
+	samples := costAlertRequestSamples{
+		byGroup: make(map[string][]model.CostAlertRequest),
+		byUser:  make(map[string][]model.CostAlertRequest),
+	}
+	for rows.Next() {
+		var (
+			usageLogID, apiKeyID, channelID, accountID                      int64
+			userKey, modelName, channelName, accountName                    string
+			createdAt                                                       time.Time
+			inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int64
+			baseCost, actualCost                                            float64
+			durationMS, firstTokenMS                                        int64
+			groupRank, userRank                                             int64
+		)
+		if err := rows.Scan(
+			&usageLogID, &userKey, &apiKeyID, &modelName, &channelID, &channelName,
+			&accountID, &accountName, &createdAt,
+			&inputTokens, &outputTokens, &cacheCreationTokens, &cacheReadTokens,
+			&baseCost, &actualCost, &durationMS, &firstTokenMS, &groupRank, &userRank,
+		); err != nil {
+			return costAlertRequestSamples{}, err
+		}
+		request := model.CostAlertRequest{
+			UsageLogID:          usageLogID,
+			CreatedAt:           createdAt,
+			Model:               modelName,
+			ChannelName:         channelName,
+			AccountName:         accountName,
+			AccountID:           accountID,
+			InputTokens:         inputTokens,
+			OutputTokens:        outputTokens,
+			CacheCreationTokens: cacheCreationTokens,
+			CacheReadTokens:     cacheReadTokens,
+			TotalTokens:         inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens,
+			BaseCost:            baseCost,
+			ActualCost:          actualCost,
+			DurationMS:          durationMS,
+			FirstTokenMS:        firstTokenMS,
+		}
+		if baseCost > 0 {
+			request.Multiplier = actualCost / baseCost
+		}
+		cacheableTokens := inputTokens + cacheCreationTokens + cacheReadTokens
+		if cacheableTokens > 0 {
+			request.CacheHitRate = float64(cacheReadTokens) * 100 / float64(cacheableTokens)
+		}
+		if groupRank <= int64(limit) {
+			key := costTargetKey(userKey, apiKeyID, modelName, channelID, accountID)
+			samples.byGroup[key] = append(samples.byGroup[key], request)
+		}
+		if userRank <= int64(limit) {
+			key := costUserTargetKey(userKey, apiKeyID)
+			samples.byUser[key] = append(samples.byUser[key], request)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return costAlertRequestSamples{}, err
+	}
+	return samples, nil
+}
+
 func evaluateCostUsageGroup(group costUsageGroup, policy config.CostAlertConfig, start, end time.Time) []model.CostAlertEvent {
 	current := group.current
 	baseline := group.baseline
@@ -277,7 +449,10 @@ func evaluateCostUsageGroup(group costUsageGroup, policy config.CostAlertConfig,
 	baseEvent := model.CostAlertEvent{
 		TargetKey:            costTargetKey(group.userKey, group.apiKeyID, group.model, group.channelID, group.accountID),
 		UserKey:              group.userKey,
+		UserName:             group.userName,
+		UserEmail:            group.userEmail,
 		APIKeyID:             group.apiKeyID,
+		APIKeyName:           group.apiKeyName,
 		Model:                group.model,
 		ChannelName:          group.channelName,
 		AccountName:          group.accountName,
@@ -314,7 +489,8 @@ func evaluateCostUsageGroup(group costUsageGroup, policy config.CostAlertConfig,
 		event.Title = "单条请求成本过高"
 		event.Message = fmt.Sprintf(
 			"用户 %s 的 %s 在 %s 出现单条成本 %.4f，已超过配置上限 %.4f。",
-			group.userKey, group.model, group.channelName, group.maxRequestCost, policy.SingleRequestCost,
+			costUserLabel(group.userName, group.userEmail, group.userKey), group.model, group.channelName,
+			group.maxRequestCost, policy.SingleRequestCost,
 		)
 		event.Severity = "critical"
 		events = append(events, event)
@@ -325,7 +501,7 @@ func evaluateCostUsageGroup(group costUsageGroup, policy config.CostAlertConfig,
 		event.Title = "实际倍率异常"
 		event.Message = fmt.Sprintf(
 			"用户 %s 的 %s 在 %s 最近窗口实际倍率 %.2fx，历史 %.2fx，最高单条倍率 %.2fx。",
-			group.userKey, group.model, group.channelName, event.CurrentMultiplier,
+			costUserLabel(group.userName, group.userEmail, group.userKey), group.model, group.channelName, event.CurrentMultiplier,
 			event.BaselineMultiplier, group.maxMultiplier,
 		)
 		event.Severity = "critical"
@@ -344,7 +520,7 @@ func evaluateCostUsageGroup(group costUsageGroup, policy config.CostAlertConfig,
 		event.Title = "疑似缓存失效"
 		event.Message = fmt.Sprintf(
 			"用户 %s 的 %s 在 %s 最近窗口缓存命中率 %.1f%%（历史 %.1f%%），单位成本 %.4f（历史 %.4f）。",
-			group.userKey, group.model, group.channelName, event.CurrentCacheHitRate,
+			costUserLabel(group.userName, group.userEmail, group.userKey), group.model, group.channelName, event.CurrentCacheHitRate,
 			event.BaselineCacheHitRate, event.CurrentUnitCost, event.BaselineUnitCost,
 		)
 		events = append(events, event)
@@ -355,7 +531,7 @@ func evaluateCostUsageGroup(group costUsageGroup, policy config.CostAlertConfig,
 		event.Title = "每百万 Tokens 成本异常"
 		event.Message = fmt.Sprintf(
 			"用户 %s 的 %s 在 %s 最近窗口单位成本 %.4f，历史基线 %.4f，当前成本 %.4f，最高单条成本 %.4f。",
-			group.userKey, group.model, group.channelName, event.CurrentUnitCost,
+			costUserLabel(group.userName, group.userEmail, group.userKey), group.model, group.channelName, event.CurrentUnitCost,
 			event.BaselineUnitCost, event.CurrentCost, event.MaxRequestCost,
 		)
 		if event.BaselineUnitCost > 0 && event.CurrentUnitCost >= event.BaselineUnitCost*policy.UnitCostRatio*1.5 {
@@ -439,10 +615,14 @@ func evaluateBudgetBurn(usage map[string]costDailyUsage, policy config.CostAlert
 			Title:     "消费速度过高",
 			Message: fmt.Sprintf(
 				"用户 %s 今日已消费 %.4f，最近窗口消费 %.4f，按当前速度预计今日消费 %.4f，预算 %.4f。",
-				userKey, item.dailyCost, item.windowCost, projected, policy.DailyBudget,
+				costUserLabel(item.userName, item.userEmail, userKey), item.dailyCost, item.windowCost,
+				projected, policy.DailyBudget,
 			),
 			UserKey:       userKey,
+			UserName:      item.userName,
+			UserEmail:     item.userEmail,
 			APIKeyID:      item.apiKeyID,
+			APIKeyName:    item.apiKeyName,
 			Requests:      item.windowRequests,
 			TotalTokens:   item.windowTokens,
 			CurrentCost:   item.windowCost,
@@ -454,6 +634,26 @@ func evaluateBudgetBurn(usage map[string]costDailyUsage, policy config.CostAlert
 		})
 	}
 	return events
+}
+
+func costUserLabel(name, email, userKey string) string {
+	name = strings.Join(strings.Fields(strings.TrimSpace(name)), " ")
+	email = strings.Join(strings.Fields(strings.TrimSpace(email)), " ")
+	label := name
+	if email != "" && !strings.EqualFold(email, name) {
+		if label == "" {
+			label = email
+		} else {
+			label += " <" + email + ">"
+		}
+	}
+	if label == "" {
+		label = "用户"
+	}
+	if userKey != "" && userKey != "unknown" {
+		label += " #" + userKey
+	}
+	return label
 }
 
 func costUserTargetKey(userKey string, apiKeyID int64) string {

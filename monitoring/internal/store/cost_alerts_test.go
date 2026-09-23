@@ -13,6 +13,11 @@ func TestCostAlertQueryUsesRequestMetadataOnly(t *testing.T) {
 	for _, fragment := range []string{
 		"ul.user_id",
 		"ul.api_key_id",
+		"LEFT JOIN users u ON u.id = ul.user_id",
+		"LEFT JOIN api_keys k ON k.id = ul.api_key_id",
+		"u.username",
+		"u.email",
+		"k.name",
 		"ul.model",
 		"ul.channel_id",
 		"ul.actual_cost > 0",
@@ -28,6 +33,28 @@ func TestCostAlertQueryUsesRequestMetadataOnly(t *testing.T) {
 	for _, forbidden := range []string{"prompt", "request_body", "response_body", "authorization"} {
 		if strings.Contains(strings.ToLower(costUsageQuery), forbidden) {
 			t.Fatalf("cost query must not read request payload %q", forbidden)
+		}
+	}
+}
+
+func TestCostAlertRequestQueryReturnsBoundedMetadataSamples(t *testing.T) {
+	for _, fragment := range []string{
+		"ul.id AS usage_log_id",
+		"ul.created_at",
+		"ul.duration_ms",
+		"ul.first_token_ms",
+		"ROW_NUMBER() OVER",
+		"PARTITION BY user_key, model, api_key_id, channel_id, account_id",
+		"PARTITION BY user_key, api_key_id",
+		"WHERE group_rank <= $3 OR user_rank <= $3",
+	} {
+		if !strings.Contains(costAlertRequestQuery, fragment) {
+			t.Fatalf("request sample query missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"prompt", "request_body", "response_body", "authorization", "ul.request_id"} {
+		if strings.Contains(strings.ToLower(costAlertRequestQuery), forbidden) {
+			t.Fatalf("request sample query must not read %q", forbidden)
 		}
 	}
 }
@@ -67,7 +94,8 @@ func testCostAlertPolicy() config.CostAlertConfig {
 func TestEvaluateCostUsageGroupDetectsCacheAndUnitCostAnomalies(t *testing.T) {
 	policy := testCostAlertPolicy()
 	group := costUsageGroup{
-		userKey: "42", model: "gpt-4.1", channelID: 7, channelName: "渠道 A", accountID: 9, accountName: "owner@example.com",
+		userKey: "42", userName: "Owner", userEmail: "owner@example.com", model: "gpt-4.1", apiKeyID: 7, apiKeyName: "Codex",
+		channelID: 7, channelName: "渠道 A", accountID: 9, accountName: "owner@example.com",
 		current: costUsageMetrics{
 			Requests: 3, InputTokens: 300_000, CacheReadTokens: 20_000,
 			ActualCost: 4.5,
@@ -87,7 +115,8 @@ func TestEvaluateCostUsageGroupDetectsCacheAndUnitCostAnomalies(t *testing.T) {
 		if event.TargetKey == "" || event.AlertKey == "" {
 			t.Fatalf("event keys are empty: %+v", event)
 		}
-		if event.AccountID != 9 || event.AccountName != "owner@example.com" {
+		if event.AccountID != 9 || event.AccountName != "owner@example.com" || event.UserName != "Owner" ||
+			event.UserEmail != "owner@example.com" || event.APIKeyName != "Codex" {
 			t.Fatalf("event account = %q #%d", event.AccountName, event.AccountID)
 		}
 	}

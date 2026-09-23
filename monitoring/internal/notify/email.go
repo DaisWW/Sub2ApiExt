@@ -81,9 +81,9 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 			body.WriteString("\n----------------------------------------\n\n")
 		}
 		body.WriteString(fmt.Sprintf("[%s] %s\n", event.Severity, event.Title))
-		body.WriteString(fmt.Sprintf("用户: %s\n", event.UserKey))
-		if event.APIKeyID > 0 {
-			body.WriteString(fmt.Sprintf("API Key ID: %d\n", event.APIKeyID))
+		body.WriteString(fmt.Sprintf("用户: %s\n", formatIdentity(event.UserName, event.UserEmail, event.UserKey, "用户")))
+		if event.APIKeyID > 0 || strings.TrimSpace(event.APIKeyName) != "" {
+			body.WriteString(fmt.Sprintf("API Key: %s\n", formatIdentity(event.APIKeyName, "", strconv.FormatInt(event.APIKeyID, 10), "API Key")))
 		}
 		if event.Model != "" {
 			body.WriteString(fmt.Sprintf("模型: %s\n", event.Model))
@@ -91,13 +91,9 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 		if event.ChannelName != "" {
 			body.WriteString(fmt.Sprintf("渠道: %s\n", event.ChannelName))
 		}
-		accountName := strings.TrimSpace(event.AccountName)
 		if event.AccountID > 0 {
-			if accountName == "" || accountName == "未归属账户" {
-				accountName = "账户"
-			}
-			body.WriteString(fmt.Sprintf("账户: %s #%d\n", accountName, event.AccountID))
-		} else if accountName != "" {
+			body.WriteString(fmt.Sprintf("账户: %s\n", formatIdentity(event.AccountName, "", strconv.FormatInt(event.AccountID, 10), "账户")))
+		} else if accountName := strings.TrimSpace(event.AccountName); accountName != "" {
 			body.WriteString(fmt.Sprintf("账户: %s\n", accountName))
 		}
 		if !event.WindowStart.IsZero() && !event.WindowEnd.IsZero() {
@@ -126,6 +122,7 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 		if event.DailyCost > 0 || event.ProjectedCost > 0 {
 			body.WriteString(fmt.Sprintf("今日成本: %.4f，预计今日成本: %.4f\n", event.DailyCost, event.ProjectedCost))
 		}
+		writeRequestSamples(&body, event)
 		body.WriteString(fmt.Sprintf("说明: %s\n", event.Message))
 	}
 	body.WriteString("\n建议检查对应用户的客户端、模型/渠道切换、缓存字段和倍率配置。\n")
@@ -142,6 +139,75 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 	message.WriteString("\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n")
 	message.WriteString(strings.ReplaceAll(body.String(), "\n", "\r\n"))
 	return []byte(message.String()), nil
+}
+
+func formatIdentity(name, email, id, fallback string) string {
+	name = cleanText(name)
+	email = cleanText(email)
+	id = cleanText(id)
+	if name == "未归属账户" || name == "未知账户" || name == "unknown" {
+		name = ""
+	}
+	label := name
+	if email != "" && !strings.EqualFold(email, name) {
+		if label == "" {
+			label = email
+		} else {
+			label += " <" + email + ">"
+		}
+	}
+	if label == "" {
+		label = fallback
+	}
+	if id != "" && id != "0" && id != "unknown" {
+		label += " #" + id
+	}
+	return label
+}
+
+func cleanText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func writeRequestSamples(body *strings.Builder, event model.CostAlertEvent) {
+	if len(event.RequestSamples) == 0 {
+		if event.Requests > 0 {
+			body.WriteString("异常请求: 当前窗口没有可列出的请求明细\n")
+		}
+		return
+	}
+	total := event.Requests
+	if total < int64(len(event.RequestSamples)) {
+		total = int64(len(event.RequestSamples))
+	}
+	body.WriteString(fmt.Sprintf("异常请求（当前窗口列出 %d/%d 条，按成本/倍率排序）:\n",
+		len(event.RequestSamples), total))
+	for _, request := range event.RequestSamples {
+		body.WriteString(fmt.Sprintf("- 时间(UTC): %s，记录 #%d，成本 %.4f，Tokens %d",
+			request.CreatedAt.UTC().Format(time.RFC3339), request.UsageLogID,
+			request.ActualCost, request.TotalTokens))
+		body.WriteString(fmt.Sprintf("，输入 %d，输出 %d，缓存写入 %d，缓存读取 %d",
+			request.InputTokens, request.OutputTokens, request.CacheCreationTokens, request.CacheReadTokens))
+		if request.BaseCost > 0 {
+			body.WriteString(fmt.Sprintf("，原始成本 %.4f，倍率 %.2fx", request.BaseCost, request.Multiplier))
+		}
+		if request.CacheReadTokens > 0 || request.CacheCreationTokens > 0 {
+			body.WriteString(fmt.Sprintf("，缓存命中率 %.1f%%", request.CacheHitRate))
+		}
+		if request.FirstTokenMS > 0 || request.DurationMS > 0 {
+			body.WriteString(fmt.Sprintf("，首字 %dms，总耗时 %dms", request.FirstTokenMS, request.DurationMS))
+		}
+		if event.Kind == model.CostAlertBudgetBurn {
+			account := strings.TrimSpace(request.AccountName)
+			if request.AccountID > 0 {
+				account = formatIdentity(request.AccountName, "", strconv.FormatInt(request.AccountID, 10), "账户")
+			}
+			body.WriteString(fmt.Sprintf("，模型 %s，渠道 %s，账户 %s",
+				cleanText(request.Model), cleanText(request.ChannelName),
+				account))
+		}
+		body.WriteString("\n")
+	}
 }
 
 func parseMailbox(value string) (string, error) {
