@@ -115,6 +115,9 @@ func TestLoadCostAlertEmailConfiguration(t *testing.T) {
 	if len(c.CostAlerts.Email.To) != 2 || c.CostAlerts.DailyBudget != 12.5 {
 		t.Fatalf("unexpected recipients or budget: %+v / %v", c.CostAlerts.Email.To, c.CostAlerts.DailyBudget)
 	}
+	if c.CostAlerts.CacheMissMinRequests != 2 || c.CostAlerts.CacheMissInputTokens != 100_000 {
+		t.Fatalf("unexpected request cache miss thresholds: %d / %d", c.CostAlerts.CacheMissMinRequests, c.CostAlerts.CacheMissInputTokens)
+	}
 }
 
 func TestLoadRejectsPartialCostAlertEmailConfiguration(t *testing.T) {

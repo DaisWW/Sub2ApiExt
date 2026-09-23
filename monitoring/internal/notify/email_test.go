@@ -114,6 +114,31 @@ func TestBuildCostAlertMessageListsRequestSamples(t *testing.T) {
 	}
 }
 
+func TestBuildCostAlertMessageListsAccountsForCacheMissRequests(t *testing.T) {
+	message, err := buildCostAlertMessage(config.EmailConfig{
+		From: "sender@qq.com",
+		To:   []string{"admin@example.com"},
+	}, []model.CostAlertEvent{{
+		Severity: "warning",
+		Title:    "请求级缓存命中异常",
+		Kind:     model.CostAlertCacheMiss,
+		UserKey:  "7",
+		Requests: 2,
+		RequestSamples: []model.CostAlertRequest{{
+			UsageLogID: 123, CreatedAt: time.Date(2026, 9, 23, 2, 35, 0, 0, time.UTC),
+			Model: "gpt-5.6-sol", ChannelName: "渠道 A", AccountName: "账户 A", AccountID: 11,
+			InputTokens: 100_000, CacheReadTokens: 1, TotalTokens: 100_001,
+			ActualCost: 0.8, CacheHitRate: 0.001,
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(message), "账户 账户 A #11") {
+		t.Fatalf("cache miss email does not contain account identity: %s", message)
+	}
+}
+
 func TestFormatIdentityKeepsIDAndUsesAvailableNames(t *testing.T) {
 	if got := formatIdentity("刘笑冬", "lxd@example.com", "7", "用户"); got != "刘笑冬 <lxd@example.com> #7" {
 		t.Fatalf("identity = %q", got)

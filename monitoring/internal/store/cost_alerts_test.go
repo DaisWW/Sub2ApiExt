@@ -59,6 +59,27 @@ func TestCostAlertRequestQueryReturnsBoundedMetadataSamples(t *testing.T) {
 	}
 }
 
+func TestCostAlertCacheMissQueryUsesPerRequestThresholdAndSessionGrouping(t *testing.T) {
+	for _, fragment := range []string{
+		"ul.session_id",
+		"input_tokens >= $3",
+		"cache_hit_rate < $4",
+		"affected_sessions",
+		"COUNT(DISTINCT raw.account_id)",
+		"session_account_count",
+		"COALESCE(ul.group_id, 0)::bigint AS group_id",
+	} {
+		if !strings.Contains(costAlertCacheMissQuery, fragment) {
+			t.Fatalf("cache miss query missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"prompt", "request_body", "response_body", "authorization", "ul.request_id"} {
+		if strings.Contains(strings.ToLower(costAlertCacheMissQuery), forbidden) {
+			t.Fatalf("cache miss query must not read %q", forbidden)
+		}
+	}
+}
+
 func TestCostDailyQueryDoesNotProjectAcrossPreviousDay(t *testing.T) {
 	for _, fragment := range []string{
 		"GREATEST(bounds.window_start, bounds.day_start)",
@@ -74,20 +95,87 @@ func TestCostDailyQueryDoesNotProjectAcrossPreviousDay(t *testing.T) {
 
 func testCostAlertPolicy() config.CostAlertConfig {
 	return config.CostAlertConfig{
-		Enabled:          true,
-		Window:           15 * time.Minute,
-		Baseline:         7 * 24 * time.Hour,
-		Cooldown:         30 * time.Minute,
-		MinRequests:      3,
-		MinTokens:        100_000,
-		MinCost:          0.5,
-		MinBaseCost:      0.1,
-		CacheBaselineMin: 0.60,
-		CacheCurrentMax:  0.20,
-		CacheCostRatio:   1.5,
-		UnitCostRatio:    1.5,
-		MultiplierRatio:  2,
-		BurnRatio:        1.5,
+		Enabled:              true,
+		Window:               15 * time.Minute,
+		Baseline:             7 * 24 * time.Hour,
+		Cooldown:             30 * time.Minute,
+		MinRequests:          3,
+		MinTokens:            100_000,
+		CacheMissMinRequests: 2,
+		CacheMissInputTokens: 100_000,
+		MinCost:              0.5,
+		MinBaseCost:          0.1,
+		CacheBaselineMin:     0.60,
+		CacheCurrentMax:      0.20,
+		CacheCostRatio:       1.5,
+		UnitCostRatio:        1.5,
+		MultiplierRatio:      2,
+		BurnRatio:            1.5,
+	}
+}
+
+func TestEvaluateCacheMissRequestsDetectsCrossAccountSession(t *testing.T) {
+	policy := testCostAlertPolicy()
+	start := time.Unix(100, 0)
+	end := time.Unix(200, 0)
+	items := []costAlertCacheMissRequest{
+		{
+			request: model.CostAlertRequest{
+				UsageLogID: 101, CreatedAt: end.Add(-2 * time.Minute), Model: "gpt-5.6-sol",
+				ChannelName: "渠道 A", AccountName: "账户 A", AccountID: 11,
+				InputTokens: 180_000, CacheReadTokens: 2_000, TotalTokens: 182_000,
+				BaseCost: 0.8, ActualCost: 0.2, CacheHitRate: 1.1,
+			},
+			userKey: "42", userName: "Owner", userEmail: "owner@example.com",
+			apiKeyID: 7, apiKeyName: "Codex", channelID: 9, groupID: 53,
+			sessionKey: "session-internal", sessionAccountCount: 2,
+		},
+		{
+			request: model.CostAlertRequest{
+				UsageLogID: 102, CreatedAt: end.Add(-time.Minute), Model: "gpt-5.6-sol",
+				ChannelName: "渠道 A", AccountName: "账户 B", AccountID: 78,
+				InputTokens: 175_000, CacheReadTokens: 4_000, TotalTokens: 179_000,
+				BaseCost: 0.8, ActualCost: 0.19, CacheHitRate: 2.2,
+			},
+			userKey: "42", userName: "Owner", userEmail: "owner@example.com",
+			apiKeyID: 7, apiKeyName: "Codex", channelID: 9, groupID: 53,
+			sessionKey: "session-internal", sessionAccountCount: 2,
+		},
+	}
+	events := evaluateCacheMissRequests(items, policy, start, end)
+	if len(events) != 1 {
+		t.Fatalf("got %d cache miss events: %+v", len(events), events)
+	}
+	event := events[0]
+	if event.Kind != model.CostAlertCacheMiss || event.Requests != 2 || len(event.RequestSamples) != 2 {
+		t.Fatalf("unexpected cache miss event: %+v", event)
+	}
+	if event.AccountID != 0 || event.AccountName != "多个账户" {
+		t.Fatalf("cross-account identity = %q #%d", event.AccountName, event.AccountID)
+	}
+	if !strings.Contains(event.Message, "疑似账户切换导致缓存断档") {
+		t.Fatalf("cross-account message = %q", event.Message)
+	}
+	if event.RequestSamples[0].UsageLogID != 101 || event.RequestSamples[1].AccountID != 78 {
+		t.Fatalf("request samples = %+v", event.RequestSamples)
+	}
+}
+
+func TestEvaluateCacheMissRequestsNeedsTwoLargeLowHitRequests(t *testing.T) {
+	policy := testCostAlertPolicy()
+	item := costAlertCacheMissRequest{
+		request: model.CostAlertRequest{
+			UsageLogID: 101, InputTokens: 100_000, CacheReadTokens: 1,
+			TotalTokens: 100_001, CacheHitRate: 0.001, ActualCost: 0.1,
+		},
+		userKey: "42", apiKeyID: 7, channelID: 9,
+	}
+	if events := evaluateCacheMissRequests([]costAlertCacheMissRequest{item}, policy, time.Unix(100, 0), time.Unix(200, 0)); len(events) != 0 {
+		t.Fatalf("one low-hit request produced events: %+v", events)
+	}
+	item.request.CacheHitRate = 30
+	if events := evaluateCacheMissRequests([]costAlertCacheMissRequest{item, item}, policy, time.Unix(100, 0), time.Unix(200, 0)); len(events) != 0 {
+		t.Fatalf("healthy requests produced events: %+v", events)
 	}
 }
 

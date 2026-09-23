@@ -191,13 +191,13 @@ func writeRequestSamples(body *strings.Builder, event model.CostAlertEvent) {
 		if request.BaseCost > 0 {
 			body.WriteString(fmt.Sprintf("，原始成本 %.4f，倍率 %.2fx", request.BaseCost, request.Multiplier))
 		}
-		if request.CacheReadTokens > 0 || request.CacheCreationTokens > 0 {
+		if request.CacheReadTokens > 0 || request.CacheCreationTokens > 0 || event.Kind == model.CostAlertCacheMiss {
 			body.WriteString(fmt.Sprintf("，缓存命中率 %.1f%%", request.CacheHitRate))
 		}
 		if request.FirstTokenMS > 0 || request.DurationMS > 0 {
 			body.WriteString(fmt.Sprintf("，首字 %dms，总耗时 %dms", request.FirstTokenMS, request.DurationMS))
 		}
-		if event.Kind == model.CostAlertBudgetBurn {
+		if event.Kind == model.CostAlertBudgetBurn || event.Kind == model.CostAlertCacheMiss {
 			account := strings.TrimSpace(request.AccountName)
 			if request.AccountID > 0 {
 				account = formatIdentity(request.AccountName, "", strconv.FormatInt(request.AccountID, 10), "账户")

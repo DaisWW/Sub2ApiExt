@@ -400,6 +400,7 @@ type Alert struct {
 
 const (
 	CostAlertCacheDegraded = "cache_degraded"
+	CostAlertCacheMiss     = "cache_miss_request"
 	CostAlertMultiplier    = "multiplier_spike"
 	CostAlertUnitCost      = "unit_cost_spike"
 	CostAlertSingleRequest = "single_request_cost"
