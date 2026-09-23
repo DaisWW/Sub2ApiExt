@@ -401,6 +401,7 @@ type Alert struct {
 const (
 	CostAlertCacheDegraded = "cache_degraded"
 	CostAlertCacheMiss     = "cache_miss_request"
+	CostAlertAccountSwitch = "account_switch_spike"
 	CostAlertMultiplier    = "multiplier_spike"
 	CostAlertUnitCost      = "unit_cost_spike"
 	CostAlertSingleRequest = "single_request_cost"
@@ -417,6 +418,8 @@ type CostAlertRequest struct {
 	ChannelName         string
 	AccountName         string
 	AccountID           int64
+	PreviousAccountName string
+	PreviousAccountID   int64
 	InputTokens         int64
 	OutputTokens        int64
 	CacheCreationTokens int64
@@ -433,47 +436,49 @@ type CostAlertRequest struct {
 // CostAlertEvent is an internal, notification-ready summary of a request-cost
 // anomaly. RequestSamples contains at most a small current-window sample.
 type CostAlertEvent struct {
-	ID                   int64
-	AlertKey             string
-	Kind                 string
-	Severity             string
-	TargetKey            string
-	Title                string
-	Message              string
-	UserKey              string
-	UserName             string
-	UserEmail            string
-	APIKeyID             int64
-	APIKeyName           string
-	Model                string
-	ChannelName          string
-	AccountName          string
-	AccountID            int64
-	Requests             int64
-	TotalTokens          int64
-	MaxRequestCost       float64
-	InputTokens          int64
-	OutputTokens         int64
-	CacheCreationTokens  int64
-	CacheReadTokens      int64
-	CurrentCost          float64
-	BaselineCost         float64
-	InputCost            float64
-	OutputCost           float64
-	CacheCreationCost    float64
-	CacheReadCost        float64
-	CurrentUnitCost      float64
-	BaselineUnitCost     float64
-	CurrentCacheHitRate  float64
-	BaselineCacheHitRate float64
-	CurrentMultiplier    float64
-	BaselineMultiplier   float64
-	DailyCost            float64
-	ProjectedCost        float64
-	WindowStart          time.Time
-	WindowEnd            time.Time
-	RequestSamples       []CostAlertRequest
-	CreatedAt            time.Time
+	ID                    int64
+	AlertKey              string
+	Kind                  string
+	Severity              string
+	TargetKey             string
+	Title                 string
+	Message               string
+	UserKey               string
+	UserName              string
+	UserEmail             string
+	APIKeyID              int64
+	APIKeyName            string
+	Model                 string
+	ChannelName           string
+	AccountName           string
+	AccountID             int64
+	Requests              int64
+	TotalTokens           int64
+	MaxRequestCost        float64
+	InputTokens           int64
+	OutputTokens          int64
+	CacheCreationTokens   int64
+	CacheReadTokens       int64
+	CurrentCost           float64
+	BaselineCost          float64
+	InputCost             float64
+	OutputCost            float64
+	CacheCreationCost     float64
+	CacheReadCost         float64
+	CurrentUnitCost       float64
+	BaselineUnitCost      float64
+	CurrentCacheHitRate   float64
+	BaselineCacheHitRate  float64
+	CurrentMultiplier     float64
+	BaselineMultiplier    float64
+	DailyCost             float64
+	ProjectedCost         float64
+	AccountSwitches       int64
+	AccountSwitchSessions int64
+	WindowStart           time.Time
+	WindowEnd             time.Time
+	RequestSamples        []CostAlertRequest
+	CreatedAt             time.Time
 }
 
 type AlertPolicy struct {

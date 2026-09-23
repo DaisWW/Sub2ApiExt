@@ -139,7 +139,7 @@ manage.bat start
 
 容器没有指向 Git 工程的绑定挂载，部署后启动和重启不依赖本仓库。
 
-费用异常分析以已完成的 `usage_logs` 为事实来源，并只读取关联的用户/API Key/账户/渠道显示名称，按用户、API Key、模型和渠道的滚动窗口判断单条请求成本过高、缓存骤降、实际倍率异常、每百万 Tokens 成本异常及可选的个人预算燃烧。另有请求级缓存告警：同一用户/API Key/模型/渠道/分组在当前窗口至少出现 2 条大输入、低命中请求时单独告警，即使窗口平均值尚未异常；如果这些请求对应的同一 `session_id` 在窗口内使用多个账户，邮件会标注“疑似账户切换导致缓存断档”。邮件会把用户的 username/email、API Key 名称和账户名称与原始 ID 一起显示，例如 `刘笑冬 <lxd@example.com> #7`、`Codex #82`、`账户名称 #78`；缺少名称时仍保留 `用户 #7`、`API Key #82` 或 `账户 #78`。每条告警还会列出当前分析窗口内按成本/倍率排序的最多 8 条请求元数据，包括 `usage_logs.id`、UTC 时间、成本、Tokens、缓存、倍率、账户和延迟，便于回查具体记录。它不会读取或发送 session ID、提示词、响应正文、密钥或原始客户端 request_id，也不会修改网关路由、账户状态或额度。请求完成并写入数据库后，默认在一个监控周期内分析；同一异常按冷却时间合并通知。
+费用异常分析以已完成的 `usage_logs` 为事实来源，并只读取关联的用户/API Key/账户/渠道显示名称，按用户、API Key、模型和渠道的滚动窗口判断单条请求成本过高、缓存骤降、实际倍率异常、每百万 Tokens 成本异常及可选的个人预算燃烧。另有请求级缓存告警：同一用户/API Key/模型/渠道/分组在当前窗口至少出现 3 条大输入、低命中请求，且总成本达到门槛并集中在短时间内时才单独告警；一次账户轮换产生的少量冷缓存不会触发该邮件。如果这些请求对应的同一 `session_id` 在窗口内使用多个账户，邮件会标注“疑似账户切换导致缓存断档”。另有账户切换告警：同一 session 在窗口内至少切换 2 次账户才通知，单次 A→B 不通知；邮件会列出切换次数、涉及账户、时间和最多 8 条切换请求。邮件会把用户的 username/email、API Key 名称和账户名称与原始 ID 一起显示，例如 `刘笑冬 <lxd@example.com> #7`、`Codex #82`、`账户名称 #78`；缺少名称时仍保留 `用户 #7`、`API Key #82` 或 `账户 #78`。每条告警还会列出当前分析窗口内按成本/倍率排序的最多 8 条请求元数据，包括 `usage_logs.id`、UTC 时间、成本、Tokens、缓存、倍率、账户和延迟，便于回查具体记录。它不会读取或发送 session ID、提示词、响应正文、密钥或原始客户端 request_id，也不会修改网关路由、账户状态或额度。请求完成并写入数据库后，默认在一个监控周期内分析；同一异常按冷却时间合并通知。
 
 QQ 邮箱通知使用 SMTP 授权码，不使用 QQ 登录密码。默认连接 `smtp.qq.com:465` 的隐式 TLS；需要 587 端口时将安全模式改为 `starttls`。把以下变量写入 `C:\ProgramData\Sub2API\extensions\monitoring\settings.env`：
 
@@ -174,8 +174,11 @@ MONITORING_COST_EMAIL_TO=admin@example.com
 | `MONITORING_COST_COOLDOWN` | `30m` | 同一异常重复邮件的最短间隔 |
 | `MONITORING_COST_MIN_REQUESTS` | `3` | 缓存/单位成本窗口的最少请求数；倍率异常仍可由单条请求触发 |
 | `MONITORING_COST_MIN_TOKENS` | `100000` | 费用异常最少 Tokens 数 |
-| `MONITORING_COST_CACHE_MISS_MIN_REQUESTS` | `2` | 请求级缓存告警所需的低命中请求数 |
+| `MONITORING_COST_CACHE_MISS_MIN_REQUESTS` | `3` | 请求级缓存告警所需的低命中请求数；一次轮换的 1～2 条冷缓存不告警 |
 | `MONITORING_COST_CACHE_MISS_INPUT_TOKENS` | `100000` | 请求级缓存告警中每条请求的最少输入 Tokens |
+| `MONITORING_COST_CACHE_MISS_MIN_COST` | `0.5` | 请求级缓存告警的总实际成本最低门槛；0 表示关闭该门槛 |
+| `MONITORING_COST_CACHE_MISS_MAX_SPAN` | `5m` | 低命中请求必须集中在此时间跨度内；不能大于费用窗口 |
+| `MONITORING_COST_ACCOUNT_SWITCH_MIN_TRANSITIONS` | `2` | 同一 session 在窗口内最少账户切换次数；1 表示单次 A→B 也告警 |
 | `MONITORING_COST_MIN_COST` | `0.5` | 窗口费用异常最低成本门槛，单位与 `usage_logs.actual_cost` 相同 |
 | `MONITORING_COST_SINGLE_REQUEST_COST` | `5` | 单条请求成本上限；0 表示关闭单条请求告警 |
 | `MONITORING_COST_MIN_BASE_COST` | `0.1` | 倍率异常的最低原始成本门槛；避免小数值噪声 |

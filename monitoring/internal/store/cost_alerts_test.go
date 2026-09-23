@@ -35,6 +35,22 @@ func TestCostAlertQueryUsesRequestMetadataOnly(t *testing.T) {
 			t.Fatalf("cost query must not read request payload %q", forbidden)
 		}
 	}
+	for _, fragment := range []string{
+		"LAG(account_id)",
+		"previous_account_name",
+		"transition_count",
+		"PARTITION BY user_key, api_key_id, model, channel_id, group_id, session_key",
+		"transition_count >= $3",
+	} {
+		if !strings.Contains(costAlertAccountSwitchQuery, fragment) {
+			t.Fatalf("account switch query missing %q", fragment)
+		}
+	}
+	for _, forbidden := range []string{"prompt", "request_body", "response_body", "authorization", "ul.request_id"} {
+		if strings.Contains(strings.ToLower(costAlertAccountSwitchQuery), forbidden) {
+			t.Fatalf("account switch query must not read %q", forbidden)
+		}
+	}
 }
 
 func TestCostAlertRequestQueryReturnsBoundedMetadataSamples(t *testing.T) {
@@ -95,22 +111,25 @@ func TestCostDailyQueryDoesNotProjectAcrossPreviousDay(t *testing.T) {
 
 func testCostAlertPolicy() config.CostAlertConfig {
 	return config.CostAlertConfig{
-		Enabled:              true,
-		Window:               15 * time.Minute,
-		Baseline:             7 * 24 * time.Hour,
-		Cooldown:             30 * time.Minute,
-		MinRequests:          3,
-		MinTokens:            100_000,
-		CacheMissMinRequests: 2,
-		CacheMissInputTokens: 100_000,
-		MinCost:              0.5,
-		MinBaseCost:          0.1,
-		CacheBaselineMin:     0.60,
-		CacheCurrentMax:      0.20,
-		CacheCostRatio:       1.5,
-		UnitCostRatio:        1.5,
-		MultiplierRatio:      2,
-		BurnRatio:            1.5,
+		Enabled:                     true,
+		Window:                      15 * time.Minute,
+		Baseline:                    7 * 24 * time.Hour,
+		Cooldown:                    30 * time.Minute,
+		MinRequests:                 3,
+		MinTokens:                   100_000,
+		CacheMissMinRequests:        3,
+		CacheMissInputTokens:        100_000,
+		CacheMissMinCost:            0.5,
+		CacheMissMaxSpan:            5 * time.Minute,
+		AccountSwitchMinTransitions: 2,
+		MinCost:                     0.5,
+		MinBaseCost:                 0.1,
+		CacheBaselineMin:            0.60,
+		CacheCurrentMax:             0.20,
+		CacheCostRatio:              1.5,
+		UnitCostRatio:               1.5,
+		MultiplierRatio:             2,
+		BurnRatio:                   1.5,
 	}
 }
 
@@ -141,13 +160,24 @@ func TestEvaluateCacheMissRequestsDetectsCrossAccountSession(t *testing.T) {
 			apiKeyID: 7, apiKeyName: "Codex", channelID: 9, groupID: 53,
 			sessionKey: "session-internal", sessionAccountCount: 2,
 		},
+		{
+			request: model.CostAlertRequest{
+				UsageLogID: 103, CreatedAt: end.Add(-30 * time.Second), Model: "gpt-5.6-sol",
+				ChannelName: "渠道 A", AccountName: "账户 A", AccountID: 11,
+				InputTokens: 175_000, CacheReadTokens: 4_000, TotalTokens: 179_000,
+				BaseCost: 0.8, ActualCost: 0.20, CacheHitRate: 2.2,
+			},
+			userKey: "42", userName: "Owner", userEmail: "owner@example.com",
+			apiKeyID: 7, apiKeyName: "Codex", channelID: 9, groupID: 53,
+			sessionKey: "session-internal", sessionAccountCount: 2,
+		},
 	}
 	events := evaluateCacheMissRequests(items, policy, start, end)
 	if len(events) != 1 {
 		t.Fatalf("got %d cache miss events: %+v", len(events), events)
 	}
 	event := events[0]
-	if event.Kind != model.CostAlertCacheMiss || event.Requests != 2 || len(event.RequestSamples) != 2 {
+	if event.Kind != model.CostAlertCacheMiss || event.Requests != 3 || len(event.RequestSamples) != 3 {
 		t.Fatalf("unexpected cache miss event: %+v", event)
 	}
 	if event.AccountID != 0 || event.AccountName != "多个账户" {
@@ -156,26 +186,97 @@ func TestEvaluateCacheMissRequestsDetectsCrossAccountSession(t *testing.T) {
 	if !strings.Contains(event.Message, "疑似账户切换导致缓存断档") {
 		t.Fatalf("cross-account message = %q", event.Message)
 	}
-	if event.RequestSamples[0].UsageLogID != 101 || event.RequestSamples[1].AccountID != 78 {
+	seenLogs := map[int64]bool{}
+	seenAccounts := map[int64]bool{}
+	for _, sample := range event.RequestSamples {
+		seenLogs[sample.UsageLogID] = true
+		seenAccounts[sample.AccountID] = true
+	}
+	if !seenLogs[101] || !seenLogs[102] || !seenLogs[103] {
 		t.Fatalf("request samples = %+v", event.RequestSamples)
+	}
+	if !seenAccounts[11] || !seenAccounts[78] {
+		t.Fatalf("request samples do not contain both accounts: %+v", event.RequestSamples)
 	}
 }
 
-func TestEvaluateCacheMissRequestsNeedsTwoLargeLowHitRequests(t *testing.T) {
+func TestEvaluateCacheMissRequestsNeedsThreeConcentratedLargeLowHitRequests(t *testing.T) {
 	policy := testCostAlertPolicy()
 	item := costAlertCacheMissRequest{
 		request: model.CostAlertRequest{
 			UsageLogID: 101, InputTokens: 100_000, CacheReadTokens: 1,
-			TotalTokens: 100_001, CacheHitRate: 0.001, ActualCost: 0.1,
+			TotalTokens: 100_001, CacheHitRate: 0.001, ActualCost: 0.2,
 		},
 		userKey: "42", apiKeyID: 7, channelID: 9,
 	}
 	if events := evaluateCacheMissRequests([]costAlertCacheMissRequest{item}, policy, time.Unix(100, 0), time.Unix(200, 0)); len(events) != 0 {
 		t.Fatalf("one low-hit request produced events: %+v", events)
 	}
-	item.request.CacheHitRate = 30
 	if events := evaluateCacheMissRequests([]costAlertCacheMissRequest{item, item}, policy, time.Unix(100, 0), time.Unix(200, 0)); len(events) != 0 {
+		t.Fatalf("two low-hit requests produced events: %+v", events)
+	}
+	if events := evaluateCacheMissRequests([]costAlertCacheMissRequest{item, item, item}, policy, time.Unix(100, 0), time.Unix(200, 0)); len(events) != 1 {
+		t.Fatalf("three low-hit requests did not produce an event: %+v", events)
+	}
+	item.request.CacheHitRate = 30
+	if events := evaluateCacheMissRequests([]costAlertCacheMissRequest{item, item, item}, policy, time.Unix(100, 0), time.Unix(200, 0)); len(events) != 0 {
 		t.Fatalf("healthy requests produced events: %+v", events)
+	}
+}
+
+func TestEvaluateCacheMissRequestsRequiresConcentratedRequests(t *testing.T) {
+	policy := testCostAlertPolicy()
+	base := costAlertCacheMissRequest{
+		request: model.CostAlertRequest{
+			InputTokens: 100_000, CacheReadTokens: 1, TotalTokens: 100_001,
+			CacheHitRate: 0.001, ActualCost: 0.2,
+		},
+		userKey: "42", apiKeyID: 7, channelID: 9,
+	}
+	items := []costAlertCacheMissRequest{base, base, base}
+	items[0].request.CreatedAt = time.Unix(100, 0)
+	items[1].request.CreatedAt = time.Unix(100, 0).Add(6 * time.Minute)
+	items[2].request.CreatedAt = time.Unix(100, 0).Add(7 * time.Minute)
+	if events := evaluateCacheMissRequests(items, policy, time.Unix(100, 0), time.Unix(100, 0).Add(10*time.Minute)); len(events) != 0 {
+		t.Fatalf("spread-out low-hit requests produced an event: %+v", events)
+	}
+}
+
+func TestEvaluateAccountSwitchesRequiresRepeatedTransitions(t *testing.T) {
+	policy := testCostAlertPolicy()
+	makeItem := func(id int64, at time.Time, previousID, currentID int64, previousName, currentName string, transitions int64) costAlertAccountSwitch {
+		return costAlertAccountSwitch{
+			request: model.CostAlertRequest{
+				UsageLogID: id, CreatedAt: at, Model: "gpt-5.6-sol", ChannelName: "渠道 A",
+				AccountName: currentName, AccountID: currentID, PreviousAccountName: previousName, PreviousAccountID: previousID,
+				InputTokens: 100_000, CacheReadTokens: 90_000, TotalTokens: 190_000, ActualCost: 0.2,
+			},
+			userKey: "42", userName: "Owner", userEmail: "owner@example.com", apiKeyID: 7, apiKeyName: "Codex",
+			channelID: 9, groupID: 53, sessionKey: "secret-session-value", transitionCount: transitions,
+		}
+	}
+	items := []costAlertAccountSwitch{
+		makeItem(201, time.Unix(100, 0), 11, 78, "账户 A", "账户 B", 2),
+		makeItem(202, time.Unix(101, 0), 78, 11, "账户 B", "账户 A", 2),
+	}
+	events := evaluateAccountSwitches(items, policy, time.Unix(90, 0), time.Unix(110, 0))
+	if len(events) != 1 {
+		t.Fatalf("got %d account switch events: %+v", len(events), events)
+	}
+	event := events[0]
+	if event.Kind != model.CostAlertAccountSwitch || event.AccountSwitches != 2 || event.AccountSwitchSessions != 1 {
+		t.Fatalf("unexpected account switch event: %+v", event)
+	}
+	if strings.Contains(event.AlertKey, "secret-session-value") || strings.Contains(event.Message, "secret-session-value") {
+		t.Fatalf("session identifier leaked: %+v", event)
+	}
+	if !strings.Contains(event.Message, "账户 A #11") || !strings.Contains(event.Message, "账户 B #78") {
+		t.Fatalf("account identities missing: %q", event.Message)
+	}
+	items[0].transitionCount = 1
+	items[1].transitionCount = 1
+	if events := evaluateAccountSwitches(items, policy, time.Unix(90, 0), time.Unix(110, 0)); len(events) != 0 {
+		t.Fatalf("single transition produced an event: %+v", events)
 	}
 }
 

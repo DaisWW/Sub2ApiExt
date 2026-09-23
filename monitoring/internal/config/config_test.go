@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildDatabaseURLEscapesCredentials(t *testing.T) {
@@ -115,8 +116,10 @@ func TestLoadCostAlertEmailConfiguration(t *testing.T) {
 	if len(c.CostAlerts.Email.To) != 2 || c.CostAlerts.DailyBudget != 12.5 {
 		t.Fatalf("unexpected recipients or budget: %+v / %v", c.CostAlerts.Email.To, c.CostAlerts.DailyBudget)
 	}
-	if c.CostAlerts.CacheMissMinRequests != 2 || c.CostAlerts.CacheMissInputTokens != 100_000 {
-		t.Fatalf("unexpected request cache miss thresholds: %d / %d", c.CostAlerts.CacheMissMinRequests, c.CostAlerts.CacheMissInputTokens)
+	if c.CostAlerts.CacheMissMinRequests != 3 || c.CostAlerts.CacheMissInputTokens != 100_000 ||
+		c.CostAlerts.CacheMissMinCost != 0.5 || c.CostAlerts.CacheMissMaxSpan != 5*time.Minute ||
+		c.CostAlerts.AccountSwitchMinTransitions != 2 {
+		t.Fatalf("unexpected request anomaly thresholds: %+v", c.CostAlerts)
 	}
 }
 

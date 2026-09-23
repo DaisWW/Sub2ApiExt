@@ -130,12 +130,54 @@ func TestBuildCostAlertMessageListsAccountsForCacheMissRequests(t *testing.T) {
 			InputTokens: 100_000, CacheReadTokens: 1, TotalTokens: 100_001,
 			ActualCost: 0.8, CacheHitRate: 0.001,
 		}},
+		CurrentUnitCost: 1.2,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(message), "账户 账户 A #11") {
 		t.Fatalf("cache miss email does not contain account identity: %s", message)
+	}
+	if !strings.Contains(string(message), "本规则未使用历史基线") || strings.Contains(string(message), "历史 0.0000") {
+		t.Fatalf("cache miss email has misleading baseline: %s", message)
+	}
+}
+
+func TestBuildCostAlertMessageListsAccountSwitches(t *testing.T) {
+	message, err := buildCostAlertMessage(config.EmailConfig{
+		From: "sender@qq.com",
+		To:   []string{"admin@example.com"},
+	}, []model.CostAlertEvent{{
+		Severity:              "warning",
+		Title:                 "账户频繁切换",
+		Kind:                  model.CostAlertAccountSwitch,
+		UserKey:               "7",
+		Requests:              2,
+		AccountSwitches:       2,
+		AccountSwitchSessions: 1,
+		CurrentUnitCost:       1.2,
+		RequestSamples: []model.CostAlertRequest{{
+			UsageLogID: 456, CreatedAt: time.Date(2026, 9, 23, 2, 35, 0, 0, time.UTC),
+			Model: "gpt-5.6-sol", ChannelName: "渠道 A",
+			PreviousAccountName: "账户 A", PreviousAccountID: 11,
+			AccountName: "账户 B", AccountID: 78,
+			InputTokens: 100_000, CacheReadTokens: 90_000, TotalTokens: 190_000,
+			ActualCost: 0.2, CacheHitRate: 47.3,
+		}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(message)
+	for _, fragment := range []string{
+		"账户切换次数: 2（涉及 session: 1）",
+		"账户切换 账户 A #11 -> 账户 B #78",
+		"记录 #456",
+		"本规则未使用历史基线",
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("account switch email is missing %q: %s", fragment, text)
+		}
 	}
 }
 

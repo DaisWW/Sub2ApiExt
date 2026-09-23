@@ -263,6 +263,76 @@ LEFT JOIN session_accounts
 ORDER BY low.user_key, low.api_key_id, low.model, low.channel_id, low.group_id,
          low.created_at DESC, low.usage_log_id DESC`
 
+// costAlertAccountSwitchQuery returns account transitions inside a session.
+// The session value is used only while evaluating the query and is never
+// copied into an alert key, message, or persisted alert row.
+const costAlertAccountSwitchQuery = `
+WITH raw AS MATERIALIZED (
+    SELECT ul.id AS usage_log_id,
+           COALESCE(NULLIF(BTRIM(ul.user_id::text), ''), 'unknown') AS user_key,
+           COALESCE(NULLIF(BTRIM(u.username), ''), '') AS user_name,
+           COALESCE(NULLIF(BTRIM(u.email), ''), '') AS user_email,
+           COALESCE(ul.api_key_id, 0)::bigint AS api_key_id,
+           COALESCE(NULLIF(BTRIM(k.name), ''), '') AS api_key_name,
+           COALESCE(NULLIF(BTRIM(ul.model), ''), 'unknown') AS model,
+           COALESCE(ul.channel_id, 0)::bigint AS channel_id,
+           COALESCE(NULLIF(BTRIM(c.name), ''), '未归属渠道') AS channel_name,
+           COALESCE(ul.group_id, 0)::bigint AS group_id,
+           COALESCE(ul.account_id, 0)::bigint AS account_id,
+           COALESCE(NULLIF(BTRIM(a.name), ''), '未归属账户') AS account_name,
+           COALESCE(NULLIF(BTRIM(ul.session_id), ''), '') AS session_key,
+           ul.created_at,
+           GREATEST(COALESCE(ul.input_tokens, 0), 0)::bigint AS input_tokens,
+           GREATEST(COALESCE(ul.output_tokens, 0), 0)::bigint AS output_tokens,
+           GREATEST(COALESCE(ul.cache_creation_tokens, 0), 0)::bigint AS cache_creation_tokens,
+           GREATEST(COALESCE(ul.cache_read_tokens, 0), 0)::bigint AS cache_read_tokens,
+           GREATEST(COALESCE(ul.total_cost, 0), 0)::double precision AS base_cost,
+           GREATEST(COALESCE(ul.actual_cost, 0), 0)::double precision AS actual_cost,
+           GREATEST(COALESCE(ul.duration_ms, 0), 0)::bigint AS duration_ms,
+           GREATEST(COALESCE(ul.first_token_ms, 0), 0)::bigint AS first_token_ms
+    FROM usage_logs ul
+    LEFT JOIN users u ON u.id = ul.user_id
+    LEFT JOIN api_keys k ON k.id = ul.api_key_id
+    LEFT JOIN channels c ON c.id = ul.channel_id
+    LEFT JOIN accounts a ON a.id = ul.account_id
+    WHERE ul.created_at >= $1
+      AND ul.created_at < $2
+      AND ul.actual_cost > 0
+      AND NULLIF(BTRIM(ul.session_id), '') IS NOT NULL
+), sequenced AS (
+    SELECT raw.*,
+           LAG(account_id) OVER (
+               PARTITION BY user_key, api_key_id, model, channel_id, group_id, session_key
+               ORDER BY created_at, usage_log_id
+           ) AS previous_account_id,
+           LAG(account_name) OVER (
+               PARTITION BY user_key, api_key_id, model, channel_id, group_id, session_key
+               ORDER BY created_at, usage_log_id
+           ) AS previous_account_name
+    FROM raw
+), marked AS (
+    SELECT sequenced.*,
+           CASE WHEN previous_account_id > 0 AND account_id > 0
+                     AND previous_account_id <> account_id THEN 1 ELSE 0 END AS switch_flag
+    FROM sequenced
+), counted AS (
+    SELECT marked.*,
+           SUM(switch_flag) OVER (
+               PARTITION BY user_key, api_key_id, model, channel_id, group_id, session_key
+           )::bigint AS transition_count
+    FROM marked
+)
+SELECT usage_log_id, user_key, user_name, user_email,
+       api_key_id, api_key_name, model, channel_id, channel_name, group_id,
+       account_id, account_name, session_key, created_at,
+       previous_account_id, previous_account_name,
+       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+       base_cost, actual_cost, duration_ms, first_token_ms, transition_count
+FROM counted
+WHERE switch_flag = 1
+  AND transition_count >= $3
+ORDER BY user_key, api_key_id, model, channel_id, group_id, created_at, usage_log_id`
+
 type costUsageGroup struct {
 	userKey                string
 	userName               string
@@ -368,6 +438,11 @@ func (s *Store) AnalyzeCostAlerts(ctx context.Context, policy config.CostAlertCo
 		return nil, fmt.Errorf("load request cache misses: %w", err)
 	}
 	candidates = append(candidates, evaluateCacheMissRequests(cacheMissRequests, policy, currentStart, now)...)
+	accountSwitches, err := s.loadCostAlertAccountSwitches(ctx, currentStart, now, policy)
+	if err != nil {
+		return nil, fmt.Errorf("load account switches: %w", err)
+	}
+	candidates = append(candidates, evaluateAccountSwitches(accountSwitches, policy, currentStart, now)...)
 	candidates = append(candidates, evaluateBudgetBurn(daily, policy, now)...)
 	if len(candidates) == 0 {
 		return nil, nil
@@ -459,13 +534,26 @@ type costAlertCacheMissRequest struct {
 	sessionAccountCount int64
 }
 
+type costAlertAccountSwitch struct {
+	request         model.CostAlertRequest
+	userKey         string
+	userName        string
+	userEmail       string
+	apiKeyID        int64
+	apiKeyName      string
+	channelID       int64
+	groupID         int64
+	sessionKey      string
+	transitionCount int64
+}
+
 func (s *Store) attachCostAlertRequestSamples(ctx context.Context, events []model.CostAlertEvent, start, end time.Time) error {
 	samples, err := s.loadCostAlertRequestSamples(ctx, start, end, costAlertRequestSampleLimit)
 	if err != nil {
 		return err
 	}
 	for index := range events {
-		if events[index].Kind == model.CostAlertCacheMiss {
+		if events[index].Kind == model.CostAlertCacheMiss || events[index].Kind == model.CostAlertAccountSwitch {
 			// Request-level events already carry their filtered samples. The
 			// generic sample query is ranked by cost and could replace them with
 			// unrelated healthy requests.
@@ -618,6 +706,83 @@ func (s *Store) loadCostAlertCacheMissRequests(ctx context.Context, start, end t
 	return requests, nil
 }
 
+func (s *Store) loadCostAlertAccountSwitches(ctx context.Context, start, end time.Time, policy config.CostAlertConfig) ([]costAlertAccountSwitch, error) {
+	threshold := policy.AccountSwitchMinTransitions
+	if threshold <= 0 {
+		threshold = 2
+	}
+	rows, err := s.db.QueryContext(ctx, costAlertAccountSwitchQuery, start, end, threshold)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	switches := make([]costAlertAccountSwitch, 0)
+	for rows.Next() {
+		var (
+			usageLogID, apiKeyID, channelID, groupID, accountID             int64
+			previousAccountID, transitionCount                              int64
+			userKey, userName, userEmail, apiKeyName, modelName             string
+			channelName, accountName, sessionKey, previousAccountName       string
+			createdAt                                                       time.Time
+			inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int64
+			baseCost, actualCost                                            float64
+			durationMS, firstTokenMS                                        int64
+		)
+		if err := rows.Scan(
+			&usageLogID, &userKey, &userName, &userEmail,
+			&apiKeyID, &apiKeyName, &modelName, &channelID, &channelName, &groupID,
+			&accountID, &accountName, &sessionKey, &createdAt,
+			&previousAccountID, &previousAccountName,
+			&inputTokens, &outputTokens, &cacheCreationTokens, &cacheReadTokens,
+			&baseCost, &actualCost, &durationMS, &firstTokenMS, &transitionCount,
+		); err != nil {
+			return nil, err
+		}
+		request := model.CostAlertRequest{
+			UsageLogID:          usageLogID,
+			CreatedAt:           createdAt,
+			Model:               modelName,
+			ChannelName:         channelName,
+			AccountName:         accountName,
+			AccountID:           accountID,
+			PreviousAccountName: previousAccountName,
+			PreviousAccountID:   previousAccountID,
+			InputTokens:         inputTokens,
+			OutputTokens:        outputTokens,
+			CacheCreationTokens: cacheCreationTokens,
+			CacheReadTokens:     cacheReadTokens,
+			TotalTokens:         inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens,
+			BaseCost:            baseCost,
+			ActualCost:          actualCost,
+			DurationMS:          durationMS,
+			FirstTokenMS:        firstTokenMS,
+		}
+		if baseCost > 0 {
+			request.Multiplier = actualCost / baseCost
+		}
+		cacheableTokens := inputTokens + cacheCreationTokens + cacheReadTokens
+		if cacheableTokens > 0 {
+			request.CacheHitRate = float64(cacheReadTokens) * 100 / float64(cacheableTokens)
+		}
+		switches = append(switches, costAlertAccountSwitch{
+			request:         request,
+			userKey:         userKey,
+			userName:        userName,
+			userEmail:       userEmail,
+			apiKeyID:        apiKeyID,
+			apiKeyName:      apiKeyName,
+			channelID:       channelID,
+			groupID:         groupID,
+			sessionKey:      sessionKey,
+			transitionCount: transitionCount,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return switches, nil
+}
+
 type costAlertCacheMissGroup struct {
 	key         string
 	items       []costAlertCacheMissRequest
@@ -690,6 +855,7 @@ func evaluateCacheMissRequests(items []costAlertCacheMissRequest, policy config.
 			accountIDs                                                      = make(map[int64]struct{})
 			accountNames                                                    = make(map[int64]string)
 			crossAccount                                                    bool
+			earliest, latest                                                time.Time
 		)
 		for _, item := range group.items {
 			request := item.request
@@ -703,6 +869,12 @@ func evaluateCacheMissRequests(items []costAlertCacheMissRequest, policy config.
 			if request.ActualCost > maxRequestCost {
 				maxRequestCost = request.ActualCost
 			}
+			if earliest.IsZero() || request.CreatedAt.Before(earliest) {
+				earliest = request.CreatedAt
+			}
+			if latest.IsZero() || request.CreatedAt.After(latest) {
+				latest = request.CreatedAt
+			}
 			accountIDs[request.AccountID] = struct{}{}
 			if _, exists := accountNames[request.AccountID]; !exists {
 				accountNames[request.AccountID] = request.AccountName
@@ -710,6 +882,16 @@ func evaluateCacheMissRequests(items []costAlertCacheMissRequest, policy config.
 			if item.sessionAccountCount > 1 {
 				crossAccount = true
 			}
+		}
+		if policy.CacheMissMinCost > 0 && actualCost < policy.CacheMissMinCost {
+			continue
+		}
+		maxSpan := policy.CacheMissMaxSpan
+		if maxSpan <= 0 && policy.Window > 0 {
+			maxSpan = policy.Window
+		}
+		if maxSpan > 0 && !earliest.IsZero() && !latest.IsZero() && latest.Sub(earliest) > maxSpan {
+			continue
 		}
 		if len(accountIDs) > 1 {
 			crossAccount = true
@@ -782,6 +964,171 @@ func evaluateCacheMissRequests(items []costAlertCacheMissRequest, policy config.
 			WindowEnd:           end,
 			RequestSamples:      samples,
 			CreatedAt:           end,
+		})
+	}
+	return events
+}
+
+type costAlertAccountSwitchGroup struct {
+	key         string
+	userKey     string
+	userName    string
+	userEmail   string
+	apiKeyID    int64
+	apiKeyName  string
+	model       string
+	channelID   int64
+	channelName string
+	groupID     int64
+	items       []costAlertAccountSwitch
+	sessions    map[string]struct{}
+	accounts    map[int64]string
+}
+
+func evaluateAccountSwitches(items []costAlertAccountSwitch, policy config.CostAlertConfig, start, end time.Time) []model.CostAlertEvent {
+	threshold := policy.AccountSwitchMinTransitions
+	if threshold <= 0 {
+		threshold = 2
+	}
+	groups := make(map[string]*costAlertAccountSwitchGroup)
+	for _, item := range items {
+		if item.transitionCount < int64(threshold) {
+			continue
+		}
+		key := costAccountSwitchTargetKey(item.userKey, item.apiKeyID, item.request.Model, item.channelID, item.groupID)
+		group := groups[key]
+		if group == nil {
+			group = &costAlertAccountSwitchGroup{
+				key:         key,
+				userKey:     item.userKey,
+				userName:    item.userName,
+				userEmail:   item.userEmail,
+				apiKeyID:    item.apiKeyID,
+				apiKeyName:  item.apiKeyName,
+				model:       item.request.Model,
+				channelID:   item.channelID,
+				channelName: item.request.ChannelName,
+				groupID:     item.groupID,
+				sessions:    make(map[string]struct{}),
+				accounts:    make(map[int64]string),
+			}
+			groups[key] = group
+		}
+		group.items = append(group.items, item)
+		if item.sessionKey != "" {
+			group.sessions[item.sessionKey] = struct{}{}
+		}
+		if item.request.PreviousAccountID > 0 {
+			group.accounts[item.request.PreviousAccountID] = item.request.PreviousAccountName
+		}
+		if item.request.AccountID > 0 {
+			group.accounts[item.request.AccountID] = item.request.AccountName
+		}
+	}
+
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	events := make([]model.CostAlertEvent, 0, len(keys))
+	for _, key := range keys {
+		group := groups[key]
+		if len(group.items) == 0 {
+			continue
+		}
+		sort.SliceStable(group.items, func(i, j int) bool {
+			left, right := group.items[i].request, group.items[j].request
+			if !left.CreatedAt.Equal(right.CreatedAt) {
+				return left.CreatedAt.Before(right.CreatedAt)
+			}
+			return left.UsageLogID < right.UsageLogID
+		})
+
+		var (
+			inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int64
+			totalTokens                                                     int64
+			baseCost, actualCost, maxRequestCost                            float64
+		)
+		for _, item := range group.items {
+			request := item.request
+			inputTokens += request.InputTokens
+			outputTokens += request.OutputTokens
+			cacheCreationTokens += request.CacheCreationTokens
+			cacheReadTokens += request.CacheReadTokens
+			totalTokens += request.TotalTokens
+			baseCost += request.BaseCost
+			actualCost += request.ActualCost
+			if request.ActualCost > maxRequestCost {
+				maxRequestCost = request.ActualCost
+			}
+		}
+		accountLabels := make([]string, 0, len(group.accounts))
+		accountIDs := make([]int64, 0, len(group.accounts))
+		for accountID := range group.accounts {
+			accountIDs = append(accountIDs, accountID)
+		}
+		sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+		for _, accountID := range accountIDs {
+			accountLabels = append(accountLabels, costAccountLabel(group.accounts[accountID], accountID))
+		}
+		accountText := strings.Join(accountLabels, "、")
+		if accountText == "" {
+			accountText = "未知账户"
+		}
+		currentCacheHitRate := 0.0
+		cacheableTokens := inputTokens + cacheCreationTokens + cacheReadTokens
+		if cacheableTokens > 0 {
+			currentCacheHitRate = float64(cacheReadTokens) * 100 / float64(cacheableTokens)
+		}
+		currentMultiplier := 0.0
+		if baseCost > 0 {
+			currentMultiplier = actualCost / baseCost
+		}
+		message := fmt.Sprintf(
+			"用户 %s 的 %s 在 %s 最近窗口检测到 %d 次账户切换，涉及 %d 个 session；触发阈值为同一 session 至少 %d 次切换。涉及账户：%s。",
+			costUserLabel(group.userName, group.userEmail, group.userKey), group.model, group.channelName,
+			len(group.items), len(group.sessions), threshold, accountText,
+		)
+		samples := make([]model.CostAlertRequest, 0, costAlertRequestSampleLimit)
+		for index, item := range group.items {
+			if index >= costAlertRequestSampleLimit {
+				break
+			}
+			samples = append(samples, item.request)
+		}
+		events = append(events, model.CostAlertEvent{
+			AlertKey:              model.CostAlertAccountSwitch + "|" + key,
+			Kind:                  model.CostAlertAccountSwitch,
+			Severity:              "warning",
+			TargetKey:             key,
+			Title:                 "账户频繁切换",
+			Message:               message,
+			UserKey:               group.userKey,
+			UserName:              group.userName,
+			UserEmail:             group.userEmail,
+			APIKeyID:              group.apiKeyID,
+			APIKeyName:            group.apiKeyName,
+			Model:                 group.model,
+			ChannelName:           group.channelName,
+			AccountName:           "多个账户",
+			Requests:              int64(len(group.items)),
+			TotalTokens:           totalTokens,
+			MaxRequestCost:        maxRequestCost,
+			InputTokens:           inputTokens,
+			OutputTokens:          outputTokens,
+			CacheCreationTokens:   cacheCreationTokens,
+			CacheReadTokens:       cacheReadTokens,
+			CurrentCost:           actualCost,
+			CurrentUnitCost:       costPerMillionTokens(actualCost, totalTokens),
+			CurrentCacheHitRate:   currentCacheHitRate,
+			CurrentMultiplier:     currentMultiplier,
+			AccountSwitches:       int64(len(group.items)),
+			AccountSwitchSessions: int64(len(group.sessions)),
+			WindowStart:           start,
+			WindowEnd:             end,
+			RequestSamples:        samples,
+			CreatedAt:             end,
 		})
 	}
 	return events
@@ -1012,6 +1359,21 @@ func costTargetKey(userKey string, apiKeyID int64, modelName string, channelID, 
 
 func costCacheMissTargetKey(userKey string, apiKeyID int64, modelName string, channelID, groupID int64) string {
 	return fmt.Sprintf("%s|model:%s|channel:%d|group:%d", costUserTargetKey(userKey, apiKeyID), modelName, channelID, groupID)
+}
+
+func costAccountSwitchTargetKey(userKey string, apiKeyID int64, modelName string, channelID, groupID int64) string {
+	return fmt.Sprintf("%s|model:%s|channel:%d|group:%d", costUserTargetKey(userKey, apiKeyID), modelName, channelID, groupID)
+}
+
+func costAccountLabel(name string, id int64) string {
+	name = strings.Join(strings.Fields(strings.TrimSpace(name)), " ")
+	if name == "" || name == "未归属账户" || name == "未知账户" || name == "unknown" {
+		name = "账户"
+	}
+	if id > 0 {
+		return fmt.Sprintf("%s #%d", name, id)
+	}
+	return name
 }
 
 func (s *Store) persistCostAlertCandidates(ctx context.Context, candidates []model.CostAlertEvent, now time.Time, cooldown time.Duration) ([]model.CostAlertEvent, error) {

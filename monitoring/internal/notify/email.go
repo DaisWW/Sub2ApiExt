@@ -100,7 +100,14 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 			body.WriteString(fmt.Sprintf("分析窗口: %s 至 %s\n",
 				event.WindowStart.UTC().Format(time.RFC3339), event.WindowEnd.UTC().Format(time.RFC3339)))
 		}
-		body.WriteString(fmt.Sprintf("请求数: %d\nTokens: %d\n当前成本: %.4f\n", event.Requests, event.TotalTokens, event.CurrentCost))
+		requestCountLabel := "请求数"
+		if event.Kind == model.CostAlertAccountSwitch {
+			requestCountLabel = "涉及请求数"
+		}
+		body.WriteString(fmt.Sprintf("%s: %d\nTokens: %d\n当前成本: %.4f\n", requestCountLabel, event.Requests, event.TotalTokens, event.CurrentCost))
+		if event.Kind == model.CostAlertAccountSwitch {
+			body.WriteString(fmt.Sprintf("账户切换次数: %d（涉及 session: %d）\n", event.AccountSwitches, event.AccountSwitchSessions))
+		}
 		if event.MaxRequestCost > 0 {
 			body.WriteString(fmt.Sprintf("最高单条成本: %.4f\n", event.MaxRequestCost))
 		}
@@ -110,14 +117,27 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 			body.WriteString(fmt.Sprintf("成本分项: 输入 %.4f，输出 %.4f，缓存写入 %.4f，缓存读取 %.4f\n",
 				event.InputCost, event.OutputCost, event.CacheCreationCost, event.CacheReadCost))
 		}
+		requestLevel := event.Kind == model.CostAlertCacheMiss || event.Kind == model.CostAlertAccountSwitch
 		if event.CurrentUnitCost > 0 || event.BaselineUnitCost > 0 {
-			body.WriteString(fmt.Sprintf("单位成本: %.4f（历史 %.4f）\n", event.CurrentUnitCost, event.BaselineUnitCost))
+			if requestLevel {
+				body.WriteString(fmt.Sprintf("单位成本: %.4f（本规则未使用历史基线）\n", event.CurrentUnitCost))
+			} else {
+				body.WriteString(fmt.Sprintf("单位成本: %.4f（历史 %.4f）\n", event.CurrentUnitCost, event.BaselineUnitCost))
+			}
 		}
 		if event.CurrentCacheHitRate > 0 || event.BaselineCacheHitRate > 0 {
-			body.WriteString(fmt.Sprintf("缓存命中率: %.1f%%（历史 %.1f%%）\n", event.CurrentCacheHitRate, event.BaselineCacheHitRate))
+			if requestLevel {
+				body.WriteString(fmt.Sprintf("缓存命中率: %.1f%%（本规则未使用历史基线）\n", event.CurrentCacheHitRate))
+			} else {
+				body.WriteString(fmt.Sprintf("缓存命中率: %.1f%%（历史 %.1f%%）\n", event.CurrentCacheHitRate, event.BaselineCacheHitRate))
+			}
 		}
 		if event.CurrentMultiplier > 0 || event.BaselineMultiplier > 0 {
-			body.WriteString(fmt.Sprintf("实际倍率: %.2fx（历史 %.2fx）\n", event.CurrentMultiplier, event.BaselineMultiplier))
+			if requestLevel {
+				body.WriteString(fmt.Sprintf("实际倍率: %.2fx（本规则未使用历史基线）\n", event.CurrentMultiplier))
+			} else {
+				body.WriteString(fmt.Sprintf("实际倍率: %.2fx（历史 %.2fx）\n", event.CurrentMultiplier, event.BaselineMultiplier))
+			}
 		}
 		if event.DailyCost > 0 || event.ProjectedCost > 0 {
 			body.WriteString(fmt.Sprintf("今日成本: %.4f，预计今日成本: %.4f\n", event.DailyCost, event.ProjectedCost))
@@ -197,7 +217,12 @@ func writeRequestSamples(body *strings.Builder, event model.CostAlertEvent) {
 		if request.FirstTokenMS > 0 || request.DurationMS > 0 {
 			body.WriteString(fmt.Sprintf("，首字 %dms，总耗时 %dms", request.FirstTokenMS, request.DurationMS))
 		}
-		if event.Kind == model.CostAlertBudgetBurn || event.Kind == model.CostAlertCacheMiss {
+		if event.Kind == model.CostAlertAccountSwitch {
+			previous := formatIdentity(request.PreviousAccountName, "", strconv.FormatInt(request.PreviousAccountID, 10), "账户")
+			current := formatIdentity(request.AccountName, "", strconv.FormatInt(request.AccountID, 10), "账户")
+			body.WriteString(fmt.Sprintf("，模型 %s，渠道 %s，账户切换 %s -> %s",
+				cleanText(request.Model), cleanText(request.ChannelName), previous, current))
+		} else if event.Kind == model.CostAlertBudgetBurn || event.Kind == model.CostAlertCacheMiss {
 			account := strings.TrimSpace(request.AccountName)
 			if request.AccountID > 0 {
 				account = formatIdentity(request.AccountName, "", strconv.FormatInt(request.AccountID, 10), "账户")
