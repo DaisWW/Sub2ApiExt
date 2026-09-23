@@ -109,6 +109,39 @@ class IncrementalOwnershipTests(unittest.TestCase):
             self.assertEqual(delta.added, [])
             self.assertEqual(delta.removed[0]["sub2api_id"], 7)
 
+    def test_authorization_refresh_is_an_import_delta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            scope = incremental.input_scope(codes, None)
+            existing = record("existing@example.com")
+            new = record("new@example.com")
+            state = incremental.build_state(
+                [existing], scope, {"email:existing@example.com": 7}
+            )
+            delta = incremental.compare(
+                [existing, new],
+                state,
+                scope,
+                refresh_keys=["email:existing@example.com"],
+            )
+            self.assertEqual([item["email"] for item in delta.added], ["new@example.com"])
+            self.assertEqual(
+                [item["email"] for item in delta.refreshed], ["existing@example.com"]
+            )
+            self.assertEqual(delta.unchanged, 0)
+            paths = incremental.write_delta(root / "incremental", delta)
+            sub2api = json.loads(Path(paths["sub2api_input"]).read_text(encoding="utf-8"))
+            cockpit = json.loads(Path(paths["cockpit_input"]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item["credentials"]["email"] for item in sub2api["accounts"]],
+                ["new@example.com", "existing@example.com"],
+            )
+            self.assertEqual(
+                [item["email"] for item in cockpit],
+                ["new@example.com", "existing@example.com"],
+            )
+
     def test_empty_codes_file_does_not_trigger_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             codes = Path(directory) / "redeem-codes.txt"
@@ -246,6 +279,148 @@ class IncrementalOwnershipTests(unittest.TestCase):
             self.assertIn("old@example.com", cockpit_pending.read_text(encoding="utf-8-sig"))
             sub2api_pending = root / "cache" / "results" / "sub2api-pending-deletions.txt"
             self.assertIn("old@example.com", sub2api_pending.read_text(encoding="utf-8-sig"))
+
+    def test_incremental_authorization_refresh_imports_both_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            codes.write_text("PLUS-REFRESH\n", encoding="utf-8")
+            existing = record("existing@example.com")
+            scope = incremental.input_scope(codes, None)
+            state_path = root / "cache" / "state" / "incremental.json"
+            incremental.write_state(
+                state_path,
+                incremental.build_state(
+                    [existing],
+                    scope,
+                    {"email:existing@example.com": 7},
+                    source_keys={"email:existing@example.com": ["redeem"]},
+                ),
+            )
+            imported: list[str] = []
+            cockpit_imported: list[str] = []
+
+            def fake_redeem(_input, **kwargs):
+                data_dir = kwargs["run_dir"] / "data"
+                data_dir.mkdir(parents=True)
+                data_dir.joinpath("refreshed.json").write_text(
+                    json.dumps(existing), encoding="utf-8"
+                )
+                manifest_file = kwargs["manifest_file"]
+                manifest_file.parent.mkdir(parents=True, exist_ok=True)
+                manifest_file.write_text(
+                    json.dumps(
+                        {
+                            "data_dir": str(data_dir),
+                            "total": 1,
+                            "success": 1,
+                            "failed": 0,
+                            "refresh_accounts": ["email:existing@example.com"],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 0
+
+            def fake_sub2api(input_path, _config, *, summary_file=None, **_kwargs):
+                payload = json.loads(input_path.read_text(encoding="utf-8"))
+                imported.extend(
+                    item["credentials"]["email"] for item in payload["accounts"]
+                )
+                sub2api.write_managed_summary(
+                    summary_file, {"email:existing@example.com": 7}
+                )
+                return 0
+
+            def fake_cockpit(input_path, **_kwargs):
+                cockpit_imported.extend(
+                    item["email"]
+                    for item in json.loads(input_path.read_text(encoding="utf-8"))
+                )
+                return 0
+
+            with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
+                pipeline.redeem_module, "execute", side_effect=fake_redeem
+            ), patch.object(
+                pipeline.sub2api_module, "execute", side_effect=fake_sub2api
+            ), patch.object(
+                pipeline.cockpit_module, "execute", side_effect=fake_cockpit
+            ):
+                self.assertEqual(
+                    pipeline.run(self.pipeline_args(root, codes=codes)),
+                    0,
+                )
+
+            self.assertEqual(imported, ["existing@example.com"])
+            self.assertEqual(cockpit_imported, ["existing@example.com"])
+            manifests = list((root / "cache" / "runs").glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            self.assertEqual(manifest["incremental_delta"]["refreshed"], 1)
+            self.assertEqual(manifest["incremental_delta"]["unchanged"], 0)
+
+    def test_full_run_imports_all_standardized_accounts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            accounts = root / "accounts.txt"
+            accounts.write_text(
+                json.dumps(record("first@example.com"))
+                + "\n"
+                + json.dumps(record("second@example.com")),
+                encoding="utf-8",
+            )
+            incremental.write_state(
+                root / "cache" / "state" / "incremental.json",
+                incremental.build_state(
+                    [record("first@example.com"), record("second@example.com")],
+                    incremental.input_scope(None, accounts),
+                    {"email:first@example.com": 7, "email:second@example.com": 8},
+                ),
+            )
+            imported: list[str] = []
+            cockpit_imported: list[str] = []
+
+            def fake_sub2api(input_path, _config, *, summary_file=None, **_kwargs):
+                payload = json.loads(input_path.read_text(encoding="utf-8"))
+                imported.extend(
+                    item["credentials"]["email"] for item in payload["accounts"]
+                )
+                sub2api.write_managed_summary(
+                    summary_file,
+                    {
+                        "email:first@example.com": 7,
+                        "email:second@example.com": 8,
+                    },
+                )
+                return 0
+
+            def fake_cockpit(input_path, **_kwargs):
+                cockpit_imported.extend(
+                    item["email"]
+                    for item in json.loads(input_path.read_text(encoding="utf-8"))
+                )
+                return 0
+
+            with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
+                pipeline.sub2api_module, "execute", side_effect=fake_sub2api
+            ), patch.object(
+                pipeline.cockpit_module, "execute", side_effect=fake_cockpit
+            ):
+                self.assertEqual(
+                    pipeline.run(
+                        self.pipeline_args(
+                            root, accounts=accounts, incremental_mode=False
+                        )
+                    ),
+                    0,
+                )
+
+            self.assertEqual(
+                imported, ["first@example.com", "second@example.com"]
+            )
+            self.assertEqual(
+                cockpit_imported, ["first@example.com", "second@example.com"]
+            )
 
     def test_manual_cleanup_list_persists_until_account_returns(self):
         with tempfile.TemporaryDirectory() as directory:

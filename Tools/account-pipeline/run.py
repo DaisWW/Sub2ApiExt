@@ -350,6 +350,7 @@ def run(args: argparse.Namespace) -> int:
         write_json(pipeline_manifest, manifest)
         redeem_code = 0
         data_dir: Optional[Path] = None
+        refresh_keys: set[str] = set()
         if has_codes:
             redeem_code = redeem_module.execute(
                 codes_file,
@@ -368,9 +369,30 @@ def run(args: argparse.Namespace) -> int:
             data_dir = Path(redeem_info["data_dir"])
             manifest["redeem"] = {
                 key: redeem_info.get(key)
-                for key in ("task_id", "archive", "data_dir", "total", "success", "failed")
+                for key in (
+                    "task_id",
+                    "archive",
+                    "data_dir",
+                    "total",
+                    "success",
+                    "failed",
+                    "refresh_accounts",
+                )
                 if key in redeem_info
             }
+            raw_refresh_keys = redeem_info.get("refresh_accounts", [])
+            if not isinstance(raw_refresh_keys, list):
+                raw_refresh_keys = []
+            refresh_keys = set()
+            for value in raw_refresh_keys:
+                key = incremental_module.refresh_key(value)
+                if key:
+                    refresh_keys.add(key)
+            if refresh_keys:
+                print(
+                    "[兑换] 检测到 "
+                    f"{len(refresh_keys)} 个授权已更新账号；增量模式将强制重新导入。"
+                )
             if redeem_code == 2:
                 print("兑换结果包含失败卡密；将继续处理已下载的成功账号。")
         elif codes_file is not None:
@@ -409,7 +431,10 @@ def run(args: argparse.Namespace) -> int:
             records = normalized_records(Path(normalized["cockpit_input"]))
             incremental_state = incremental_module.read_state(incremental_state_file)
             incremental_delta = incremental_module.compare(
-                records, incremental_state, source_scope
+                records,
+                incremental_state,
+                source_scope,
+                refresh_keys=refresh_keys,
             )
             is_baseline = (
                 incremental_state.get("scope") is None
@@ -427,10 +452,18 @@ def run(args: argparse.Namespace) -> int:
                     if key in baseline_keys
                 }
                 incremental_delta.added = []
+                incremental_delta.refreshed = [
+                    record
+                    for key, record in incremental_delta.current.items()
+                    if key in refresh_keys
+                ]
                 incremental_delta.removed = []
-                incremental_delta.unchanged = len(incremental_delta.current)
+                incremental_delta.unchanged = (
+                    len(incremental_delta.current) - len(incremental_delta.refreshed)
+                )
                 print(
-                    "[增量] 首次运行仅建立安全基线，不导入账号；"
+                    "[增量] 首次运行建立安全基线；普通已有账号不导入，"
+                    "授权更新账号仍会导入；"
                     f"已匹配 {len(baseline_sub2api_ids)} 个工具维护的 Sub2API 账户，"
                     f"忽略 {len(records) - len(baseline_sub2api_ids)} 个未带归属标记的账户。"
                 )
@@ -442,11 +475,20 @@ def run(args: argparse.Namespace) -> int:
             print(
                 "[增量] 比较完成："
                 f"新增 {len(incremental_delta.added)}，"
+                f"授权更新 {len(incremental_delta.refreshed)}，"
                 f"未变化 {incremental_delta.unchanged}，"
                 f"输入中减少 {len(incremental_delta.removed)}（仅记录待手动处理，不自动删除）。"
             )
+            for record in incremental_delta.refreshed:
+                identity = (
+                    incremental_module.text(record.get("email"))
+                    or incremental_module.text(record.get("account_id"))
+                    or "-"
+                )
+                print(f"[增量][授权更新] 将重新导入账号：{identity}")
             manifest["incremental_delta"] = {
                 "added": len(incremental_delta.added),
+                "refreshed": len(incremental_delta.refreshed),
                 "removed": len(incremental_delta.removed),
                 "unchanged": incremental_delta.unchanged,
                 "scope_changed": incremental_delta.scope_changed,
@@ -511,11 +553,22 @@ def run(args: argparse.Namespace) -> int:
 
         if not args.skip_sub2api:
             stage = "sub2api"
-            if args.incremental and incremental_delta is not None and not incremental_delta.added:
-                print("[增量] Sub2API 没有新增账号，跳过导入。")
+            import_count = len(normalized_records(Path(normalized["cockpit_input"])))
+            if args.incremental and incremental_delta is not None and import_count == 0:
+                print("[增量] 没有新增或授权更新账号，跳过 Sub2API 导入。")
                 sub2api_code = 0
             else:
-                print("[流水线] 开始导入 Sub2API……")
+                if args.incremental:
+                    print(
+                        "[增量] 开始导入 Sub2API "
+                        f"（新增 {len(incremental_delta.added)}，"
+                        f"授权更新 {len(incremental_delta.refreshed)}，共 {import_count} 个）……"
+                    )
+                else:
+                    print(
+                        "[流水线] 全量模式：将导入全部 "
+                        f"{import_count} 个标准化账号（不按增量快照跳过）。"
+                    )
                 sub2api_code = sub2api_module.execute(
                     Path(normalized["sub2api_input"]),
                     sub2api_config,
@@ -556,7 +609,7 @@ def run(args: argparse.Namespace) -> int:
                 )
             if not cockpit_records:
                 if args.incremental:
-                    reason = "本轮没有新增账号或新增账号未通过 Sub2API 归属校验"
+                    reason = "本轮没有新增或授权更新账号，或账号未通过 Sub2API 归属校验"
                 else:
                     reason = "没有可导入账号"
                 print(f"[Cockpit] {reason}，跳过导入。")
@@ -663,7 +716,7 @@ def main() -> int:
     parser.add_argument(
         "--incremental",
         action="store_true",
-        help="只导入相对上次快照新增的账号，并记录输入中减少的账号",
+        help="只导入新增或授权已更新的账号，并记录输入中减少的账号",
     )
     parser.add_argument("--log-file", type=Path, help="覆盖本次流水线日志路径")
     parser.add_argument("--dry-run", action="store_true", help="只检查本地文件，不访问网络")

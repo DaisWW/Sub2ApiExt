@@ -1,6 +1,6 @@
 # 账号流水线
 
-总入口 `run.bat` 启动 Python 编排器。完整流程支持两种输入：一行一个卡密的 TXT，以及可连续放置多个账户 JSON 对象的账户文本。两个输入同时存在时会合并、去重后生成统一数据，再分别导入 Sub2API 和 Cockpit。`incremental.bat` 使用同一套 Python 编排器，只导入相对上次快照新增的账号，未变化账号跳过；输入中减少的账号只记录待手动处理清单，不会自动删除。编排器依次调用四个独立模块：
+总入口 `run.bat` 启动 Python 编排器。完整流程支持两种输入：一行一个卡密的 TXT，以及可连续放置多个账户 JSON 对象的账户文本。两个输入同时存在时会合并、去重后生成统一数据，再分别导入 Sub2API 和 Cockpit；全量模式每次都会把本次合并后的全部账号交给两个导入模块，不按增量快照跳过。`incremental.bat` 使用同一套 Python 编排器，只导入相对上次快照新增或兑换结果标记为“授权已更新”的账号，未变化账号跳过；输入中减少的账号只记录待手动处理清单，不会自动删除。编排器依次调用四个独立模块：
 
 1. `redeem`：提交卡密，按提取/检测阶段显示逐卡结果，覆盖写入固定结果 TXT，下载 ZIP 并安全解压。
 2. `normalize`：读取解压目录中的账号 JSON 和可选账户文本，去重并生成两个目标输入文件。
@@ -38,7 +38,7 @@ incremental.bat [拖入卡密或账户文本]
 
 ## 增量同步
 
-`incremental.bat` 固定读取与完整流程相同的输入。第一次运行只建立安全基线，并只读查询当前带有本工具归属标记的 Sub2API 账号，不导入；以后运行只导入新增账号，未变化账号跳过。输入中减少的账号会输出日志并写入待手动处理清单，工具不会调用任何删除接口。新增账号按“Sub2API 后 Cockpit”的顺序导入。
+`incremental.bat` 固定读取与完整流程相同的输入。第一次运行建立安全基线，并只读查询当前带有本工具归属标记的 Sub2API 账号；普通已有账号不导入，但兑换结果明确提示“授权已更新”的已归属账号会在本轮导入。以后运行只导入新增账号和授权更新账号，未变化账号跳过。输入中减少的账号会输出日志并写入待手动处理清单，工具不会调用任何删除接口。两类待导入账号都按“Sub2API 后 Cockpit”的顺序导入。
 
 Sub2API 导入成功的账号会在 `extra.account_pipeline_managed` 写入固定值 `account-pipeline-v1`。同邮箱但没有这个标记的中转账户视为手动账户，脚本会显示“跳过手动账户”，不会更新或写入增量快照。兑换来源和 `accounts.txt` 来源都属于脚本主动导入范围；修改输入文件范围时会重新建立安全基线，不会据此删除旧账号。旧版没有归属标记的增量快照也只会触发安全基线。
 
@@ -46,7 +46,7 @@ Sub2API 导入成功的账号会在 `extra.account_pipeline_managed` 写入固�
 
 Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。脚本会把输入中减少的邮箱累计写入 `cache\results\cockpit-pending-deletions.txt`，供你在 Cockpit Tools 中手动处理，不会直接修改其加密存储。为保证一个快照代表两个目标的同一状态，增量模式不接受 `--skip-sub2api` 或 `--skip-cockpit`。
 
-输入中减少账号时，脚本会把 ID、邮箱和原因写入 `cache\results\sub2api-pending-deletions.txt`（不含凭据），并继续导入 Cockpit；工具不会调用删除接口，你可以按清单手动处理。账号重新出现在当前输入时，会从待处理清单移除。
+输入中减少账号时，脚本会把 ID、邮箱和原因写入 `cache\results\sub2api-pending-deletions.txt`（不含凭据），并继续导入本轮新增或授权更新账号；工具不会调用删除接口，你可以按清单手动处理。账号重新出现在当前输入时，会从待处理清单移除。
 
 旧快捷入口对应的新位置是：`redeem\redeem-account-import.bat`、`cockpit\drop-json-to-import.bat` 和 `sub2api\import-from-cockpit-tools.bat`。最后一个只读取 Cockpit Tools 本地账号，是 Sub2API 的备选来源，不参与总流程。BAT 只负责找到 Python、传递参数和显示退出码，业务逻辑全部在 `.py` 文件中。
 
@@ -80,7 +80,7 @@ Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。
    └─ sub2api-pending-deletions.txt  Sub2API 待手动处理账号
 ```
 
-manifest 保存路径、数量、任务号、阶段状态和账号来源标识（邮箱），不保存卡密、Token、密码或账号凭据。`normalized` 下的 JSON 含凭据，只保存在本机运行目录。
+manifest 保存路径、数量、任务号、阶段状态、授权更新账号标识（邮箱）和账号来源标识（邮箱），不保存卡密、Token、密码或账号凭据。`normalized` 下的 JSON 含凭据，只保存在本机运行目录。
 
 缓存和过渡文件的实际位置如下：
 

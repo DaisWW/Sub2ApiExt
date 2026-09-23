@@ -456,6 +456,30 @@ def field(value) -> str:
     return re.sub(r"\\([@_])", r"\1", text)
 
 
+def refresh_account_keys(rows: list[dict]) -> list[str]:
+    """返回兑换站提示授权已更新的账号标识，不包含任何凭据。"""
+    result: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        message = field(row.get("message"))
+        if not any(marker in message for marker in ("授权已更新", "授权需要更新")):
+            continue
+        identity = ""
+        for name in ("account", "email", "user_email", "account_email"):
+            identity = field(row.get(name))
+            if identity:
+                break
+        if not identity:
+            continue
+        key = "email:" + identity.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
+    return result
+
+
 def progress_phase(value) -> str | None:
     """把兑换站可能返回的阶段名称归一化。"""
     phase = field(value).lower().replace("-", "_").replace(" ", "_")
@@ -683,6 +707,7 @@ def write_manifest(
         "total": len(rows),
         "success": sum(1 for row in rows if row.get("ok") is True),
         "failed": sum(1 for row in rows if row.get("ok") is not True),
+        "refresh_accounts": refresh_account_keys(rows),
     }
     temporary = path.with_name(path.name + ".tmp")
     try:

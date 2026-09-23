@@ -12,6 +12,31 @@ from redeem import main as redeem
 
 
 class RedeemResultTests(unittest.TestCase):
+    def test_authorization_refresh_rows_return_normalized_account_keys(self):
+        self.assertEqual(
+            redeem.refresh_account_keys(
+                [
+                    {
+                        "account": r"User_Name\@Example.com",
+                        "message": "授权已更新，请重新下载 json（最新授权时间 2026-09-22 10:02:40）",
+                    },
+                    {
+                        "account": "ignored@example.com",
+                        "message": "账号正常",
+                    },
+                    {
+                        "account": r"USER_NAME\@EXAMPLE.COM",
+                        "message": "授权已更新，请重新下载 json",
+                    },
+                    {
+                        "account": "needs@example.com",
+                        "message": "授权需要更新",
+                    },
+                ]
+            ),
+            ["email:user_name@example.com", "email:needs@example.com"],
+        )
+
     def test_description_stays_in_its_column(self):
         message = "账号已被官方封禁；请联系支持并重新下载 JSON 文件。" * 2
         rendered = redeem.format_results(

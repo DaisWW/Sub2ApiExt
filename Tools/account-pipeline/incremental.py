@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -21,6 +21,7 @@ class Delta:
     removed: List[Dict[str, Any]]
     unchanged: int
     scope_changed: bool = False
+    refreshed: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def text(value: Any) -> str:
@@ -35,6 +36,16 @@ def account_key(record: Mapping[str, Any]) -> str:
     if account_id:
         return "id:" + account_id.casefold()
     raise IncrementalError("标准化账号缺少 email/account_id，无法建立增量标识")
+
+
+def refresh_key(value: Any) -> str:
+    """把兑换 manifest 中的账号标识规范成增量键。"""
+    normalized = text(value).casefold()
+    if not normalized:
+        return ""
+    if normalized.startswith(("email:", "id:")):
+        return normalized
+    return "email:" + normalized
 
 
 def input_scope(codes_file: Optional[Path], accounts_file: Optional[Path]) -> Dict[str, str]:
@@ -96,6 +107,7 @@ def compare(
     records: Sequence[Dict[str, Any]],
     state: Mapping[str, Any],
     scope: Mapping[str, str],
+    refresh_keys: Optional[Iterable[str]] = None,
 ) -> Delta:
     current: Dict[str, Dict[str, Any]] = {}
     for record in records:
@@ -108,13 +120,26 @@ def compare(
     scope_changed = stored_scope not in (None, dict(scope))
     previous = {} if scope_changed else _state_accounts(state)
     added = [record for key, record in current.items() if key not in previous]
+    forced_refresh = {
+        key
+        for value in (refresh_keys or ())
+        for key in (refresh_key(value),)
+        if key
+    }
+    refreshed = [
+        record
+        for key, record in current.items()
+        if key in previous and key in forced_refresh
+    ]
     removed = [record for key, record in previous.items() if key not in current]
+    unchanged = len(current.keys() & previous.keys()) - len(refreshed)
     return Delta(
         current=current,
         previous=previous,
         added=added,
+        refreshed=refreshed,
         removed=removed,
-        unchanged=len(current.keys() & previous.keys()),
+        unchanged=unchanged,
         scope_changed=scope_changed,
     )
 
@@ -152,8 +177,9 @@ def write_delta(output_dir: Path, delta: Delta) -> Dict[str, str]:
     sub2api_path = output_dir / "incremental-sub2api.json"
     cockpit_path = output_dir / "incremental-cockpit.json"
     removed_path = output_dir / "removed.json"
-    write_json(sub2api_path, sub2api_payload(delta.added))
-    write_json(cockpit_path, list(delta.added))
+    import_records = [*delta.added, *delta.refreshed]
+    write_json(sub2api_path, sub2api_payload(import_records))
+    write_json(cockpit_path, import_records)
     write_json(removed_path, delta.removed)
     return {
         "sub2api_input": str(sub2api_path.resolve()),
