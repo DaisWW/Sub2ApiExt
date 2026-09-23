@@ -832,7 +832,9 @@ def main() -> int:
         type=Path,
         help="拖入的卡密或账户 JSON 文本；也可分别使用下面两个选项",
     )
-    parser.add_argument("--codes-file", type=Path, help="卡密 TXT（一行一个，允许空行）")
+    parser.add_argument(
+        "--codes-file", type=Path, help="卡密 TXT（一行一个，允许空行和卡密后注释）"
+    )
     parser.add_argument(
         "--accounts-file",
         type=Path,

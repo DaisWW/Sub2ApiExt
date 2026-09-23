@@ -102,12 +102,11 @@ def read_codes(path: Path, *, allow_empty: bool = False) -> list[str]:
         raise RedeemError(f"卡密文件超过 {MAX_TEXT_BYTES} 字节限制")
 
     codes = []
-    for number, line in enumerate(text.splitlines(), 1):
-        code = line.strip()
-        if not code or code.startswith("#"):
+    for line in text.splitlines():
+        content = line.strip()
+        if not content or content.startswith("#"):
             continue
-        if any(char.isspace() for char in code):
-            raise RedeemError(f"第 {number} 行包含空格；请一行只填写一个卡密")
+        code = content.split(None, 1)[0]
         codes.append(code)
     if not codes and (
         not allow_empty

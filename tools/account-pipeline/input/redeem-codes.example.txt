@@ -1,2 +1,2 @@
-# 每行填写一个卡密；空行和 # 开头的行会被忽略 https://redeem.plusproteam.xyz
-PLUS-XXX-XXXXXX
+# 每行填写一个卡密；空行和 # 开头的行会被忽略，卡密后可用空格附加注释 https://redeem.plusproteam.xyz
+PLUS-XXX-XXXXXX 示例卡密
