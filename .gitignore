@@ -38,9 +38,9 @@ runtime/
 .serena/
 
 # Unified account pipeline local input, configuration, and runtime data
-Tools/account-pipeline/input/redeem-codes.txt
-Tools/account-pipeline/input/accounts.txt
-Tools/account-pipeline/config.json
-Tools/account-pipeline/cache/
-Tools/account-pipeline/**/__pycache__/
-Tools/account-pipeline/**/.pytest_cache/
+tools/account-pipeline/input/redeem-codes.txt
+tools/account-pipeline/input/accounts.txt
+tools/account-pipeline/config.json
+tools/account-pipeline/cache/
+tools/account-pipeline/**/__pycache__/
+tools/account-pipeline/**/.pytest_cache/

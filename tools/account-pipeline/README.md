@@ -52,7 +52,7 @@ Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。
 
 ## 运行目录
 
-默认运行目录是工具目录下被 Git 忽略的 `cache`，即 `Tools\account-pipeline\cache`，可在本目录创建被 gitignore 的 `config.json` 覆盖：
+默认运行目录是工具目录下被 Git 忽略的 `cache`，即 `tools\account-pipeline\cache`，可在本目录创建被 gitignore 的 `config.json` 覆盖：
 
 ```json
 {
@@ -86,14 +86,14 @@ manifest 保存路径、数量、任务号、阶段状态、授权更新账号�
 
 | 内容 | 默认位置 |
 | --- | --- |
-| 下载的 ZIP | `Tools\account-pipeline\cache\runs\<run-id>\redeem\` |
-| ZIP 解压出的账号 JSON | `Tools\account-pipeline\cache\runs\<run-id>\redeem\data\` |
-| 给 Sub2API 和 Cockpit 的标准化 JSON | `Tools\account-pipeline\cache\runs\<run-id>\normalized\` |
-| 本次运行 manifest | `Tools\account-pipeline\cache\runs\<run-id>\manifest.json` |
-| 最近一次卡密结果 | `Tools\account-pipeline\cache\results\redeem-result.txt` |
-| Cockpit 待手动处理清单 | `Tools\account-pipeline\cache\results\cockpit-pending-deletions.txt` |
-| Sub2API 待手动处理清单 | `Tools\account-pipeline\cache\results\sub2api-pending-deletions.txt` |
-| 增量状态和日志 | `Tools\account-pipeline\cache\state\`、`Tools\account-pipeline\cache\logs\` |
+| 下载的 ZIP | `tools\account-pipeline\cache\runs\<run-id>\redeem\` |
+| ZIP 解压出的账号 JSON | `tools\account-pipeline\cache\runs\<run-id>\redeem\data\` |
+| 给 Sub2API 和 Cockpit 的标准化 JSON | `tools\account-pipeline\cache\runs\<run-id>\normalized\` |
+| 本次运行 manifest | `tools\account-pipeline\cache\runs\<run-id>\manifest.json` |
+| 最近一次卡密结果 | `tools\account-pipeline\cache\results\redeem-result.txt` |
+| Cockpit 待手动处理清单 | `tools\account-pipeline\cache\results\cockpit-pending-deletions.txt` |
+| Sub2API 待手动处理清单 | `tools\account-pipeline\cache\results\sub2api-pending-deletions.txt` |
+| 增量状态和日志 | `tools\account-pipeline\cache\state\`、`tools\account-pipeline\cache\logs\` |
 
 这些缓存不写入 Git 工作区。若需要换到其他目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input\redeem-codes.txt` 和 `input\accounts.txt` 是用户输入源，不是自动生成的缓存，仓库已将它们加入忽略规则。
 

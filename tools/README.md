@@ -1,9 +1,9 @@
-# Tools 工具目录
+# tools 工具目录
 
 `account-pipeline` 是账号处理的唯一总目录，四个子目录各自只负责一个模块：
 
 ```text
-Tools/
+tools/
 ├─ README.md
 └─ account-pipeline/
    ├─ run.bat                         一键：读取两种输入 → 标准化 → 双目标导入
