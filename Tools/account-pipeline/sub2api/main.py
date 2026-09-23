@@ -686,6 +686,9 @@ def run_import(
     configured_extra = config_value.get("extra") or {}
     if not isinstance(configured_extra, dict):
         raise Sub2ApiError("extra 必须是 JSON 对象")
+    claim_existing_accounts = config_value.get("claim_existing_accounts", False)
+    if not isinstance(claim_existing_accounts, bool):
+        raise Sub2ApiError("claim_existing_accounts 必须是 true 或 false")
     extra = dict(configured_extra)
     ownership_value = extra.get(OWNERSHIP_EXTRA_KEY)
     if ownership_value not in (None, OWNERSHIP_EXTRA_VALUE):
@@ -742,7 +745,11 @@ def run_import(
                     raise Sub2ApiError(
                         f"第 {batch.index} 个批次第 {index + 1} 个账号的远端标识已变化；已停止导入"
                     )
-            if existing_account is not None and not is_tool_managed(existing_account):
+            if (
+                existing_account is not None
+                and not is_tool_managed(existing_account)
+                and not claim_existing_accounts
+            ):
                 existing_id = account_database_id(existing_account)
                 print(
                     f"跳过手动账户：{account_label(None, existing_id, str(record.get('email', '')), batch.index, index + 1)}"
@@ -750,6 +757,14 @@ def run_import(
                 manual_skipped += 1
                 continue
             existing_id = account_database_id(existing_account) if existing_account else 0
+            if (
+                existing_account is not None
+                and not is_tool_managed(existing_account)
+                and claim_existing_accounts
+            ):
+                print(
+                    f"认领已有账户：{account_label(None, existing_id, str(record.get('email', '')), batch.index, index + 1)}"
+                )
             if existing_id > 0:
                 managed_ids[key] = existing_id
             if name_prefix:

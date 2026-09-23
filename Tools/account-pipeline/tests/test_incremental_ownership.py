@@ -63,8 +63,14 @@ class FakeClient:
         raise AssertionError((method, path))
 
 
-def run_import(client: FakeClient, records: list[dict], summary: Path) -> dict:
-    config = {"extra": {}}
+def run_import(
+    client: FakeClient,
+    records: list[dict],
+    summary: Path,
+    *,
+    claim_existing: bool = False,
+) -> dict:
+    config = {"extra": {}, "claim_existing_accounts": claim_existing}
     batch = sub2api.Batch(1, None, None, "test", "codex", [], records)
     with patch.object(sub2api, "admin_session", return_value=(summary, config, client, "token")), patch.object(
         sub2api, "build_batches", return_value=[batch]
@@ -454,6 +460,21 @@ class IncrementalOwnershipTests(unittest.TestCase):
             self.assertEqual(client.imports, [])
             self.assertEqual(summary, {})
             self.assertFalse(sub2api.is_tool_managed(client.accounts[7]))
+
+    def test_claim_existing_accounts_marks_exact_match_as_managed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = FakeClient([remote(7, "legacy@example.com", managed=False)])
+            summary = Path(directory) / "summary.json"
+            result = run_import(
+                client,
+                [record("legacy@example.com")],
+                summary,
+                claim_existing=True,
+            )
+            self.assertEqual(result, {"email:legacy@example.com": 7})
+            self.assertEqual(len(client.imports), 1)
+            self.assertTrue(client.imports[0]["update_existing"])
+            self.assertTrue(sub2api.is_tool_managed(client.accounts[7]))
 
     def test_new_and_existing_managed_accounts_keep_marker(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -16,6 +16,7 @@
   "notes": "",
   "expires_at": "",
   "auto_pause_on_expired": true,
+  "claim_existing_accounts": false,
   "extra": {
     "codex_cli_only": true,
     "codex_fingerprint_mode": "full",
