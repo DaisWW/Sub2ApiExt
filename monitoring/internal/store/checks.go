@@ -217,6 +217,12 @@ func (s *Store) Prune(ctx context.Context, before time.Time) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM monitoring_alerts WHERE created_at < $1`, before); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM monitoring_cost_alerts WHERE created_at < $1`, before); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM monitoring_cost_alert_states WHERE updated_at < $1`, before); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

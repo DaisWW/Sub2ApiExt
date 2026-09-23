@@ -97,3 +97,49 @@ func TestLoadBuildsRedisConfiguration(t *testing.T) {
 		t.Fatalf("concurrency slot TTL = %s", c.ConcurrencySlotTTL)
 	}
 }
+
+func TestLoadCostAlertEmailConfiguration(t *testing.T) {
+	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
+	t.Setenv("MONITORING_COST_EMAIL_USERNAME", "monitor@qq.com")
+	t.Setenv("MONITORING_COST_EMAIL_PASSWORD", "authorization-code")
+	t.Setenv("MONITORING_COST_EMAIL_TO", "one@example.com, two@example.com")
+	t.Setenv("MONITORING_COST_DAILY_BUDGET", "12.5")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.CostAlerts.Enabled || c.CostAlerts.Email.Host != "smtp.qq.com" || c.CostAlerts.Email.Port != 465 {
+		t.Fatalf("unexpected cost alert email transport configuration")
+	}
+	if len(c.CostAlerts.Email.To) != 2 || c.CostAlerts.DailyBudget != 12.5 {
+		t.Fatalf("unexpected recipients or budget: %+v / %v", c.CostAlerts.Email.To, c.CostAlerts.DailyBudget)
+	}
+}
+
+func TestLoadRejectsPartialCostAlertEmailConfiguration(t *testing.T) {
+	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
+	t.Setenv("MONITORING_COST_EMAIL_TO", "admin@example.com")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "cost alert email") {
+		t.Fatalf("partial email configuration error = %v", err)
+	}
+}
+
+func TestLoadRejectsNonFiniteCostAlertThreshold(t *testing.T) {
+	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
+	t.Setenv("MONITORING_COST_UNIT_COST_RATIO", "NaN")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "cost alert ratios") {
+		t.Fatalf("non-finite cost threshold error = %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownCostAlertEmailSecurity(t *testing.T) {
+	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
+	t.Setenv("MONITORING_COST_EMAIL_SECURITY", "plain")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "EMAIL_SECURITY") {
+		t.Fatalf("unknown email security error = %v", err)
+	}
+}

@@ -92,6 +92,25 @@ CREATE TABLE IF NOT EXISTS monitoring_alerts (
 );
 CREATE INDEX IF NOT EXISTS monitoring_alerts_created_idx
     ON monitoring_alerts (created_at DESC);
+CREATE TABLE IF NOT EXISTS monitoring_cost_alert_states (
+    alert_key TEXT PRIMARY KEY,
+    last_alerted_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS monitoring_cost_alerts (
+    id BIGSERIAL PRIMARY KEY,
+    alert_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS monitoring_cost_alerts_created_idx
+    ON monitoring_cost_alerts (created_at DESC);
+CREATE INDEX IF NOT EXISTS monitoring_cost_alerts_key_created_idx
+    ON monitoring_cost_alerts (alert_key, created_at DESC);
 `
 	_, err := s.db.ExecContext(ctx, schema)
 	return err

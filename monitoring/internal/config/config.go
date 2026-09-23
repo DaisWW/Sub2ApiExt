@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -28,6 +29,40 @@ type Config struct {
 	DefaultModel       string
 	AllowPrivateHost   bool
 	FrameAncestors     string
+	CostAlerts         CostAlertConfig
+}
+
+// CostAlertConfig controls read-only request-cost anomaly analysis. A zero
+// daily budget disables the budget-burn rule; the other rules remain active.
+type CostAlertConfig struct {
+	Enabled           bool
+	Window            time.Duration
+	Baseline          time.Duration
+	Cooldown          time.Duration
+	MinRequests       int
+	MinTokens         int64
+	MinCost           float64
+	SingleRequestCost float64
+	MinBaseCost       float64
+	CacheBaselineMin  float64
+	CacheCurrentMax   float64
+	CacheCostRatio    float64
+	UnitCostRatio     float64
+	MultiplierRatio   float64
+	DailyBudget       float64
+	BurnRatio         float64
+	Email             EmailConfig
+}
+
+type EmailConfig struct {
+	Host     string
+	Port     int
+	Security string
+	Username string
+	Password string
+	From     string
+	To       []string
+	Timeout  time.Duration
 }
 
 func Load() (Config, error) {
@@ -52,6 +87,7 @@ func Load() (Config, error) {
 		DefaultModel:       envString("MONITORING_DEFAULT_MODEL", "gpt-4o-mini"),
 		AllowPrivateHost:   strings.EqualFold(envString("MONITORING_ALLOW_PRIVATE_HOSTS", "false"), "true"),
 		FrameAncestors:     frameAncestors,
+		CostAlerts:         loadCostAlertConfig(),
 	}
 	if c.DatabaseURL == "" {
 		c.DatabaseURL = buildDatabaseURL()
@@ -71,7 +107,92 @@ func Load() (Config, error) {
 	if c.FailureThreshold <= 0 || c.RecoveryThreshold <= 0 {
 		return Config{}, fmt.Errorf("alert thresholds must be positive")
 	}
+	if err := validateCostAlertConfig(c.CostAlerts); err != nil {
+		return Config{}, err
+	}
 	return c, nil
+}
+
+func loadCostAlertConfig() CostAlertConfig {
+	security := strings.ToLower(envString("MONITORING_COST_EMAIL_SECURITY", "implicit_tls"))
+	to := envCSV("MONITORING_COST_EMAIL_TO")
+	username := strings.TrimSpace(os.Getenv("MONITORING_COST_EMAIL_USERNAME"))
+	from := strings.TrimSpace(os.Getenv("MONITORING_COST_EMAIL_FROM"))
+	if from == "" {
+		from = username
+	}
+	return CostAlertConfig{
+		Enabled:           envBool("MONITORING_COST_ALERTS_ENABLED", true),
+		Window:            envDuration("MONITORING_COST_WINDOW", 15*time.Minute),
+		Baseline:          envDuration("MONITORING_COST_BASELINE", 7*24*time.Hour),
+		Cooldown:          envDuration("MONITORING_COST_COOLDOWN", 30*time.Minute),
+		MinRequests:       envInt("MONITORING_COST_MIN_REQUESTS", 3),
+		MinTokens:         envInt64("MONITORING_COST_MIN_TOKENS", 100_000),
+		MinCost:           envFloat("MONITORING_COST_MIN_COST", 0.5),
+		SingleRequestCost: envFloat("MONITORING_COST_SINGLE_REQUEST_COST", 5),
+		MinBaseCost:       envFloat("MONITORING_COST_MIN_BASE_COST", 0.1),
+		CacheBaselineMin:  envFloat("MONITORING_COST_CACHE_BASELINE_MIN", 0.60),
+		CacheCurrentMax:   envFloat("MONITORING_COST_CACHE_CURRENT_MAX", 0.20),
+		CacheCostRatio:    envFloat("MONITORING_COST_CACHE_COST_RATIO", 1.5),
+		UnitCostRatio:     envFloat("MONITORING_COST_UNIT_COST_RATIO", 1.5),
+		MultiplierRatio:   envFloat("MONITORING_COST_MULTIPLIER_RATIO", 2.0),
+		DailyBudget:       envFloat("MONITORING_COST_DAILY_BUDGET", 0),
+		BurnRatio:         envFloat("MONITORING_COST_BURN_RATIO", 1.5),
+		Email: EmailConfig{
+			Host:     envString("MONITORING_COST_EMAIL_HOST", "smtp.qq.com"),
+			Port:     envInt("MONITORING_COST_EMAIL_PORT", 465),
+			Security: security,
+			Username: username,
+			Password: os.Getenv("MONITORING_COST_EMAIL_PASSWORD"),
+			From:     from,
+			To:       to,
+			Timeout:  envDuration("MONITORING_COST_EMAIL_TIMEOUT", 15*time.Second),
+		},
+	}
+}
+
+func validateCostAlertConfig(c CostAlertConfig) error {
+	if c.Window <= 0 || c.Baseline <= c.Window || c.Cooldown <= 0 {
+		return fmt.Errorf("cost alert window, baseline, and cooldown are invalid")
+	}
+	if c.MinRequests <= 0 || c.MinTokens <= 0 ||
+		!finiteNonNegative(c.MinCost) || !finiteNonNegative(c.SingleRequestCost) || !finiteNonNegative(c.MinBaseCost) {
+		return fmt.Errorf("cost alert sample thresholds are invalid")
+	}
+	if !finiteBetween(c.CacheBaselineMin, 0, 1) || !finiteBetween(c.CacheCurrentMax, 0, 1) ||
+		!finiteAtLeast(c.CacheCostRatio, 1) || !finiteAtLeast(c.UnitCostRatio, 1) ||
+		!finiteAtLeast(c.MultiplierRatio, 1) || !finiteNonNegative(c.DailyBudget) || !finiteAtLeast(c.BurnRatio, 1) {
+		return fmt.Errorf("cost alert ratios or budget are invalid")
+	}
+	if c.Email.Timeout <= 0 {
+		return fmt.Errorf("cost alert email timeout must be positive")
+	}
+	if c.Email.Security != "implicit_tls" && c.Email.Security != "starttls" {
+		return fmt.Errorf("MONITORING_COST_EMAIL_SECURITY must be implicit_tls or starttls")
+	}
+	emailConfigured := strings.TrimSpace(os.Getenv("MONITORING_COST_EMAIL_TO")) != "" ||
+		strings.TrimSpace(os.Getenv("MONITORING_COST_EMAIL_USERNAME")) != "" ||
+		strings.TrimSpace(os.Getenv("MONITORING_COST_EMAIL_PASSWORD")) != "" ||
+		strings.TrimSpace(os.Getenv("MONITORING_COST_EMAIL_FROM")) != ""
+	if emailConfigured {
+		if c.Email.Host == "" || c.Email.Port <= 0 || c.Email.Port > 65535 || c.Email.Username == "" || c.Email.Password == "" ||
+			c.Email.From == "" || len(c.Email.To) == 0 {
+			return fmt.Errorf("cost alert email requires host, port, username, password, from, and recipient")
+		}
+	}
+	return nil
+}
+
+func finiteNonNegative(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+func finiteBetween(value, minimum, maximum float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= minimum && value <= maximum
+}
+
+func finiteAtLeast(value, minimum float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= minimum
 }
 
 func buildRedisAddr() string {
@@ -150,6 +271,56 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func envInt64(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloat(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envCSV(key string) []string {
+	values := strings.FieldsFunc(os.Getenv(key), func(r rune) bool {
+		return unicode.IsSpace(r) || r == ',' || r == ';'
+	})
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func envIntAllowZero(key string, fallback int) int {
