@@ -266,7 +266,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 incremental.update_sub2api_pending_deletions(
                     path,
                     [],
-                    [removed[0]],
+                    [record("old@example.com")],
                 ),
                 0,
             )

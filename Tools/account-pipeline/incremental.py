@@ -246,6 +246,28 @@ def update_sub2api_pending_deletions(
     current: Iterable[Mapping[str, Any]] = (),
 ) -> int:
     """维护 Sub2API 待手动处理清单，不包含凭据，也不调用删除接口。"""
+
+    def line_fields(value: str) -> Tuple[str, str]:
+        fields = {
+            part.split("=", 1)[0]: part.split("=", 1)[1]
+            for part in value.split("\t")
+            if "=" in part
+        }
+        account_id = text(fields.get("ID"))
+        identity = text(fields.get("账号"))
+        return (
+            "" if account_id == "-" else account_id,
+            "" if identity == "-" else identity,
+        )
+
+    def remove_matching(account_id: str, identities: set[str]) -> None:
+        for key, value in list(pending.items()):
+            stored_id, stored_identity = line_fields(value)
+            if (account_id and stored_id == account_id) or (
+                stored_identity and stored_identity.casefold() in identities
+            ):
+                pending.pop(key, None)
+
     pending: Dict[str, str] = {}
     if path.is_file():
         try:
@@ -253,17 +275,7 @@ def update_sub2api_pending_deletions(
                 value = line.strip()
                 if not value or value.startswith("#"):
                     continue
-                fields = {
-                    part.split("=", 1)[0]: part.split("=", 1)[1]
-                    for part in value.split("\t")
-                    if "=" in part
-                }
-                account_id = text(fields.get("ID"))
-                identity = text(fields.get("账号"))
-                if account_id == "-":
-                    account_id = ""
-                if identity == "-":
-                    identity = ""
+                account_id, identity = line_fields(value)
                 key = (
                     "id:" + account_id
                     if account_id
@@ -289,9 +301,15 @@ def update_sub2api_pending_deletions(
         except (TypeError, ValueError):
             account_id = 0
         if account_id > 0:
-            identities.add("id:" + str(account_id))
-        for key in identities:
-            pending.pop(key, None)
+            account_id_text = str(account_id)
+            identities.add("id:" + account_id_text)
+        else:
+            account_id_text = ""
+        remove_matching(account_id_text, {
+            value[len("account:"):]
+            for value in identities
+            if value.startswith("account:")
+        })
 
     for record, reason in entries:
         raw_account_id = record.get("sub2api_id")
@@ -307,6 +325,10 @@ def update_sub2api_pending_deletions(
             "id:" + account_id
             if account_id
             else "account:" + identity.casefold()
+        )
+        remove_matching(
+            account_id,
+            {identity.casefold()} if identity else set(),
         )
         pending[key] = line
 
