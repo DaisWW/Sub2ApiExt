@@ -1,6 +1,6 @@
 # 账号流水线
 
-总入口 `run.bat` 启动 Python 编排器。完整流程支持两种输入：一行一个卡密的 TXT，以及可连续放置多个账户 JSON 对象的账户文本。两个输入同时存在时会合并、去重后生成统一数据，再分别导入 Sub2API 和 Cockpit。`incremental.bat` 使用同一套 Python 编排器，只处理相对上次快照新增或已删除的账号，未变化账号跳过。编排器依次调用四个独立模块：
+总入口 `run.bat` 启动 Python 编排器。完整流程支持两种输入：一行一个卡密的 TXT，以及可连续放置多个账户 JSON 对象的账户文本。两个输入同时存在时会合并、去重后生成统一数据，再分别导入 Sub2API 和 Cockpit。`incremental.bat` 使用同一套 Python 编排器，只导入相对上次快照新增的账号，未变化账号跳过；输入中减少的账号只记录待手动处理清单，不会自动删除。编排器依次调用四个独立模块：
 
 1. `redeem`：提交卡密，按提取/检测阶段显示逐卡结果，覆盖写入固定结果 TXT，下载 ZIP 并安全解压。
 2. `normalize`：读取解压目录中的账号 JSON 和可选账户文本，去重并生成两个目标输入文件。
@@ -38,15 +38,15 @@ incremental.bat [拖入卡密或账户文本]
 
 ## 增量同步
 
-`incremental.bat` 固定读取与完整流程相同的输入。第一次运行只建立安全基线，并只读查询当前带有本工具归属标记的 Sub2API 账号，不导入或删除；以后运行会输出新增、删除、跳过数量。新增账号按“Sub2API 后 Cockpit”的顺序导入，未变化账号跳过。Sub2API 只删除快照明确保存了数据库 ID、当前输入已经不存在、并且删除前仍带本工具归属标记且标识一致的账号，不按邮箱猜测删除。
+`incremental.bat` 固定读取与完整流程相同的输入。第一次运行只建立安全基线，并只读查询当前带有本工具归属标记的 Sub2API 账号，不导入；以后运行只导入新增账号，未变化账号跳过。输入中减少的账号会输出日志并写入待手动处理清单，工具不会调用任何删除接口。新增账号按“Sub2API 后 Cockpit”的顺序导入。
 
-Sub2API 导入成功的账号会在 `extra.account_pipeline_managed` 写入固定值 `account-pipeline-v1`。同邮箱但没有这个标记的中转账户视为手动账户，脚本会显示“跳过手动账户”，不会更新、写入增量快照或删除。兑换来源和 `accounts.txt` 来源都属于脚本主动导入范围；修改输入文件范围时会重新建立安全基线，不会据此批量删除旧账号。旧版没有归属标记的增量快照也只会触发安全基线。
+Sub2API 导入成功的账号会在 `extra.account_pipeline_managed` 写入固定值 `account-pipeline-v1`。同邮箱但没有这个标记的中转账户视为手动账户，脚本会显示“跳过手动账户”，不会更新或写入增量快照。兑换来源和 `accounts.txt` 来源都属于脚本主动导入范围；修改输入文件范围时会重新建立安全基线，不会据此删除旧账号。旧版没有归属标记的增量快照也只会触发安全基线。
 
-把卡密行改成 `# PLUS-...` 后，它不再参与本轮输入；下一次增量运行会清理对应的工具维护账号。即使所有卡密都被注释，也会跳过兑换并继续计算删除；完全空白的卡密文件仍会报错，防止误清理。若同一个账号仍在 `accounts.txt` 中，或其 Sub2API ID 仍被其他当前输入引用，则会保留。没有归属标记的账号也不会发送到 Cockpit 自动导入。
+把卡密行改成 `# PLUS-...` 后，它不再参与本轮输入；下一次增量运行会把对应的减少账号写入待手动处理清单。即使所有卡密都被注释，也会跳过兑换并继续记录输入变化；完全空白的卡密文件仍会报错。没有归属标记的账号也不会发送到 Cockpit 自动导入。
 
-Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。脚本会把待删除邮箱累计写入 `cache\results\cockpit-pending-deletions.txt`，供你在 Cockpit Tools 中删除，不会直接修改其加密存储。为保证一个快照代表两个目标的同一状态，增量模式不接受 `--skip-sub2api` 或 `--skip-cockpit`。
+Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。脚本会把输入中减少的邮箱累计写入 `cache\results\cockpit-pending-deletions.txt`，供你在 Cockpit Tools 中手动处理，不会直接修改其加密存储。为保证一个快照代表两个目标的同一状态，增量模式不接受 `--skip-sub2api` 或 `--skip-cockpit`。
 
-Sub2API 删除前校验或删除接口失败时，脚本会把 ID、邮箱和原因写入 cache\results\sub2api-pending-deletions.txt（不含凭据），继续导入 Cockpit；下次运行会重试，也可以按清单手动处理。
+输入中减少账号时，脚本会把 ID、邮箱和原因写入 `cache\results\sub2api-pending-deletions.txt`（不含凭据），并继续导入 Cockpit；工具不会调用删除接口，你可以按清单手动处理。账号重新出现在当前输入时，会从待处理清单移除。
 
 旧快捷入口对应的新位置是：`redeem\redeem-account-import.bat`、`cockpit\drop-json-to-import.bat` 和 `sub2api\import-from-cockpit-tools.bat`。最后一个只读取 Cockpit Tools 本地账号，是 Sub2API 的备选来源，不参与总流程。BAT 只负责找到 Python、传递参数和显示退出码，业务逻辑全部在 `.py` 文件中。
 
@@ -69,15 +69,15 @@ Sub2API 删除前校验或删除接口失败时，脚本会把 ID、邮箱和原
 ├─ runs/<run-id>/
 │  ├─ redeem/                 ZIP 和解压数据
 │  ├─ normalized/             两个导入目标 JSON
-│  ├─ incremental/            本次新增、删除过渡 JSON
+│  ├─ incremental/            本次新增、输入减少记录 JSON
 │  ├─ redeem-manifest.json    兑换元数据
 │  └─ manifest.json           阶段状态和退出码
 ├─ state/incremental.json     增量快照（只保存账号标识和 Sub2API ID）
 ├─ logs/pipeline-*.log        流水线日志
 └─ results/
    ├─ redeem-result.txt       最近一次逐卡结果（UTF-8 BOM TSV）
-   ├─ cockpit-pending-deletions.txt  Cockpit 待手动删除账号
-   └─ sub2api-pending-deletions.txt  Sub2API 删除失败待处理账号
+   ├─ cockpit-pending-deletions.txt  Cockpit 待手动处理账号
+   └─ sub2api-pending-deletions.txt  Sub2API 待手动处理账号
 ```
 
 manifest 保存路径、数量、任务号、阶段状态和账号来源标识（邮箱），不保存卡密、Token、密码或账号凭据。`normalized` 下的 JSON 含凭据，只保存在本机运行目录。
@@ -91,8 +91,8 @@ manifest 保存路径、数量、任务号、阶段状态和账号来源标识�
 | 给 Sub2API 和 Cockpit 的标准化 JSON | `Tools\account-pipeline\cache\runs\<run-id>\normalized\` |
 | 本次运行 manifest | `Tools\account-pipeline\cache\runs\<run-id>\manifest.json` |
 | 最近一次卡密结果 | `Tools\account-pipeline\cache\results\redeem-result.txt` |
-| Cockpit 待删除清单 | `Tools\account-pipeline\cache\results\cockpit-pending-deletions.txt` |
-| Sub2API 删除失败清单 | `Tools\account-pipeline\cache\results\sub2api-pending-deletions.txt` |
+| Cockpit 待手动处理清单 | `Tools\account-pipeline\cache\results\cockpit-pending-deletions.txt` |
+| Sub2API 待手动处理清单 | `Tools\account-pipeline\cache\results\sub2api-pending-deletions.txt` |
 | 增量状态和日志 | `Tools\account-pipeline\cache\state\`、`Tools\account-pipeline\cache\logs\` |
 
 这些缓存不写入 Git 工作区。若需要换到其他目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input\redeem-codes.txt` 和 `input\accounts.txt` 是用户输入源，不是自动生成的缓存，仓库已将它们加入忽略规则。
@@ -107,4 +107,4 @@ manifest 保存路径、数量、任务号、阶段状态和账号来源标识�
 
 有卡密时先由 `redeem` 下载并解压；随后 `normalize` 同时读取解压目录和账户文本，按邮箱去重，生成 `normalized\sub2api-accounts.json` 和 `normalized\cockpit-accounts.json`。日志会列出兑换来源、账户文本来源、重复数和合并后的总数；这两个 JSON 是各自导入器的单独重跑输入。标准化要求每个账号有 `access_token` 和可识别的邮箱。
 
-兑换结果中有失效卡密时，已下载的账号和 `accounts.txt` 仍会继续合并导入，异常只写入结果和日志，不改变流程成功状态。增量模式会暂缓本轮删除并保留未确认移除的旧账号，等下一次兑换结果完整后再处理；把失效卡密注释掉后，后续运行才会按增量规则清理对应账号。这个情况的运行记录会标记为 `success_with_redeem_warnings`。
+兑换结果中有失效卡密时，已下载的账号和 `accounts.txt` 仍会继续合并导入，异常只写入结果和日志，不改变流程成功状态；输入中减少的账号仍只记录待手动处理清单，不会自动删除。这个情况的运行记录会标记为 `success_with_redeem_warnings`。

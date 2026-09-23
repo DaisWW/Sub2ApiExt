@@ -454,15 +454,8 @@ def account_detail(
     client: ApiClient,
     token: str,
     account_id: int,
-    *,
-    allow_missing: bool = False,
-) -> Optional[Dict[str, Any]]:
-    try:
-        value = client.request("GET", f"/admin/accounts/{account_id}", token=token)
-    except Sub2ApiError as exc:
-        if allow_missing and "HTTP 404" in str(exc):
-            return None
-        raise
+) -> Dict[str, Any]:
+    value = client.request("GET", f"/admin/accounts/{account_id}", token=token)
     if not isinstance(value, dict) or account_database_id(value) != account_id:
         raise Sub2ApiError(f"Sub2API 账户 ID {account_id} 的明细格式无效")
     return value
@@ -886,119 +879,14 @@ def run_import(
     return 0
 
 
-def delete_account_ids(
-    config_file: Optional[Path],
-    account_ids: Iterable[int],
-    *,
-    expected_records: Optional[Iterable[Mapping[str, Any]]] = None,
-) -> int:
-    """删除增量快照明确记录且仍带工具归属标记的账户。"""
-    ids = set()
-    for value in account_ids:
-        try:
-            account_id = int(value)
-        except (TypeError, ValueError):
-            continue
-        if account_id > 0:
-            ids.add(account_id)
-    ids = sorted(ids)
-    if not ids:
-        print("Sub2API：没有需要删除的账户。")
-        return 0
-    if expected_records is None:
-        raise Sub2ApiError("删除操作缺少快照账号标识；已拒绝不确定删除")
-
-    expected_by_id: Dict[int, List[Mapping[str, Any]]] = {}
-    for record in expected_records:
-        try:
-            expected_id = int(record.get("sub2api_id", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if expected_id > 0:
-            expected_by_id.setdefault(expected_id, []).append(record)
-
-    _, _, client, token = admin_session(config_file)
-    validated_ids: List[int] = []
-    for account_id in ids:
-        account = account_detail(client, token, account_id, allow_missing=True)
-        if account is None:
-            print(f"Sub2API 账户 ID {account_id} 已不存在，跳过删除请求。")
-            continue
-        if not is_tool_managed(account):
-            raise Sub2ApiError(
-                f"删除前发现账户 ID {account_id} 已不是工具维护账户；已中止整批删除"
-            )
-        expected_keys = {
-            key
-            for record in expected_by_id.get(account_id, [])
-            for key in (record_key(record),)
-            if key is not None
-        }
-        if not expected_keys or not expected_keys.issubset(set(account_keys(account))):
-            raise Sub2ApiError(
-                f"删除前账户 ID {account_id} 的账号标识已变化；已中止整批删除"
-            )
-        validated_ids.append(account_id)
-    ids = validated_ids
-    if not ids:
-        return 0
-    result = client.request(
-        "POST",
-        "/admin/accounts/batch-delete",
-        token=token,
-        body={"account_ids": ids},
-    )
-    if not isinstance(result, dict):
-        raise Sub2ApiError("Sub2API 删除接口返回格式无效")
-    failed = result_count(result, "failed")
-    success = result_count(result, "success")
-    if failed:
-        failed_ids = result.get("failed_ids", [])
-        detail = ", ".join(str(value) for value in failed_ids) if isinstance(failed_ids, list) else "未知账户"
-        raise Sub2ApiError(f"Sub2API 删除失败 {failed} 个账户（ID：{detail}）")
-    if success != len(ids):
-        raise Sub2ApiError(
-            f"Sub2API 删除结果数量不一致：请求 {len(ids)} 个，成功 {success} 个"
-        )
-    print(f"Sub2API 删除完成：{success} 个账户。")
-    return 0
-
-
 def resolve_account_ids(
     config_file: Optional[Path],
     records: Iterable[Dict[str, Any]],
     *,
-    require_stored_id: bool = False,
     require_managed: bool = True,
 ) -> Dict[str, int]:
     """只读查询输入账号对应的、可安全确认的 Sub2API 数据库 ID。"""
     record_list = list(records)
-    if require_stored_id:
-        stored = [
-            record
-            for record in record_list
-            if account_database_id({"id": record.get("sub2api_id")}) > 0
-        ]
-        if not stored:
-            return {}
-        _, _, client, token = admin_session(config_file)
-        resolved: Dict[str, int] = {}
-        for record in stored:
-            account_id = account_database_id({"id": record["sub2api_id"]})
-            detail = account_detail(client, token, account_id, allow_missing=True)
-            if detail is None:
-                # 账户已被手动删除时，交给删除操作的幂等路径清理快照。
-                key = record_key(record)
-                if key:
-                    resolved[key] = account_id
-                continue
-            key = record_key(record)
-            if key in account_keys(detail) and (
-                not require_managed or is_tool_managed(detail)
-            ):
-                resolved[key] = account_id
-        return resolved
-
     wanted: Dict[str, str] = {}
     for record in record_list:
         canonical = record_key(record)
@@ -1030,7 +918,7 @@ def resolve_account_ids(
             previous = result.get(canonical)
             if previous is not None and previous != account_id:
                 raise Sub2ApiError(
-                    f"账号 {canonical} 匹配到多个 Sub2API 账户；已停止以避免误删"
+                    f"账号 {canonical} 匹配到多个 Sub2API 账户；已停止以避免误匹配"
                 )
             result[canonical] = account_id
     return result

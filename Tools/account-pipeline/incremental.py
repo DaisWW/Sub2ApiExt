@@ -213,7 +213,7 @@ def update_pending_deletions(
                 if value and not value.startswith("#"):
                     pending[value.casefold()] = value
         except (OSError, UnicodeDecodeError) as exc:
-            raise IncrementalError(f"Cockpit 待删除清单无法读取：{path}") from exc
+            raise IncrementalError(f"Cockpit 待手动处理清单无法读取：{path}") from exc
     for record in current:
         value = text(record.get("email")) or text(record.get("account_id"))
         if value:
@@ -224,7 +224,7 @@ def update_pending_deletions(
             pending[value.casefold()] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    content = "# Cockpit 外部导入接口不支持删除；请在 Cockpit Tools 中删除以下账号\n"
+    content = "# Cockpit 待手动处理账号；工具不会自动删除，请在 Cockpit Tools 中处理\n"
     content += "\n".join(pending.values())
     if pending:
         content += "\n"
@@ -236,17 +236,63 @@ def update_pending_deletions(
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
-        raise IncrementalError(f"写入 Cockpit 待删除清单失败：{path}") from exc
+        raise IncrementalError(f"写入 Cockpit 待手动处理清单失败：{path}") from exc
     return len(pending)
 
 
-def write_sub2api_pending_deletions(
+def update_sub2api_pending_deletions(
     path: Path,
     entries: Iterable[Tuple[Mapping[str, Any], str]],
+    current: Iterable[Mapping[str, Any]] = (),
 ) -> int:
-    """写出无法自动删除的 Sub2API 账户清单，不包含凭据。"""
-    lines = ["# Sub2API 自动删除未完成；请按 ID 或邮箱手动处理\n"]
-    count = 0
+    """维护 Sub2API 待手动处理清单，不包含凭据，也不调用删除接口。"""
+    pending: Dict[str, str] = {}
+    if path.is_file():
+        try:
+            for line in path.read_text(encoding="utf-8-sig").splitlines():
+                value = line.strip()
+                if not value or value.startswith("#"):
+                    continue
+                fields = {
+                    part.split("=", 1)[0]: part.split("=", 1)[1]
+                    for part in value.split("\t")
+                    if "=" in part
+                }
+                account_id = text(fields.get("ID"))
+                identity = text(fields.get("账号"))
+                if account_id == "-":
+                    account_id = ""
+                if identity == "-":
+                    identity = ""
+                key = (
+                    "id:" + account_id
+                    if account_id
+                    else "account:" + identity.casefold()
+                )
+                if key != "account:":
+                    pending[key] = value
+        except (OSError, UnicodeDecodeError) as exc:
+            raise IncrementalError(f"Sub2API 待手动处理清单无法读取：{path}") from exc
+
+    for record in current:
+        identities = {
+            "account:" + value.casefold()
+            for value in (
+                text(record.get("email")),
+                text(record.get("account_id")),
+            )
+            if value
+        }
+        raw_account_id = record.get("sub2api_id")
+        try:
+            account_id = int(raw_account_id or 0)
+        except (TypeError, ValueError):
+            account_id = 0
+        if account_id > 0:
+            identities.add("id:" + str(account_id))
+        for key in identities:
+            pending.pop(key, None)
+
     for record, reason in entries:
         raw_account_id = record.get("sub2api_id")
         account_id = str(raw_account_id).strip() if raw_account_id is not None else ""
@@ -254,10 +300,18 @@ def write_sub2api_pending_deletions(
         if not account_id and not identity:
             continue
         clean_reason = str(reason).replace("\t", " ").replace("\r", " ").replace("\n", " ")
-        lines.append(
-            f"ID={account_id or '-'}\t账号={identity or '-'}\t原因={clean_reason}\n"
+        line = (
+            f"ID={account_id or '-'}\t账号={identity or '-'}\t原因={clean_reason}"
         )
-        count += 1
+        key = (
+            "id:" + account_id
+            if account_id
+            else "account:" + identity.casefold()
+        )
+        pending[key] = line
+
+    lines = ["# Sub2API 待手动处理账号；工具不会自动删除，请按 ID 或邮箱处理\n"]
+    lines.extend(value + "\n" for value in pending.values())
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     try:
@@ -268,5 +322,5 @@ def write_sub2api_pending_deletions(
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
-        raise IncrementalError(f"写入 Sub2API 待删除清单失败：{path}") from exc
-    return count
+        raise IncrementalError(f"写入 Sub2API 待手动处理清单失败：{path}") from exc
+    return len(pending)

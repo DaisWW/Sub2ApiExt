@@ -1,4 +1,4 @@
-"""增量删除和远端归属边界的离线回归测试。"""
+"""增量导入、手动清单和远端归属边界的离线回归测试。"""
 
 from __future__ import annotations
 
@@ -37,7 +37,6 @@ class FakeClient:
     def __init__(self, accounts: list[dict]):
         self.accounts = {account["id"]: account for account in accounts}
         self.imports: list[dict] = []
-        self.deleted: list[int] = []
 
     def request(self, method: str, path: str, *, token=None, body=None):
         if (method, path) == ("GET", "/admin/groups/all?include_inactive=true"):
@@ -61,11 +60,6 @@ class FakeClient:
                 existing["extra"] = dict(body["extra"])
                 action = "updated"
             return {"failed": 0, "items": [{"action": action, "account_id": account_id}]}
-        if (method, path) == ("POST", "/admin/accounts/batch-delete"):
-            self.deleted.extend(body["account_ids"])
-            for account_id in body["account_ids"]:
-                self.accounts.pop(account_id)
-            return {"failed": 0, "success": len(body["account_ids"])}
         raise AssertionError((method, path))
 
 
@@ -95,7 +89,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
             dry_run=False,
         )
 
-    def test_commented_last_code_removes_only_previous_managed_account(self):
+    def test_commented_last_code_is_recorded_for_manual_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codes = root / "redeem-codes.txt"
@@ -161,7 +155,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 ["accounts-file"],
             )
 
-    def test_partial_redeem_merges_sources_and_defers_cleanup(self):
+    def test_partial_redeem_merges_sources_and_records_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codes = root / "redeem-codes.txt"
@@ -244,129 +238,39 @@ class IncrementalOwnershipTests(unittest.TestCase):
             self.assertEqual(
                 set(state["accounts"]),
                 {
-                    "email:old@example.com",
                     "email:redeemed@example.com",
                     "email:direct@example.com",
                 },
             )
-            pending = root / "cache" / "results" / "cockpit-pending-deletions.txt"
-            self.assertNotIn("old@example.com", pending.read_text(encoding="utf-8-sig"))
+            cockpit_pending = root / "cache" / "results" / "cockpit-pending-deletions.txt"
+            self.assertIn("old@example.com", cockpit_pending.read_text(encoding="utf-8-sig"))
+            sub2api_pending = root / "cache" / "results" / "sub2api-pending-deletions.txt"
+            self.assertIn("old@example.com", sub2api_pending.read_text(encoding="utf-8-sig"))
 
-    def test_sub2api_delete_failure_is_logged_and_cockpit_still_runs(self):
+    def test_manual_cleanup_list_persists_until_account_returns(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            codes = root / "redeem-codes.txt"
-            codes.write_text("# PLUS-OLD\n", encoding="utf-8")
-            accounts = root / "accounts.txt"
-            accounts.write_text(json.dumps(record("new@example.com")), encoding="utf-8")
-            state_path = root / "cache" / "state" / "incremental.json"
-            scope = incremental.input_scope(codes, accounts)
-            incremental.write_state(
-                state_path,
-                incremental.build_state(
-                    [record("old@example.com")],
-                    scope,
-                    {"email:old@example.com": 7},
-                    source_keys={"email:old@example.com": ["redeem"]},
+            path = Path(directory) / "sub2api-pending-deletions.txt"
+            removed = [dict(record("old@example.com"), sub2api_id=7)]
+            self.assertEqual(
+                incremental.update_sub2api_pending_deletions(
+                    path,
+                    [(removed[0], "当前输入已移除；请手动处理")],
                 ),
+                1,
             )
-            cockpit_imported: list[str] = []
-
-            def fake_sub2api(input_path, _config, *, summary_file=None, **_kwargs):
-                payload = json.loads(input_path.read_text(encoding="utf-8"))
-                self.assertEqual(
-                    [item["credentials"]["email"] for item in payload["accounts"]],
-                    ["new@example.com"],
-                )
-                sub2api.write_managed_summary(
-                    summary_file,
-                    {"email:new@example.com": 8},
-                )
-                return 0
-
-            def fake_cockpit(input_path, **_kwargs):
-                cockpit_imported.extend(
-                    item["email"]
-                    for item in json.loads(input_path.read_text(encoding="utf-8"))
-                )
-                return 0
-
-            with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
-                pipeline.sub2api_module, "execute", side_effect=fake_sub2api
-            ), patch.object(
-                pipeline.sub2api_module,
-                "resolve_account_ids",
-                side_effect=sub2api.Sub2ApiError("模拟删除校验失败"),
-            ), patch.object(
-                pipeline.cockpit_module, "execute", side_effect=fake_cockpit
-            ):
-                self.assertEqual(
-                    pipeline.run(self.pipeline_args(root, codes=codes, accounts=accounts)),
-                    0,
-                )
-
-            self.assertEqual(cockpit_imported, ["new@example.com"])
-            pending = root / "cache" / "results" / "sub2api-pending-deletions.txt"
-            pending_text = pending.read_text(encoding="utf-8-sig")
-            self.assertIn("ID=7", pending_text)
-            self.assertIn("old@example.com", pending_text)
-            self.assertIn("模拟删除校验失败", pending_text)
-            self.assertIn("email:old@example.com", incremental.read_state(state_path)["accounts"])
-
-    def test_sub2api_delete_api_failure_is_logged_and_cockpit_still_runs(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            codes = root / "redeem-codes.txt"
-            codes.write_text("# PLUS-OLD\n", encoding="utf-8")
-            accounts = root / "accounts.txt"
-            accounts.write_text(json.dumps(record("new@example.com")), encoding="utf-8")
-            state_path = root / "cache" / "state" / "incremental.json"
-            incremental.write_state(
-                state_path,
-                incremental.build_state(
-                    [record("old@example.com")],
-                    incremental.input_scope(codes, accounts),
-                    {"email:old@example.com": 7},
+            self.assertEqual(
+                incremental.update_sub2api_pending_deletions(path, []),
+                1,
+            )
+            self.assertEqual(
+                incremental.update_sub2api_pending_deletions(
+                    path,
+                    [],
+                    [removed[0]],
                 ),
+                0,
             )
-            client = FakeClient([remote(7, "old@example.com", managed=True)])
-            cockpit_imported: list[str] = []
-
-            def fake_sub2api(_input, _config, *, summary_file=None, **_kwargs):
-                sub2api.write_managed_summary(summary_file, {"email:new@example.com": 8})
-                return 0
-
-            def fake_cockpit(input_path, **_kwargs):
-                cockpit_imported.extend(
-                    item["email"]
-                    for item in json.loads(input_path.read_text(encoding="utf-8"))
-                )
-                return 0
-
-            with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
-                pipeline.sub2api_module, "execute", side_effect=fake_sub2api
-            ), patch.object(
-                sub2api, "admin_session", return_value=(root, {}, client, "token")
-            ), patch.object(
-                pipeline.sub2api_module,
-                "delete_account_ids",
-                side_effect=sub2api.Sub2ApiError("模拟删除接口失败"),
-            ), patch.object(
-                pipeline.cockpit_module, "execute", side_effect=fake_cockpit
-            ):
-                self.assertEqual(
-                    pipeline.run(self.pipeline_args(root, codes=codes, accounts=accounts)),
-                    0,
-                )
-
-            self.assertEqual(cockpit_imported, ["new@example.com"])
-            self.assertIn(
-                "自动删除失败：模拟删除接口失败",
-                (root / "cache" / "results" / "sub2api-pending-deletions.txt").read_text(
-                    encoding="utf-8-sig"
-                ),
-            )
-            self.assertIn("email:old@example.com", incremental.read_state(state_path)["accounts"])
+            self.assertNotIn("old@example.com", path.read_text(encoding="utf-8-sig"))
 
     def test_manual_account_is_never_updated_or_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -389,63 +293,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
             self.assertFalse(client.imports[1]["update_existing"])
             self.assertTrue(all(sub2api.is_tool_managed(account) for account in client.accounts.values()))
 
-    def test_delete_requires_same_id_marker_and_email(self):
-        client = FakeClient([remote(7, "old@example.com", managed=True)])
-        expected = [dict(record("old@example.com"), sub2api_id=7)]
-        with patch.object(sub2api, "admin_session", return_value=(Path("config"), {}, client, "token")), patch.object(
-            sub2api, "get_accounts", side_effect=lambda *_: list(client.accounts.values())
-        ):
-            client.accounts[7]["extra"] = {}
-            with self.assertRaises(sub2api.Sub2ApiError):
-                sub2api.delete_account_ids(None, [7], expected_records=expected)
-            self.assertEqual(client.deleted, [])
-            client.accounts[7]["extra"] = {
-                sub2api.OWNERSHIP_EXTRA_KEY: sub2api.OWNERSHIP_EXTRA_VALUE
-            }
-            client.accounts[7]["email"] = "changed@example.com"
-            client.accounts[7]["name"] = "changed@example.com"
-            with self.assertRaises(sub2api.Sub2ApiError):
-                sub2api.delete_account_ids(None, [7], expected_records=expected)
-            self.assertEqual(client.deleted, [])
-            client.accounts[7]["email"] = "old@example.com"
-            client.accounts[7]["name"] = "old@example.com"
-            self.assertEqual(sub2api.delete_account_ids(None, [7], expected_records=expected), 0)
-            self.assertEqual(client.deleted, [7])
-
-    def test_already_deleted_account_is_safe_to_retry(self):
-        class MissingClient(FakeClient):
-            def request(self, method: str, path: str, *, token=None, body=None):
-                if method == "GET" and path == "/admin/accounts/7":
-                    raise sub2api.Sub2ApiError("请求 Sub2API GET /admin/accounts/7 失败（HTTP 404）")
-                return super().request(method, path, token=token, body=body)
-
-        client = MissingClient([])
-        with patch.object(
-            sub2api,
-            "admin_session",
-            return_value=(Path("config"), {}, client, "token"),
-        ):
-            expected = [dict(record("old@example.com"), sub2api_id=7)]
-            self.assertEqual(
-                sub2api.resolve_account_ids(
-                    None,
-                    expected,
-                    require_stored_id=True,
-                    require_managed=True,
-                ),
-                {"email:old@example.com": 7},
-            )
-            self.assertEqual(
-                sub2api.delete_account_ids(
-                    None,
-                    [7],
-                    expected_records=expected,
-                ),
-                0,
-            )
-        self.assertEqual(client.deleted, [])
-
-    def test_v1_snapshot_cannot_drive_deletion(self):
+    def test_v1_snapshot_starts_a_safe_baseline(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "incremental.json"
             path.write_text(
@@ -463,7 +311,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
             self.assertEqual(delta.removed, [])
             self.assertIsNone(state["scope"])
 
-    def test_pipeline_cleans_up_when_all_codes_are_commented(self):
+    def test_pipeline_records_removed_accounts_for_manual_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codes = root / "redeem-codes.txt"
@@ -483,19 +331,23 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 pipeline.redeem_module, "execute", side_effect=AssertionError("redeem called")
             ), patch.object(
                 pipeline.cockpit_module, "execute", side_effect=AssertionError("cockpit called")
-            ), patch.object(
-                sub2api, "admin_session", return_value=(root, {}, client, "token")
-            ), patch.object(
-                sub2api, "get_accounts", side_effect=lambda *_: list(client.accounts.values())
             ):
                 self.assertEqual(pipeline.run(self.pipeline_args(root, codes=codes)), 0)
-            self.assertEqual(client.deleted, [7])
+            self.assertIn(7, client.accounts)
             new_state = incremental.read_state(state_path)
             self.assertEqual(new_state["accounts"], {})
             self.assertIn(
                 "old@example.com",
                 (runtime / "results" / "cockpit-pending-deletions.txt").read_text(encoding="utf-8-sig"),
             )
+            self.assertIn(
+                "old@example.com",
+                (runtime / "results" / "sub2api-pending-deletions.txt").read_text(encoding="utf-8-sig"),
+            )
+            manifests = list((runtime / "runs").glob("*/manifest.json"))
+            self.assertEqual(len(manifests), 1)
+            manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+            self.assertEqual(manifest["manual_cleanup"]["detected"], 1)
 
     def test_pipeline_keeps_id_still_referenced_by_current_input(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -521,9 +373,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
             ), patch.object(
                 pipeline.cockpit_module, "execute", side_effect=AssertionError("cockpit called")
             ), patch.object(
-                sub2api, "admin_session", return_value=(root, {}, client, "token")
-            ), patch.object(
-                sub2api, "delete_account_ids", side_effect=AssertionError("delete called")
+                sub2api, "admin_session", side_effect=AssertionError("remote lookup called")
             ):
                 self.assertEqual(
                     pipeline.run(self.pipeline_args(root, codes=codes, accounts=accounts)),

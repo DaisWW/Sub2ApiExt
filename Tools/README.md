@@ -15,7 +15,7 @@ Tools/
    └─ cockpit/                        Cockpit Tools 本地导入
 ```
 
-把卡密文件拖到 `account-pipeline\run.bat`，或把卡密逐行写入 `input\redeem-codes.txt`；需要直接导入已有账户时，把多个 JSON 对象（对象之间可空行）写入 `input\accounts.txt`。两个文件同时存在时，一键流程会合并账号、整理格式，然后分别导入 Cockpit 和 Sub2API。结果会显示在窗口，并覆盖保存到 `account-pipeline\cache\results\redeem-result.txt`。需要只处理新增和已删除账号时使用 `account-pipeline\incremental.bat`。
+把卡密文件拖到 `account-pipeline\run.bat`，或把卡密逐行写入 `input\redeem-codes.txt`；需要直接导入已有账户时，把多个 JSON 对象（对象之间可空行）写入 `input\accounts.txt`。两个文件同时存在时，一键流程会合并账号、整理格式，然后按 Sub2API → Cockpit 的顺序导入。结果会显示在窗口，并覆盖保存到 `account-pipeline\cache\results\redeem-result.txt`。需要只处理新增账号并记录输入中减少账号时使用 `account-pipeline\incremental.bat`。
 
 根目录只保留一个总入口 BAT；各模块目录中的 `run.bat` 是对应模块的快捷入口，会复用总入口的 Python 启动检查。
 

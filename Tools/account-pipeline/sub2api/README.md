@@ -11,4 +11,4 @@ import-from-cockpit-tools.bat [--what-if]
 
 `run.bat` 用于导入 JSON；`import-from-cockpit-tools.bat` 才会读取当前 Windows 用户的 Cockpit Tools 加密账号，需要安装 `requirements.txt` 中的 `cryptography` 包。后者不会被总流程自动调用。
 
-总目录的 `incremental.bat` 会使用本模块查询带有 `extra.account_pipeline_managed=account-pipeline-v1` 归属标记的账号，并通过官方 `POST /api/v1/admin/accounts/batch-delete` 删除快照中存在、当前输入已不存在且删除前仍能验证标记和账号标识的账号。没有该标记的手动中转账户会跳过，不会被更新或删除；脚本不会按模糊名称或未知 ID 猜测删除。
+总目录的 `incremental.bat` 会使用本模块只读查询带有 `extra.account_pipeline_managed=account-pipeline-v1` 归属标记的账号，用于建立首次增量基线和过滤手动账户。输入中减少的账号会把 ID、邮箱和原因写入 `..\cache\results\sub2api-pending-deletions.txt` 供手动处理；本模块不会调用删除接口，也不会按模糊名称或未知 ID 删除。没有归属标记的手动中转账户会跳过，不会被更新或写入工具快照。

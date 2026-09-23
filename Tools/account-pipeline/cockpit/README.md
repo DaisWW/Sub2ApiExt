@@ -10,4 +10,4 @@ run.bat <cockpit-accounts.json>
 
 未传文件时会打开文件选择器。此模块只支持 Windows 和已安装的 Cockpit Tools。
 
-Cockpit Tools 当前公开的外部深链只支持导入。增量总流程只把新增账号交给 Cockpit；待删除账号会写入 `..\cache\results\cockpit-pending-deletions.txt`，避免直接修改 Cockpit 的加密账号存储。
+Cockpit Tools 当前公开的外部深链只支持导入。增量总流程只把新增账号交给 Cockpit；输入中减少的账号会写入 `..\cache\results\cockpit-pending-deletions.txt` 供手动处理，工具不会直接修改 Cockpit 的加密账号存储。
