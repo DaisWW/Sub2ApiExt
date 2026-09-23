@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 
 MAX_JSON_BYTES = 32 * 1024 * 1024
@@ -19,6 +19,13 @@ TOKEN_KEYS = ("access_token", "accessToken")
 EMAIL_KEYS = ("email", "user_email", "account_email", "accountEmail", "username")
 REFRESH_KEYS = ("refresh_token", "refreshToken")
 ID_TOKEN_KEYS = ("id_token", "idToken")
+CONFLICT_FIELDS = (
+    "email",
+    "account_id",
+    "access_token",
+    "refresh_token",
+    "id_token",
+)
 ACCOUNT_ID_KEYS = ("account_id", "accountId", "chatgpt_account_id")
 SUPPORTED_TYPES = {"codex", "oauth"}
 SUPPORTED_PLATFORMS = {"openai", "codex"}
@@ -264,18 +271,95 @@ def record_key(record: Dict[str, Any]) -> str:
 
 def deduplicate_with_sources(
     records: Iterable[Tuple[Dict[str, Any], str]],
-) -> Tuple[List[Dict[str, Any]], Dict[str, Set[str]]]:
+) -> Tuple[
+    List[Dict[str, Any]],
+    Dict[str, Set[str]],
+    Dict[str, Dict[str, Any]],
+]:
     result: List[Dict[str, Any]] = []
-    seen: Set[str] = set()
+    seen: Dict[str, Tuple[Dict[str, Any], str]] = {}
+    seen_account_ids: Dict[str, Tuple[Dict[str, Any], str, str]] = {}
     sources: Dict[str, Set[str]] = {}
+    conflicts: Dict[str, Dict[str, Any]] = {}
     for record, source in records:
         key = record_key(record)
         sources.setdefault(key, set()).add(source)
-        if key in seen:
+        account_id = text_value(record.get("account_id"))
+        account_match = (
+            seen_account_ids.get(account_id.casefold()) if account_id else None
+        )
+        if key not in seen and account_match is not None:
+            previous, previous_source, previous_key = account_match
+            fields = {
+                name
+                for name in CONFLICT_FIELDS
+                if text_value(previous.get(name)) != text_value(record.get(name))
+            }
+            conflict = conflicts.setdefault(
+                previous_key,
+                {
+                    "email": previous.get("email", ""),
+                    "account_id": account_id,
+                    "sources": set(),
+                    "fields": set(),
+                },
+            )
+            conflict["sources"].update((previous_source, source))
+            conflict["fields"].update(fields or {"email"})
             continue
-        seen.add(key)
+        if key in seen:
+            previous, previous_source = seen[key]
+            fields = {
+                name
+                for name in CONFLICT_FIELDS
+                if text_value(previous.get(name)) != text_value(record.get(name))
+            }
+            if fields:
+                conflict = conflicts.setdefault(
+                    key,
+                    {
+                        "email": record.get("email", ""),
+                        "account_id": record.get("account_id", ""),
+                        "sources": set(),
+                        "fields": set(),
+                    },
+                )
+                conflict["sources"].update((previous_source, source))
+                conflict["fields"].update(fields)
+            continue
+        seen[key] = (record, source)
+        if account_id:
+            seen_account_ids[account_id.casefold()] = (record, source, key)
         result.append(record)
-    return result, sources
+    return result, sources, conflicts
+
+
+def write_conflict_report(
+    path: Path, conflicts: Mapping[str, Mapping[str, Any]]
+) -> None:
+    lines = ["# 输入源凭据冲突；报告不包含 token 内容\n"]
+    if conflicts:
+        for key, conflict in sorted(conflicts.items()):
+            sources = conflict.get("sources", ())
+            fields = conflict.get("fields", ())
+            lines.append(
+                f"账号={conflict.get('email') or conflict.get('account_id') or key}"
+                f"\t来源={','.join(sorted(str(value) for value in sources))}"
+                f"\t不同字段={','.join(sorted(str(value) for value in fields))}\n"
+            )
+    else:
+        lines.append("未发现冲突。\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        temporary.write_text("".join(lines), encoding="utf-8-sig")
+        os.replace(temporary, path)
+    except OSError as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise NormalizeError(f"写入输入冲突报告失败：{path}") from exc
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -322,6 +406,7 @@ def normalize(
     account_file: Optional[Path] = None,
     *,
     allow_empty: bool = False,
+    conflict_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     files = (
         source_files(data_dir, allow_empty=account_file is not None)
@@ -354,7 +439,13 @@ def normalize(
         (canonical_record(record, index), source)
         for index, (record, source) in enumerate(source_records, start=1)
     )
-    records, sources = deduplicate_with_sources(canonical_sources)
+    records, sources, conflicts = deduplicate_with_sources(canonical_sources)
+    conflict_path = conflict_file or (output_dir / "input-conflicts.txt")
+    write_conflict_report(conflict_path, conflicts)
+    if conflicts:
+        raise NormalizeError(
+            f"发现 {len(conflicts)} 个同账号凭据冲突；已停止导入，详见：{conflict_path}"
+        )
     if not records and not allow_empty:
         raise NormalizeError("标准化后没有可导入账号")
 
@@ -384,6 +475,7 @@ def normalize(
         },
         "sub2api_input": str(sub2api_path.resolve()),
         "cockpit_input": str(cockpit_path.resolve()),
+        "conflict_file": str(conflict_path.resolve()),
         "source_keys": {
             key: sorted(values) for key, values in sorted(sources.items())
         },

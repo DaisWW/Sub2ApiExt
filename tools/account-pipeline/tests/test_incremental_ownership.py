@@ -194,6 +194,34 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 ["accounts-file"],
             )
 
+    def test_normalize_stops_when_sources_have_different_tokens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloaded = root / "downloaded"
+            downloaded.mkdir()
+            downloaded.joinpath("account.json").write_text(
+                json.dumps(record("same@example.com")), encoding="utf-8"
+            )
+            account_text = root / "accounts.txt"
+            conflicting = record("same@example.com")
+            conflicting["access_token"] = "different-plain-token"
+            account_text.write_text(json.dumps(conflicting), encoding="utf-8")
+            report = root / "results" / "input-conflicts.txt"
+
+            with self.assertRaises(normalize.NormalizeError):
+                normalize.normalize(
+                    downloaded,
+                    root / "out",
+                    account_text,
+                    conflict_file=report,
+                )
+
+            rendered = report.read_text(encoding="utf-8-sig")
+            self.assertIn("same@example.com", rendered)
+            self.assertIn("access_token", rendered)
+            self.assertNotIn("different-plain-token", rendered)
+            self.assertFalse((root / "out" / "sub2api-accounts.json").exists())
+
     def test_partial_redeem_merges_sources_and_records_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

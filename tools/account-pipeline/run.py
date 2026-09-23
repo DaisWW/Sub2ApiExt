@@ -22,6 +22,7 @@ import incremental as incremental_module  # noqa: E402
 from normalize import main as normalize_module  # noqa: E402
 from redeem import main as redeem_module  # noqa: E402
 from sub2api import main as sub2api_module  # noqa: E402
+import token_state as token_state_module  # noqa: E402
 
 
 NEW_CODES_FILE = BASE_DIR / "input" / "redeem-codes.txt"
@@ -274,8 +275,15 @@ def stage_error(
 
 def run(args: argparse.Namespace) -> int:
     config = load_pipeline_config()
-    if args.incremental and (args.skip_sub2api or args.skip_cockpit):
-        raise PipelineError("增量模式需要同时同步 Sub2API 和 Cockpit，不能使用跳过选项")
+    refresh_tokens = bool(getattr(args, "refresh_tokens", False))
+    if args.incremental and refresh_tokens:
+        raise PipelineError("--incremental 不能与 --refresh-tokens 同时使用")
+    if (args.incremental or refresh_tokens) and (
+        args.skip_sub2api or args.skip_cockpit
+    ):
+        raise PipelineError(
+            "增量和 Token 刷新模式需要同时同步 Sub2API 和 Cockpit，不能使用跳过选项"
+        )
     codes_file, accounts_file = choose_inputs(
         args.input_file, args.codes_file, args.accounts_file
     )
@@ -304,7 +312,10 @@ def run(args: argparse.Namespace) -> int:
         raise PipelineError("Cockpit 等待时间必须在 10 到 300 秒之间")
 
     has_codes = validate_layout(
-        codes_file, accounts_file, sub2api_config, incremental=args.incremental
+        codes_file,
+        accounts_file,
+        sub2api_config,
+        incremental=args.incremental or refresh_tokens,
     )
     if codes_file is not None:
         print(f"卡密输入：{codes_file}")
@@ -324,8 +335,10 @@ def run(args: argparse.Namespace) -> int:
     normalized_dir = run_dir / "normalized"
     incremental_dir = run_dir / "incremental"
     incremental_state_file = runtime_dir / "state" / "incremental.json"
+    token_snapshot_file = runtime_dir / "state" / "token-snapshot.json"
     sub2api_summary_file = incremental_dir / "sub2api-accounts.json"
     result_file = runtime_dir / "results" / "redeem-result.txt"
+    conflict_file = runtime_dir / "results" / "input-conflicts.txt"
     sub2api_pending_file = runtime_dir / "results" / "sub2api-pending-deletions.txt"
     cockpit_pending_file = runtime_dir / "results" / "cockpit-pending-deletions.txt"
     redeem_manifest = run_dir / "redeem-manifest.json"
@@ -344,6 +357,8 @@ def run(args: argparse.Namespace) -> int:
         "skip_sub2api": bool(args.skip_sub2api),
         "skip_cockpit": bool(args.skip_cockpit),
         "incremental": bool(args.incremental),
+        "refresh_tokens": refresh_tokens,
+        "conflict_file": str(conflict_file),
     }
     stage = "redeem" if has_codes else "normalize"
     try:
@@ -407,7 +422,8 @@ def run(args: argparse.Namespace) -> int:
             data_dir,
             normalized_dir,
             accounts_file,
-            allow_empty=args.incremental and not has_codes,
+            allow_empty=(args.incremental or refresh_tokens) and not has_codes,
+            conflict_file=conflict_file,
         )
         manifest["normalized"] = normalized
         write_json(pipeline_manifest, manifest)
@@ -422,6 +438,103 @@ def run(args: argparse.Namespace) -> int:
             f"重复 {overlap_accounts} 个，"
             f"合并后 {normalized['accounts']} 个。"
         )
+
+        if refresh_tokens:
+            stage = "token-refresh"
+            records = normalized_records(Path(normalized["cockpit_input"]))
+            token_snapshot = token_state_module.read_snapshot(token_snapshot_file)
+            token_delta = token_state_module.compare(records, token_snapshot)
+            print(
+                "[Token] 明文快照比较完成："
+                f"变化 {len(token_delta.changed)}，未变化 {token_delta.unchanged}。"
+            )
+            manifest["token_refresh"] = {
+                "changed": len(token_delta.changed),
+                "unchanged": token_delta.unchanged,
+            }
+            write_json(pipeline_manifest, manifest)
+
+            if token_delta.changed:
+                refresh_summary = incremental_dir / "token-refresh-sub2api.json"
+                refresh_result = sub2api_module.refresh_credentials(
+                    sub2api_config,
+                    token_delta.changed,
+                    summary_file=refresh_summary,
+                )
+                changed_by_key = {
+                    token_state_module.account_key(record): record
+                    for record in token_delta.changed
+                }
+                updated_records = [
+                    changed_by_key[key]
+                    for key in refresh_result.updated
+                    if key in changed_by_key
+                ]
+                if updated_records:
+                    cockpit_input = incremental_dir / "token-refresh-cockpit.json"
+                    incremental_module.write_json(cockpit_input, updated_records)
+                    print(
+                        "[Token] 开始刷新 Cockpit "
+                        f"（{len(updated_records)} 个账号）……"
+                    )
+                    cockpit_code = cockpit_module.execute(
+                        cockpit_input, wait_seconds=wait_seconds
+                    )
+                    if cockpit_code != 0:
+                        return stage_error(
+                            manifest,
+                            pipeline_manifest,
+                            "token-refresh-cockpit",
+                            cockpit_code,
+                            "Cockpit token 刷新未完成",
+                        )
+                    print(f"[Token] 已向 Cockpit 提交 {len(updated_records)} 个账号。")
+                    token_state_module.update_snapshot(
+                        token_snapshot_file,
+                        updated_records,
+                        refresh_result.updated,
+                    )
+
+                incomplete = (
+                    len(refresh_result.missing)
+                    + len(refresh_result.manual)
+                    + len(refresh_result.failed)
+                )
+                manifest["token_refresh"].update(
+                    {
+                        "updated": len(refresh_result.updated),
+                        "missing": len(refresh_result.missing),
+                        "manual": len(refresh_result.manual),
+                        "failed": len(refresh_result.failed),
+                    }
+                )
+                write_json(pipeline_manifest, manifest)
+                if incomplete:
+                    return stage_error(
+                        manifest,
+                        pipeline_manifest,
+                        "token-refresh",
+                        1,
+                        f"有 {incomplete} 个账号未完成 token 刷新；日志未包含 token 内容",
+                    )
+            else:
+                print("[Token] 没有 token 变化，跳过 Sub2API 和 Cockpit。")
+
+            redeem_warning = redeem_code == 2
+            manifest.update(
+                {
+                    "status": (
+                        "success_with_redeem_warnings"
+                        if redeem_warning
+                        else "success"
+                    ),
+                    "finished_at": datetime.now().isoformat(timespec="seconds"),
+                    "exit_code": 0,
+                }
+            )
+            write_json(pipeline_manifest, manifest)
+            print(f"Token 刷新完成。运行记录：{pipeline_manifest}")
+            return 0
 
         incremental_delta = None
         baseline_sub2api_ids: Dict[str, int] = {}
@@ -551,6 +664,8 @@ def run(args: argparse.Namespace) -> int:
                     f"Cockpit {cockpit_pending_count} 个待手动处理。"
                 )
 
+        token_snapshot_records: list[Dict[str, Any]] = []
+        token_snapshot_ids: Dict[str, int] = {}
         if not args.skip_sub2api:
             stage = "sub2api"
             import_count = len(normalized_records(Path(normalized["cockpit_input"])))
@@ -629,6 +744,9 @@ def run(args: argparse.Namespace) -> int:
                 return stage_error(
                     manifest, pipeline_manifest, "cockpit", cockpit_code, "Cockpit 导入未完成"
                 )
+            if not args.skip_sub2api and cockpit_records:
+                token_snapshot_records = cockpit_records
+                token_snapshot_ids = managed_sub2api_ids(sub2api_summary_file)
         else:
             print("已跳过 Cockpit 导入。")
 
@@ -659,6 +777,17 @@ def run(args: argparse.Namespace) -> int:
             incremental_module.write_state(incremental_state_file, state_value)
             print(f"[增量] 快照已更新：{incremental_state_file}")
 
+        if token_snapshot_records:
+            token_state_module.update_snapshot(
+                token_snapshot_file,
+                token_snapshot_records,
+                token_snapshot_ids,
+            )
+            print(
+                "[Token] 已更新 "
+                f"{len(token_snapshot_records)} 个账号的明文比较基线。"
+            )
+
         redeem_warning = redeem_code == 2
         final_code = 0
         manifest.update(
@@ -687,6 +816,7 @@ def run(args: argparse.Namespace) -> int:
         redeem_module.RedeemError,
         sub2api_module.Sub2ApiError,
         cockpit_module.CockpitError,
+        token_state_module.TokenStateError,
         PipelineError,
     ) as exc:
         return stage_error(manifest, pipeline_manifest, stage, 1, str(exc))
@@ -718,6 +848,11 @@ def main() -> int:
         action="store_true",
         help="只导入新增或授权已更新的账号，并记录输入中减少的账号",
     )
+    parser.add_argument(
+        "--refresh-tokens",
+        action="store_true",
+        help="只刷新明文快照中发生变化的 token，不修改账户设置",
+    )
     parser.add_argument("--log-file", type=Path, help="覆盖本次流水线日志路径")
     parser.add_argument("--dry-run", action="store_true", help="只检查本地文件，不访问网络")
     args = parser.parse_args()
@@ -743,6 +878,7 @@ def main() -> int:
         normalize_module.NormalizeError,
         redeem_module.RedeemError,
         sub2api_module.Sub2ApiError,
+        token_state_module.TokenStateError,
     ) as exc:
         print(f"流水线失败：{exc}", file=sys.stderr)
         return 1

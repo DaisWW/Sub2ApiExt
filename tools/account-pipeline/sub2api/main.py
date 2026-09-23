@@ -37,6 +37,7 @@ MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 EMAIL_PATTERN = re.compile(r"(?i)[^@\s]+@[^@\s]+\.[^@\s]+")
 OWNERSHIP_EXTRA_KEY = "account_pipeline_managed"
 OWNERSHIP_EXTRA_VALUE = "account-pipeline-v1"
+TOKEN_CREDENTIAL_FIELDS = ("access_token", "refresh_token", "id_token")
 
 
 class Sub2ApiError(RuntimeError):
@@ -53,6 +54,14 @@ class Batch:
     group_names: List[str]
     records: List[Dict[str, Any]]
     group_ids: List[int] = field(default_factory=list)
+
+
+@dataclass
+class CredentialRefreshResult:
+    updated: Dict[str, int] = field(default_factory=dict)
+    missing: List[str] = field(default_factory=list)
+    manual: List[str] = field(default_factory=list)
+    failed: List[str] = field(default_factory=list)
 
 
 def json_file(path: Path, label: str) -> Any:
@@ -459,6 +468,81 @@ def account_detail(
     if not isinstance(value, dict) or account_database_id(value) != account_id:
         raise Sub2ApiError(f"Sub2API 账户 ID {account_id} 的明细格式无效")
     return value
+
+
+def refresh_credentials(
+    config_file: Optional[Path],
+    records: Iterable[Dict[str, Any]],
+    *,
+    summary_file: Optional[Path] = None,
+) -> CredentialRefreshResult:
+    """只更新工具维护账户的凭据，不提交任何账户设置字段。"""
+    record_list = list(records)
+    result = CredentialRefreshResult()
+    if not record_list:
+        if summary_file is not None:
+            write_managed_summary(summary_file, {})
+        return result
+
+    _, _, client, token = admin_session(config_file)
+    remote_index = account_index(get_accounts(client, token))
+    for record in record_list:
+        key = record_key(record)
+        if key is None:
+            raise Sub2ApiError("token 刷新账号缺少 email/account_id")
+        identity = optional_string(record.get("email")) or optional_string(
+            record.get("account_id")
+        ) or key
+        account = matching_account(remote_index, record)
+        if account is None:
+            result.missing.append(identity)
+            print(f"[Token][跳过] Sub2API 中找不到账号：{identity}")
+            continue
+        account_id = account_database_id(account)
+        detail = account_detail(client, token, account_id)
+        if not set(record_keys(record)).intersection(account_keys(detail)):
+            raise Sub2ApiError(f"账号 {identity} 的远端标识已变化；已停止 token 刷新")
+        if not is_tool_managed(detail):
+            result.manual.append(identity)
+            print(f"[Token][跳过] 账号不属于自动化维护：{identity}（ID {account_id}）")
+            continue
+
+        credentials: Dict[str, str] = {}
+        for field_name in TOKEN_CREDENTIAL_FIELDS:
+            value = optional_string(record.get(field_name))
+            if value:
+                credentials[field_name] = value
+        try:
+            updated = client.request(
+                "POST",
+                "/admin/accounts/bulk-update",
+                token=token,
+                body={"account_ids": [account_id], "credentials": credentials},
+            )
+            if not isinstance(updated, dict):
+                raise Sub2ApiError("更新接口返回格式无效")
+            if result_count(updated, "success") != 1 or result_count(
+                updated, "failed"
+            ):
+                raise Sub2ApiError("更新接口未确认账号凭据已更新")
+            verified = account_detail(client, token, account_id)
+            if not is_tool_managed(verified) or key not in account_keys(verified):
+                raise Sub2ApiError("更新后的账户归属或标识校验失败")
+        except Sub2ApiError:
+            result.failed.append(identity)
+            print(f"[Token][失败] Sub2API 凭据未更新：{identity}")
+            continue
+        result.updated[key] = account_id
+        print(f"[Token][完成] 已更新 Sub2API 凭据：{identity}（ID {account_id}）")
+
+    if summary_file is not None:
+        write_managed_summary(summary_file, result.updated)
+    print(
+        "[Token] Sub2API 更新完成："
+        f"成功 {len(result.updated)}，找不到 {len(result.missing)}，"
+        f"手动账户 {len(result.manual)}，失败 {len(result.failed)}。"
+    )
+    return result
 
 
 def write_managed_summary(path: Path, account_ids: Dict[str, int]) -> None:
