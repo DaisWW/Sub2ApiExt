@@ -144,7 +144,7 @@ func loadCostAlertConfig() CostAlertConfig {
 		CacheBaselineMin:            envFloat("MONITORING_COST_CACHE_BASELINE_MIN", 0.60),
 		CacheCurrentMax:             envFloat("MONITORING_COST_CACHE_CURRENT_MAX", 0.20),
 		CacheCostRatio:              envFloat("MONITORING_COST_CACHE_COST_RATIO", 1.5),
-		UnitCostRatio:               envFloat("MONITORING_COST_UNIT_COST_RATIO", 1.5),
+		UnitCostRatio:               envFloat("MONITORING_COST_UNIT_COST_RATIO", 2.0),
 		MultiplierRatio:             envFloat("MONITORING_COST_MULTIPLIER_RATIO", 2.0),
 		DailyBudget:                 envFloat("MONITORING_COST_DAILY_BUDGET", 0),
 		BurnRatio:                   envFloat("MONITORING_COST_BURN_RATIO", 1.5),

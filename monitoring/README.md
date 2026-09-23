@@ -185,7 +185,7 @@ MONITORING_COST_EMAIL_TO=admin@example.com
 | `MONITORING_COST_CACHE_BASELINE_MIN` | `0.60` | 缓存告警要求的历史最低命中率 |
 | `MONITORING_COST_CACHE_CURRENT_MAX` | `0.20` | 缓存告警要求的当前最高命中率 |
 | `MONITORING_COST_CACHE_COST_RATIO` | `1.5` | 缓存异常相对历史单位成本倍数 |
-| `MONITORING_COST_UNIT_COST_RATIO` | `1.5` | 单位成本异常相对历史倍数 |
+| `MONITORING_COST_UNIT_COST_RATIO` | `2.0` | 单位成本异常相对历史倍数；critical 为该倍数的 1.5 倍 |
 | `MONITORING_COST_MULTIPLIER_RATIO` | `2.0` | 实际倍率相对历史基线的倍数；没有历史基线时按绝对倍率判断 |
 | `MONITORING_COST_DAILY_BUDGET` | `0` | 每个用户/API Key 的日预算，单位与 `actual_cost` 相同；0 表示关闭预算燃烧告警 |
 | `MONITORING_COST_BURN_RATIO` | `1.5` | 近窗口燃烧速度相对日预算速度倍数 |
