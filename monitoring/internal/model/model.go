@@ -2,6 +2,7 @@ package model
 
 import (
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -407,8 +408,8 @@ const (
 )
 
 // CostAlertEvent is an internal, notification-ready summary of a request-cost
-// anomaly. It intentionally contains token and cost aggregates only; request
-// prompts, responses, credentials, and raw request identifiers are excluded.
+// anomaly. It contains bounded identity metadata and token/cost aggregates;
+// request prompts, responses, credentials, and raw request identifiers are excluded.
 type CostAlertEvent struct {
 	ID                   int64
 	AlertKey             string
@@ -418,7 +419,10 @@ type CostAlertEvent struct {
 	Title                string
 	Message              string
 	UserKey              string
+	UserName             string
+	UserEmail            string
 	APIKeyID             int64
+	APIKeyName           string
 	Model                string
 	ChannelName          string
 	AccountName          string
@@ -455,4 +459,49 @@ type AlertPolicy struct {
 
 func TargetKey(kind string, id int64) string {
 	return kind + ":" + strconv.FormatInt(id, 10)
+}
+
+// FormatIdentity builds a stable, human-readable label without hiding the
+// identifier needed to distinguish duplicate names. Values are treated as
+// database text and normalized so they cannot introduce multiline output.
+func FormatIdentity(name, email, id, fallback string) string {
+	name = cleanIdentityText(name)
+	email = cleanIdentityText(email)
+	id = cleanIdentityText(id)
+	fallback = cleanIdentityText(fallback)
+	if isIdentityPlaceholder(name) {
+		name = ""
+	}
+	label := name
+	if email != "" && !strings.EqualFold(email, name) {
+		if label == "" {
+			label = email
+		} else {
+			label += " <" + email + ">"
+		}
+	}
+	if label == "" {
+		label = fallback
+	}
+	if id != "" && id != "0" && !strings.EqualFold(id, "unknown") {
+		if label == "" {
+			label = "#" + id
+		} else {
+			label += " #" + id
+		}
+	}
+	return label
+}
+
+func cleanIdentityText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func isIdentityPlaceholder(value string) bool {
+	switch strings.ToLower(value) {
+	case "unknown", "未知账户", "未归属账户":
+		return true
+	default:
+		return false
+	}
 }

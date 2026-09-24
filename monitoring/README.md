@@ -154,6 +154,8 @@ MONITORING_COST_EMAIL_TO=admin@example.com
 
 费用告警优先使用 `usage_logs.user_id + api_key_id` 作为范围；没有 API Key ID 时退化为用户范围。它不会把同一个用户不同 API Key 的成本混在一起，但仍不能在同一个 Key 内区分多个没有任务标识的进程。
 
+费用邮件会从 `users` 和 `api_keys` 读取用户名、邮箱及 API Key 名称，并保留稳定 ID（例如 `用户名 <邮箱> #10`、`API Key 名称 #75`）；关联记录缺失或名称为空时回退为 `用户 #ID` / `API Key #ID`，不会把未解析的复合告警键当作用户 ID。
+
 ## 配置项
 
 | 变量 | 默认值 | 说明 |

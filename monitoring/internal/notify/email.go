@@ -81,9 +81,11 @@ func buildCostAlertMessage(cfg config.EmailConfig, events []model.CostAlertEvent
 			body.WriteString("\n----------------------------------------\n\n")
 		}
 		body.WriteString(fmt.Sprintf("[%s] %s\n", event.Severity, event.Title))
-		body.WriteString(fmt.Sprintf("用户: %s\n", event.UserKey))
-		if event.APIKeyID > 0 {
-			body.WriteString(fmt.Sprintf("API Key ID: %d\n", event.APIKeyID))
+		body.WriteString(fmt.Sprintf("用户: %s\n",
+			model.FormatIdentity(event.UserName, event.UserEmail, event.UserKey, "用户")))
+		if event.APIKeyID > 0 || strings.TrimSpace(event.APIKeyName) != "" {
+			body.WriteString(fmt.Sprintf("API Key: %s\n", model.FormatIdentity(
+				event.APIKeyName, "", strconv.FormatInt(event.APIKeyID, 10), "API Key")))
 		}
 		if event.Model != "" {
 			body.WriteString(fmt.Sprintf("模型: %s\n", event.Model))

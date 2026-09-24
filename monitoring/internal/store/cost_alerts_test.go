@@ -12,7 +12,10 @@ import (
 func TestCostAlertQueryUsesRequestMetadataOnly(t *testing.T) {
 	for _, fragment := range []string{
 		"ul.user_id",
+		"u.username",
+		"u.email",
 		"ul.api_key_id",
+		"k.name",
 		"ul.model",
 		"ul.channel_id",
 		"ul.actual_cost > 0",
@@ -34,6 +37,11 @@ func TestCostAlertQueryUsesRequestMetadataOnly(t *testing.T) {
 
 func TestCostDailyQueryDoesNotProjectAcrossPreviousDay(t *testing.T) {
 	for _, fragment := range []string{
+		"u.username",
+		"u.email",
+		"k.name",
+		"LEFT JOIN users u ON u.id = ul.user_id",
+		"LEFT JOIN api_keys k ON k.id = ul.api_key_id",
 		"GREATEST(bounds.window_start, bounds.day_start)",
 		"$3::timestamptz AS day_start",
 		"SUM(usage.actual_cost)",
@@ -119,6 +127,27 @@ func TestEvaluateCostUsageGroupDetectsMultiplierSpike(t *testing.T) {
 	}
 	if events[0].Severity != "critical" {
 		t.Fatalf("multiplier severity = %q", events[0].Severity)
+	}
+}
+
+func TestEvaluateCostUsageGroupUsesResolvedIdentityInMessage(t *testing.T) {
+	policy := testCostAlertPolicy()
+	policy.SingleRequestCost = 5
+	group := costUsageGroup{
+		userKey: "42", userName: "Owner", userEmail: "owner@example.com",
+		apiKeyID: 7, apiKeyName: "Codex", model: "gpt-4.1", channelID: 7, accountID: 9,
+		current:        costUsageMetrics{Requests: 1, InputTokens: 10_000, ActualCost: 6},
+		maxRequestCost: 6,
+	}
+	events := evaluateCostUsageGroup(group, policy, time.Unix(100, 0), time.Unix(200, 0))
+	if len(events) != 1 {
+		t.Fatalf("unexpected events: %+v", events)
+	}
+	if events[0].UserName != "Owner" || events[0].APIKeyName != "Codex" {
+		t.Fatalf("identity was not carried to event: %+v", events[0])
+	}
+	if !strings.Contains(events[0].Message, "Owner <owner@example.com> #42") {
+		t.Fatalf("message is missing resolved user identity: %q", events[0].Message)
 	}
 }
 
@@ -228,6 +257,28 @@ func TestEvaluateBudgetBurnKeepsMultipleAPIKeysSeparate(t *testing.T) {
 	}
 	if events[0].TargetKey == events[1].TargetKey {
 		t.Fatalf("API key budget events share target: %+v", events)
+	}
+}
+
+func TestEvaluateBudgetBurnUsesRawUserKeyWhenUsageMapIsTargetKeyed(t *testing.T) {
+	policy := testCostAlertPolicy()
+	policy.DailyBudget = 10
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	usage := map[string]costDailyUsage{
+		costUserTargetKey("42", 7): {
+			userKey: "42", userName: "Owner", apiKeyID: 7, apiKeyName: "Codex",
+			dayStart: now.Add(-12 * time.Hour), windowCost: 1, dailyCost: 5,
+		},
+	}
+	events := evaluateBudgetBurn(usage, policy, now)
+	if len(events) != 1 {
+		t.Fatalf("unexpected budget events: %+v", events)
+	}
+	if events[0].UserKey != "42" || events[0].TargetKey != "user:42|key:7" {
+		t.Fatalf("budget event used map key as user identity: %+v", events[0])
+	}
+	if !strings.Contains(events[0].Message, "Owner #42") {
+		t.Fatalf("budget message is missing resolved user identity: %q", events[0].Message)
 	}
 }
 
