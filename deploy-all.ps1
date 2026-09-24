@@ -42,17 +42,11 @@ function Invoke-DeploymentChild {
 
     Write-DeploymentTrace "Starting child script: $ScriptPath"
     $argumentValues = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $Arguments
-    $argumentList = @($argumentValues | ForEach-Object { Format-DeploymentArgument -Value ([string]$_) })
-    $process = Start-Process `
-        -FilePath (Get-DeploymentPowerShell) `
-        -ArgumentList $argumentList `
-        -WorkingDirectory $PSScriptRoot `
-        -NoNewWindow `
-        -Wait `
-        -PassThru
-    Write-DeploymentTrace "Child script exited with code $($process.ExitCode): $ScriptPath"
-    if ($process.ExitCode -ne 0) {
-        throw "Deployment script failed with exit code $($process.ExitCode): $ScriptPath"
+    & (Get-DeploymentPowerShell) @argumentValues
+    $exitCode = $LASTEXITCODE
+    Write-DeploymentTrace "Child script exited with code ${exitCode}: $ScriptPath"
+    if ($exitCode -ne 0) {
+        throw "Deployment script failed with exit code ${exitCode}: $ScriptPath"
     }
 }
 
