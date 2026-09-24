@@ -18,6 +18,7 @@ if "%RESULT%"=="0" (
     echo All Sub2API services and extensions were deployed.
 ) else (
     echo Integrated deployment failed with exit code %RESULT%.
+    echo Check C:\ProgramData\Sub2API\logs\extensions-*.log for the failure stage.
 )
 if not defined SUB2API_NO_PAUSE if not defined SUB2API_EXT_NO_PAUSE pause
 exit /b %RESULT%
