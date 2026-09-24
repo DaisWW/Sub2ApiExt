@@ -28,6 +28,75 @@ function Get-Sub2ApiBackupRecords {
     return $records
 }
 
+function Remove-Sub2ApiOldBackups {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [string[]]$ProtectedIds = @()
+    )
+
+    $retentionCount = 5
+    try {
+        $backups = @(Get-Sub2ApiBackupRecords -Context $Context)
+        if ($backups.Count -le $retentionCount -and $ProtectedIds.Count -eq 0) {
+            return
+        }
+
+        $protected = @{}
+        foreach ($id in @($ProtectedIds)) {
+            if (-not [string]::IsNullOrWhiteSpace($id)) {
+                $protected[[string]$id] = $true
+            }
+        }
+
+        $currentImage = Get-Sub2ApiEnvValue -Path $Context.EnvFile -Name 'SUB2API_IMAGE'
+        if (-not [string]::IsNullOrWhiteSpace($currentImage)) {
+            foreach ($backup in $backups) {
+                if ([string]::Equals($backup.BackupImageTag, $currentImage, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $protected[[string]$backup.Id] = $true
+                }
+            }
+        }
+
+        $keep = @($backups | Select-Object -First $retentionCount)
+        foreach ($protectedId in $protected.Keys) {
+            $protectedBackup = @($backups | Where-Object { $_.Id -eq $protectedId } | Select-Object -First 1)
+            if ($protectedBackup.Count -eq 0 -or @($keep | Where-Object { $_.Id -eq $protectedId }).Count -gt 0) {
+                continue
+            }
+
+            $replace = @($keep | Where-Object { -not $protected.ContainsKey($_.Id) } | Select-Object -Last 1)
+            if ($replace.Count -gt 0) {
+                $keep = @($keep | Where-Object { $_.Id -ne $replace[0].Id })
+            }
+            $keep += $protectedBackup[0]
+        }
+
+        $keepIds = @{}
+        foreach ($backup in $keep) {
+            $keepIds[[string]$backup.Id] = $true
+        }
+
+        foreach ($backup in $backups) {
+            if ($keepIds.ContainsKey([string]$backup.Id)) {
+                continue
+            }
+
+            try {
+                if (-not [string]::IsNullOrWhiteSpace($backup.BackupImageTag) -and
+                    (Test-Sub2ApiNative -FilePath 'docker' -ArgumentList @('image', 'inspect', $backup.BackupImageTag))) {
+                    Invoke-Sub2ApiNative -FilePath 'docker' -ArgumentList @('image', 'rm', $backup.BackupImageTag) -Quiet
+                }
+                Remove-Sub2ApiSafeItem -Path $backup.Path -AllowedRoot $Context.BackupRoot
+                Write-Sub2ApiMessage -Level Info -Message "Removed old backup $($backup.Id)."
+            } catch {
+                Write-Sub2ApiMessage -Level Warning -Message "Could not remove old backup $($backup.Id): $($_.Exception.Message)"
+            }
+        }
+    } catch {
+        Write-Sub2ApiMessage -Level Warning -Message "Backup retention cleanup was skipped: $($_.Exception.Message)"
+    }
+}
+
 function New-Sub2ApiDeploymentBackup {
     param(
         [Parameter(Mandatory = $true)]$Context,

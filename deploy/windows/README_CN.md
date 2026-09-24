@@ -59,11 +59,11 @@ scripts\
 ```text
 C:\ProgramData\Sub2API\
 ├── runtime\     # .env、Compose 和全部持久化数据
-├── backups\     # 升级及回退备份，不自动删除
+├── backups\     # 升级及回退备份，默认保留最近 5 份
 └── logs\        # 管理器日志
 ```
 
-升级和回退不会执行 `docker compose down -v`，也不会删除 Docker 数据卷。备份使用停止容器后的物理数据快照，以便数据库迁移后仍能完整回退。
+升级和回退不会执行 `docker compose down -v`，也不会删除 Docker 数据卷。备份使用停止容器后的物理数据快照，以便数据库迁移后仍能完整回退。成功完成部署操作后，安装器会清理超过最近 5 份的旧备份，并同步删除对应的本地备份镜像标签；清理失败只记录警告，不影响已完成的升级或回退。
 
 仅删除容器或重装 Docker 不会重置端口和管理员密码，因为运行配置与数据仍保留在 `C:\ProgramData\Sub2API\runtime\`。需要全新部署时，请先停止容器并将 `C:\ProgramData\Sub2API\` 重命名为备份目录，再重新运行一键部署。
 

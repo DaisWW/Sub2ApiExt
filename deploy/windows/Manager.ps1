@@ -85,6 +85,7 @@ try {
             Write-Sub2ApiMessage -Level Warning -Message '主服务升级未确认，保留当前版本并继续启动现有部署。'
         }
         Start-Sub2ApiDeployment -Context $context
+        Remove-Sub2ApiOldBackups -Context $context
         Write-Sub2ApiMessage -Level Success -Message "Sub2API is running at $(Get-Sub2ApiAccessUrl -Context $context)"
         exit 0
     }
@@ -98,6 +99,7 @@ try {
     switch ($choice) {
         '1' {
             Start-Sub2ApiDeployment -Context $context
+            Remove-Sub2ApiOldBackups -Context $context
             Write-Sub2ApiMessage -Level Success -Message "Sub2API is running at $(Get-Sub2ApiAccessUrl -Context $context)"
         }
         '2' {
@@ -111,8 +113,9 @@ try {
             }
 
             $currentVersion = Get-Sub2ApiCurrentVersion -Context $context
-            New-Sub2ApiDeploymentBackup -Context $context -Reason 'pre-rollback' -Version $currentVersion | Out-Null
+            $preRollbackBackup = New-Sub2ApiDeploymentBackup -Context $context -Reason 'pre-rollback' -Version $currentVersion
             Restore-Sub2ApiDeploymentBackup -Context $context -Backup $selectedBackup
+            Remove-Sub2ApiOldBackups -Context $context -ProtectedIds @($preRollbackBackup.Id, $selectedBackup.Id)
         }
         default { exit 0 }
     }

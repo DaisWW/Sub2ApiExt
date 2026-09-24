@@ -42,7 +42,7 @@ monitoring\deploy.bat
 ```text
 C:\ProgramData\Sub2API\
 ├── runtime\                         # Sub2API、PostgreSQL、Redis
-├── backups\                         # 升级/回退备份
+├── backups\                         # 升级/回退备份（默认保留最近 5 份）
 ├── logs\                            # 部署日志
 └── extensions\
     ├── rate-sync\

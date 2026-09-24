@@ -379,6 +379,7 @@ function Update-Sub2ApiDeployment {
         Wait-Sub2ApiHealthy
         Write-Sub2ApiDeploymentState -Context $Context -Version $TargetVersion -Image $targetImage
         Write-Sub2ApiMessage -Level Success -Message "Sub2API upgraded from $CurrentVersion to $TargetVersion."
+        Remove-Sub2ApiOldBackups -Context $Context -ProtectedIds @($backup.Id)
     } catch {
         Write-Sub2ApiMessage -Level Error -Message 'Upgrade failed. Restoring the backup created before the upgrade.'
         Restore-Sub2ApiDeploymentBackup -Context $Context -Backup $backup
