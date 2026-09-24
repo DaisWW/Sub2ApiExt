@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -146,24 +145,26 @@ func TestLoadConfigRejectsInvalidRechargeDiscount(t *testing.T) {
 	}
 }
 
-func TestLoadConfigRejectsRemovedConfigurationFields(t *testing.T) {
-	for _, input := range []string{
-		`{"upstream_factors":{"lucen.cc":0.9}}`,
-		`{"factors":{"lucen.cc":0.9}}`,
-		`{"sync_hosts":["lucen.cc"]}`,
-		`{"usage_bootstrap":true}`,
-		`{"confirmations":2}`,
-	} {
-		if _, err := loadConfig(writeTestConfig(t, input)); err == nil || !strings.Contains(err.Error(), "unknown field") {
-			t.Fatalf("loadConfig(%s) error = %v, want removed-field error", input, err)
-		}
+func TestLoadConfigIgnoresRemovedConfigurationFields(t *testing.T) {
+	config, err := loadConfig(writeTestConfig(t, `{
+  "sync_target":"account",
+  "upstream_factors":{"lucen.cc":0.9},
+  "factors":{"lucen.cc":0.9},
+  "sync_hosts":["lucen.cc"],
+  "usage_bootstrap":true,
+  "confirmations":2
+}`))
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if discount, host, err := config.rechargeDiscountForBaseURL("https://lucen.cc/v1"); err != nil || discount != 1 || host != "lucen.cc" {
+		t.Fatalf("rechargeDiscountForBaseURL() = %v, %q, %v", discount, host, err)
 	}
 }
 
-func TestLoadConfigRejectsOldRules(t *testing.T) {
-	_, err := loadConfig(writeTestConfig(t, `{"rules":[]}`))
-	if err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("error = %v, want unknown field", err)
+func TestLoadConfigIgnoresUnknownConfigurationFields(t *testing.T) {
+	if _, err := loadConfig(writeTestConfig(t, `{"rules":[],"recharge_discounts":{}}`)); err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
 	}
 }
 

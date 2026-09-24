@@ -74,7 +74,7 @@ q = SUM(COALESCE(account_stats_cost, total_cost) × 请求记录的 account_rate
 - 渠道、账号或分组改名不影响同步；内部使用账号 ID 和分组 ID 作为稳定身份。
 - 账户 worker 的上游折扣变化时，只需修改账户配置中的 `recharge_discounts`。
 
-账户充值折扣只使用 `recharge_discounts`；使用旧折扣配置时需先将字段手动改为新名称，旧字段不会自动转换。
+账户充值折扣只使用 `recharge_discounts`；启动时会忽略旧配置中的未知字段。重新部署时保留现有字段，并从对应的 `*.example.json` 补充缺失字段；旧折扣字段不会直接转换。
 
 以下通用项均可省略，代码默认值分别是 `300s` 和 `false`；生产配置已显式设置分组 `60s`、账户 `900s`：
 
@@ -130,7 +130,7 @@ deploy.bat
 3. 将 Compose、配置和数据库连接信息安装到 `C:\ProgramData\Sub2API\extensions\rate-sync`；
 4. 更新 `sub2api-rate-sync`（分组）和 `sub2api-rate-sync-account`（账户）。
 
-首次安装会优先迁移现有 rate-sync 容器绑定的两个 JSON 配置；没有旧配置时才从 `*.example.json` 创建。以后重新部署会保留 ProgramData 中的真实配置和 Docker 状态卷。容器挂载来自 ProgramData，部署完成后不依赖 Git 工作区。
+首次安装会优先迁移现有 rate-sync 容器绑定的两个 JSON 配置；没有旧配置时才从 `*.example.json` 创建。迁移或重新部署时会从对应模板补充缺失字段，不覆盖已有配置。以后重新部署会保留 ProgramData 中的真实配置和 Docker 状态卷。容器挂载来自 ProgramData，部署完成后不依赖 Git 工作区。
 
 运行中的同步容器需要读取 Admin API Key、账号、分组和渠道绑定，因此会连接 PostgreSQL。代码只执行查询，部署时通过 `PGOPTIONS` 强制数据库会话只读；倍率更新始终通过 Admin API 完成。Admin API Key 尚未配置时两个容器都会等待；分组容器每 60 秒、账户容器每 900 秒重新检查，配置后自动开始同步。完整 API Key 不写入配置、状态文件或日志。
 
