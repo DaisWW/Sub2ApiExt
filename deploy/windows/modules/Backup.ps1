@@ -138,6 +138,11 @@ function New-Sub2ApiDeploymentBackup {
         $containersStopped = $true
 
         $entries = @('.env', 'docker-compose.yml', 'docker-compose.windows.yml', 'data', 'postgres_data', 'redis_data')
+        foreach ($optionalEntry in @('docker-compose.policy-gateway.yml', 'policy-gateway')) {
+            if (Test-Path -LiteralPath (Join-Path $Context.RuntimeRoot $optionalEntry)) {
+                $entries += $optionalEntry
+            }
+        }
         if (Test-Path -LiteralPath $Context.StateFile) {
             $entries += 'deployment.json'
         }
@@ -240,8 +245,7 @@ function Restore-Sub2ApiDeploymentBackup {
         $runtimeMoved = $true
         Move-Item -LiteralPath $staging -Destination $Context.RuntimeRoot
 
-        Invoke-Sub2ApiCompose -Context $Context -Arguments @('up', '-d') -Quiet
-        Wait-Sub2ApiHealthy
+        Start-Sub2ApiComposeServices -Context $Context -RecreatePolicy -Quiet
         Remove-Sub2ApiSafeItem -Path $recovery -AllowedRoot $Context.AppRoot
         Write-Sub2ApiMessage -Level Success -Message "Restored Sub2API backup $($Backup.Id) ($($Backup.Version))."
     } catch {
@@ -252,10 +256,10 @@ function Restore-Sub2ApiDeploymentBackup {
             }
             if (Test-Path -LiteralPath $recovery) {
                 Move-Item -LiteralPath $recovery -Destination $Context.RuntimeRoot
-                try { Invoke-Sub2ApiCompose -Context $Context -Arguments @('up', '-d') -Quiet } catch { }
+                try { Start-Sub2ApiComposeServices -Context $Context -RecreatePolicy -Quiet } catch { }
             }
         } elseif (Test-Path -LiteralPath $Context.RuntimeRoot) {
-            try { Invoke-Sub2ApiCompose -Context $Context -Arguments @('up', '-d') -Quiet } catch { }
+            try { Start-Sub2ApiComposeServices -Context $Context -RecreatePolicy -Quiet } catch { }
         }
         throw
     } finally {

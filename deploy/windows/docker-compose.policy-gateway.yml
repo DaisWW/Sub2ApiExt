@@ -1,0 +1,32 @@
+services:
+  sub2api:
+    ports: !reset []
+
+  policy-gateway:
+    build:
+      context: ./policy-gateway
+      args:
+        GO_IMAGE: ${POLICY_GATEWAY_GO_IMAGE:-docker.m.daocloud.io/library/golang:1.23-alpine}
+        RUNTIME_IMAGE: ${POLICY_GATEWAY_RUNTIME_IMAGE:-docker.m.daocloud.io/library/alpine:3.22}
+    image: sub2api/policy-gateway:local
+    container_name: sub2api-policy-gateway
+    restart: unless-stopped
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-18080}:8080"
+    environment:
+      POLICY_CONFIG: /etc/sub2api-policy/config.json
+      POLICY_LISTEN: :8080
+      POLICY_UPSTREAM: http://sub2api:8080
+    volumes:
+      - ./policy-gateway/config.json:/etc/sub2api-policy/config.json:ro
+    depends_on:
+      sub2api:
+        condition: service_healthy
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s

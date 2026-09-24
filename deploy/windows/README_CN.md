@@ -54,6 +54,55 @@ scripts\
 
 主服务管理器完成后，综合入口会继续部署 `rate-sync`、`priority-sync` 和 `monitoring`。单独运行各目录下的 `deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
 
+## 客户端与模型门禁
+
+门禁配置在 Git 工程的 `deploy/windows/policy-gateway/config.json`，一键部署或启动时会同步到 `C:\ProgramData\Sub2API\runtime\policy-gateway\config.json`。`enabled` 是总开关：设为 `false` 时不加载门禁 Compose 文件、不启动门禁容器，Sub2API 继续直接使用 `18080`。
+
+规则放在 `rules` 数组中，每条规则都可以独立启用或停用：
+
+```json
+{
+  "name": "claude-code-only-claude",
+  "enabled": true,
+  "action": "allow_models",
+  "client_user_agent_patterns": ["(?i)^claude-cli/"],
+  "model_patterns": ["(?i)^claude-"],
+  "reject_status": 403
+}
+```
+
+- `action: "deny"`：客户端和模型同时匹配时拒绝请求。
+- `action: "allow_models"`：客户端匹配时，只允许模型匹配 `model_patterns`；其他模型拒绝。
+- `client_user_agent_patterns` 和 `model_patterns` 都是 Go 正则表达式，可在 `rules` 中配置多条规则。
+
+例如，同时限制 Claude Code 只能用 Claude 模型，并禁止另一种客户端使用 GPT 模型：
+
+```json
+{
+  "enabled": true,
+  "rules": [
+    {
+      "name": "claude-code-only-claude",
+      "enabled": true,
+      "action": "allow_models",
+      "client_user_agent_patterns": ["(?i)^claude-cli/"],
+      "model_patterns": ["(?i)^claude-"],
+      "reject_status": 403
+    },
+    {
+      "name": "block-example-client-gpt",
+      "enabled": true,
+      "action": "deny",
+      "client_user_agent_patterns": ["(?i)^example-client/"],
+      "model_patterns": ["(?i)^gpt-"],
+      "reject_status": 403
+    }
+  ]
+}
+```
+
+同一请求会检查所有匹配的规则，任一规则拒绝即返回 `403`；同一客户端可用的多种模型应放在同一条 `allow_models` 规则的 `model_patterns` 数组中。客户端识别依赖请求中的 `User-Agent`，可被自行修改，适用于客户端类型约束，不作为身份鉴权。客户端继续访问原来的 `18080`，不需要修改地址或增加配置；规则只在门禁启用并重新运行部署入口后生效。
+
 ## 数据位置
 
 ```text

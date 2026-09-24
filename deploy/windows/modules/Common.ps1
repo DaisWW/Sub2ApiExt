@@ -14,6 +14,10 @@ function New-Sub2ApiContext {
         RuntimeRoot = $runtimeRoot
         ComposeFile = Join-Path $runtimeRoot 'docker-compose.yml'
         ComposeOverrideFile = Join-Path $runtimeRoot 'docker-compose.windows.yml'
+        PolicyGatewayOverrideFile = Join-Path $runtimeRoot 'docker-compose.policy-gateway.yml'
+        PolicyGatewaySourceRoot = Join-Path $ManagerRoot 'policy-gateway'
+        PolicyGatewayRuntimeRoot = Join-Path $runtimeRoot 'policy-gateway'
+        PolicyGatewayConfigFile = Join-Path $runtimeRoot 'policy-gateway\config.json'
         EnvFile = Join-Path $runtimeRoot '.env'
         StateFile = Join-Path $runtimeRoot 'deployment.json'
         ProjectName = 'sub2api'
@@ -114,7 +118,7 @@ function Test-Sub2ApiCommand {
 function Get-Sub2ApiComposeArguments {
     param([Parameter(Mandatory = $true)]$Context)
 
-    return @(
+    $arguments = @(
         'compose',
         '--project-name', $Context.ProjectName,
         '--project-directory', $Context.RuntimeRoot,
@@ -122,6 +126,34 @@ function Get-Sub2ApiComposeArguments {
         '-f', $Context.ComposeFile,
         '-f', $Context.ComposeOverrideFile
     )
+    if (Test-Sub2ApiPolicyGatewayEnabled -Context $Context) {
+        $arguments += @('-f', $Context.PolicyGatewayOverrideFile)
+    }
+    return $arguments
+}
+
+function Test-Sub2ApiPolicyGatewayEnabled {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [string]$ConfigFile = $Context.PolicyGatewayConfigFile
+    )
+
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+        return $false
+    }
+    try {
+        $config = Get-Content -LiteralPath $ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        throw "The policy gateway configuration is invalid: ${ConfigFile}: $($_.Exception.Message)"
+    }
+    if ($null -eq $config) {
+        throw "The policy gateway configuration is empty: $ConfigFile"
+    }
+    $enabledProperty = $config.PSObject.Properties['enabled']
+    if ($null -eq $enabledProperty -or $enabledProperty.Value -isnot [bool]) {
+        throw "The policy gateway enabled switch must be a boolean: $ConfigFile"
+    }
+    return $enabledProperty.Value
 }
 
 function Invoke-Sub2ApiCompose {
@@ -340,4 +372,26 @@ function Wait-Sub2ApiHealthy {
     } while ((Get-Date) -lt $deadline)
 
     throw "Sub2API did not become healthy within $TimeoutSeconds seconds."
+}
+
+function Wait-Sub2ApiPolicyGatewayHealthy {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [int]$TimeoutSeconds = 180
+    )
+
+    if (-not (Test-Sub2ApiPolicyGatewayEnabled -Context $Context)) {
+        return
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $status = Invoke-Sub2ApiNative -FilePath 'docker' -ArgumentList @('inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}', 'sub2api-policy-gateway') -CaptureOutput -Quiet -AllowedExitCodes @(0, 1)
+        if ($status -eq 'healthy') {
+            return
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Sub2API policy gateway did not become healthy within $TimeoutSeconds seconds."
 }

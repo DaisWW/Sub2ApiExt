@@ -268,6 +268,73 @@ function Initialize-Sub2ApiEnvironmentFile {
     }
 }
 
+function Sync-Sub2ApiPolicyGatewayAssets {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $sourceRoot = $Context.PolicyGatewaySourceRoot
+    $runtimeRoot = $Context.PolicyGatewayRuntimeRoot
+    $overrideSource = Join-Path $Context.ManagerRoot 'docker-compose.policy-gateway.yml'
+    if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $overrideSource -PathType Leaf)) {
+        throw 'The policy gateway deployment assets are missing from the manager directory.'
+    }
+
+    $sourceConfig = Join-Path $sourceRoot 'config.json'
+    if (-not (Test-Path -LiteralPath $sourceConfig -PathType Leaf)) {
+        throw "The policy gateway configuration is missing: $sourceConfig"
+    }
+    [void](Test-Sub2ApiPolicyGatewayEnabled -Context $Context -ConfigFile $sourceConfig)
+    foreach ($name in @('Dockerfile', 'go.mod', 'main.go')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot $name) -PathType Leaf)) {
+            throw "The policy gateway deployment asset is missing: $name"
+        }
+    }
+
+    $configChanged = -not (Test-Path -LiteralPath $Context.PolicyGatewayConfigFile -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $sourceConfig).Hash -ne (Get-FileHash -LiteralPath $Context.PolicyGatewayConfigFile).Hash
+    New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+    foreach ($name in @('Dockerfile', 'go.mod', 'main.go')) {
+        Copy-Item -LiteralPath (Join-Path $sourceRoot $name) -Destination (Join-Path $runtimeRoot $name) -Force
+    }
+    if ($configChanged) {
+        Copy-Item -LiteralPath $sourceConfig -Destination $Context.PolicyGatewayConfigFile -Force
+    }
+    Copy-Item -LiteralPath $overrideSource -Destination $Context.PolicyGatewayOverrideFile -Force
+    return $configChanged
+}
+
+function Remove-Sub2ApiPolicyGatewayContainer {
+    if (Test-Sub2ApiNative -FilePath 'docker' -ArgumentList @('container', 'inspect', 'sub2api-policy-gateway')) {
+        Invoke-Sub2ApiNative -FilePath 'docker' -ArgumentList @('rm', '--force', 'sub2api-policy-gateway') -Quiet
+    }
+}
+
+function Start-Sub2ApiComposeServices {
+    param(
+        [Parameter(Mandatory = $true)]$Context,
+        [switch]$ApplicationOnly,
+        [switch]$RecreatePolicy,
+        [switch]$Quiet
+    )
+
+    $arguments = @('up', '-d')
+    if (Test-Sub2ApiPolicyGatewayEnabled -Context $Context) {
+        $arguments += '--build'
+        if ($RecreatePolicy) {
+            $arguments += '--force-recreate'
+        }
+        $arguments += 'policy-gateway'
+    } else {
+        Remove-Sub2ApiPolicyGatewayContainer
+        if ($ApplicationOnly) {
+            $arguments += 'sub2api'
+        }
+    }
+    Invoke-Sub2ApiCompose -Context $Context -Arguments $arguments -Quiet:$Quiet
+    Wait-Sub2ApiHealthy
+    Wait-Sub2ApiPolicyGatewayHealthy -Context $Context
+}
+
 function Initialize-Sub2ApiDeployment {
     param(
         [Parameter(Mandatory = $true)]$Context,
@@ -295,6 +362,7 @@ function Initialize-Sub2ApiDeployment {
     }
 
     New-Item -ItemType Directory -Force -Path $Context.RuntimeRoot, $Context.BackupRoot, $Context.LogRoot | Out-Null
+    $policyConfigChanged = Sync-Sub2ApiPolicyGatewayAssets -Context $Context
     $persistentDataExists = $false
     foreach ($directory in @('data', 'postgres_data', 'redis_data')) {
         $path = Join-Path $Context.RuntimeRoot $directory
@@ -326,8 +394,7 @@ function Initialize-Sub2ApiDeployment {
         $image = Ensure-Sub2ApiImage -Context $Context -Version $deploymentVersion
         Ensure-Sub2ApiDependencyImages
         Set-Sub2ApiEnvValue -Path $Context.EnvFile -Name 'SUB2API_IMAGE' -Value $image
-        Invoke-Sub2ApiCompose -Context $Context -Arguments @('up', '-d')
-        Wait-Sub2ApiHealthy
+        Start-Sub2ApiComposeServices -Context $Context -RecreatePolicy:$policyConfigChanged
         Write-Sub2ApiDeploymentState -Context $Context -Version $deploymentVersion -Image $image
     } catch {
         Write-Sub2ApiMessage -Level Error -Message 'Initial deployment failed. Runtime files were kept for diagnosis.'
@@ -343,6 +410,8 @@ function Start-Sub2ApiDeployment {
         throw 'SUB2API_IMAGE is missing from the deployment .env file.'
     }
 
+    $policyConfigChanged = Sync-Sub2ApiPolicyGatewayAssets -Context $Context
+
     $version = Get-Sub2ApiVersionFromText -Text $image
     if (-not [string]::IsNullOrWhiteSpace($version)) {
         $image = Ensure-Sub2ApiImage -Context $Context -Version $version
@@ -352,8 +421,7 @@ function Start-Sub2ApiDeployment {
     }
 
     Ensure-Sub2ApiDependencyImages
-    Invoke-Sub2ApiCompose -Context $Context -Arguments @('up', '-d')
-    Wait-Sub2ApiHealthy
+    Start-Sub2ApiComposeServices -Context $Context -RecreatePolicy:$policyConfigChanged
 }
 
 function Update-Sub2ApiDeployment {
@@ -374,9 +442,9 @@ function Update-Sub2ApiDeployment {
     $backup = New-Sub2ApiDeploymentBackup -Context $Context -Reason 'upgrade' -Version $CurrentVersion
 
     try {
+        $policyConfigChanged = Sync-Sub2ApiPolicyGatewayAssets -Context $Context
         Set-Sub2ApiEnvValue -Path $Context.EnvFile -Name 'SUB2API_IMAGE' -Value $targetImage
-        Invoke-Sub2ApiCompose -Context $Context -Arguments @('up', '-d', 'sub2api')
-        Wait-Sub2ApiHealthy
+        Start-Sub2ApiComposeServices -Context $Context -ApplicationOnly -RecreatePolicy:$policyConfigChanged
         Write-Sub2ApiDeploymentState -Context $Context -Version $TargetVersion -Image $targetImage
         Write-Sub2ApiMessage -Level Success -Message "Sub2API upgraded from $CurrentVersion to $TargetVersion."
         Remove-Sub2ApiOldBackups -Context $Context -ProtectedIds @($backup.Id)

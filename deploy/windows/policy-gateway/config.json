@@ -1,0 +1,21 @@
+{
+  "enabled": true,
+  "rules": [
+    {
+      "name": "block-claude-code-openai",
+      "enabled": true,
+      "action": "deny",
+      "client_user_agent_patterns": [
+        "(?i)^claude-cli/"
+      ],
+      "model_patterns": [
+        "(?i)^gpt-",
+        "(?i)^chatgpt-",
+        "(?i)^codex-",
+        "(?i)^o[1-9]"
+      ],
+      "reject_status": 403
+    }
+  ],
+  "max_body_bytes": 67108864
+}
