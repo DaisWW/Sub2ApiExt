@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -21,7 +22,7 @@ func TestCostAlertQueryUsesRequestMetadataOnly(t *testing.T) {
 		"ul.actual_cost > 0",
 		"ul.input_tokens",
 		"ul.cache_read_tokens",
-		"base_cost >= $5",
+		"base_cost >= $6",
 		"GROUP BY user_key, model, api_key_id",
 	} {
 		if !strings.Contains(costUsageQuery, fragment) {
@@ -294,5 +295,44 @@ func TestEvaluateBudgetBurnReportsAlreadyExceededDailyBudgetWithoutRecentTraffic
 	events := evaluateBudgetBurn(usage, policy, now)
 	if len(events) != 1 || events[0].Severity != "critical" {
 		t.Fatalf("exceeded budget without recent traffic = %+v", events)
+	}
+}
+
+func TestObserveCostAlertStoresIncidentStartOnTheSnapshot(t *testing.T) {
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	candidate := model.CostAlertEvent{AlertKey: "unit|target", Severity: "warning"}
+	state, event, notify := observeCostAlert(costAlertState{alertKey: candidate.AlertKey}, false, candidate, now, 30*time.Minute)
+	if !notify || event.NotificationType != model.CostAlertNotificationStart {
+		t.Fatalf("start notification = %+v, notify=%v", event, notify)
+	}
+	if event.IncidentStartedAt != now || state.lastEvent.IncidentStartedAt != now {
+		t.Fatalf("incident start was not stored consistently: event=%v state=%v", event.IncidentStartedAt, state.lastEvent.IncidentStartedAt)
+	}
+}
+
+func TestPrepareCostAlertRecoveryHonorsCooldownAndConfiguredWindow(t *testing.T) {
+	policy := testCostAlertPolicy()
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	state := costAlertState{
+		alertKey:      "unit|target",
+		active:        true,
+		firstSeenAt:   timePointer(now.Add(-time.Hour)),
+		normalSinceAt: timePointer(now.Add(-31 * time.Minute)),
+		lastAlertedAt: sql.NullTime{Time: now.Add(-10 * time.Minute), Valid: true},
+		lastEvent: model.CostAlertEvent{
+			AlertKey: "unit|target", UserKey: "42", Model: "gpt-4.1",
+		},
+	}
+	unchanged, _, notify, changed := prepareCostAlertRecovery(state, now, policy)
+	if notify || changed || unchanged.pendingRecovery {
+		t.Fatalf("recovery ignored cooldown: state=%+v notify=%v changed=%v", unchanged, notify, changed)
+	}
+
+	recoveryState, recovery, notify, changed := prepareCostAlertRecovery(state, now.Add(20*time.Minute), policy)
+	if !notify || !changed || !recoveryState.pendingRecovery {
+		t.Fatalf("recovery was not scheduled after cooldown: state=%+v event=%+v", recoveryState, recovery)
+	}
+	if want := now.Add(20 * time.Minute).Add(-policy.Window); !recovery.WindowStart.Equal(want) {
+		t.Fatalf("recovery window start = %v, want %v", recovery.WindowStart, want)
 	}
 }

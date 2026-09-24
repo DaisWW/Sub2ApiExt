@@ -95,18 +95,45 @@ CREATE INDEX IF NOT EXISTS monitoring_alerts_created_idx
 CREATE TABLE IF NOT EXISTS monitoring_cost_alert_states (
     alert_key TEXT PRIMARY KEY,
     last_alerted_at TIMESTAMPTZ,
+    active BOOLEAN NOT NULL DEFAULT FALSE,
+    first_seen_at TIMESTAMPTZ,
+    last_seen_at TIMESTAMPTZ,
+    normal_since_at TIMESTAMPTZ,
+    last_severity TEXT NOT NULL DEFAULT '',
+    last_event JSONB NOT NULL DEFAULT '{}'::jsonb,
+    pending_recovery BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE monitoring_cost_alert_states
+    ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE monitoring_cost_alert_states
+    ADD COLUMN IF NOT EXISTS first_seen_at TIMESTAMPTZ;
+ALTER TABLE monitoring_cost_alert_states
+    ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+ALTER TABLE monitoring_cost_alert_states
+    ADD COLUMN IF NOT EXISTS normal_since_at TIMESTAMPTZ;
+ALTER TABLE monitoring_cost_alert_states
+    ADD COLUMN IF NOT EXISTS last_severity TEXT NOT NULL DEFAULT '';
+ALTER TABLE monitoring_cost_alert_states
+    ADD COLUMN IF NOT EXISTS last_event JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE monitoring_cost_alert_states
+    ADD COLUMN IF NOT EXISTS pending_recovery BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS monitoring_cost_alert_states_active_idx
+    ON monitoring_cost_alert_states (alert_key)
+    WHERE active = TRUE;
 CREATE TABLE IF NOT EXISTS monitoring_cost_alerts (
     id BIGSERIAL PRIMARY KEY,
     alert_key TEXT NOT NULL,
     kind TEXT NOT NULL,
+    notification_type TEXT NOT NULL DEFAULT 'start',
     severity TEXT NOT NULL,
     target_key TEXT NOT NULL,
     title TEXT NOT NULL,
     message TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE monitoring_cost_alerts
+    ADD COLUMN IF NOT EXISTS notification_type TEXT NOT NULL DEFAULT 'start';
 CREATE INDEX IF NOT EXISTS monitoring_cost_alerts_created_idx
     ON monitoring_cost_alerts (created_at DESC);
 CREATE INDEX IF NOT EXISTS monitoring_cost_alerts_key_created_idx

@@ -101,3 +101,41 @@ func TestEmailSenderRequiresCompleteTransportConfiguration(t *testing.T) {
 		t.Fatal("missing transport security should disable email")
 	}
 }
+
+func TestBuildCostAlertMessageLabelsLifecycleNotification(t *testing.T) {
+	message, err := buildCostAlertMessage(config.EmailConfig{
+		From: "sender@qq.com",
+		To:   []string{"admin@example.com"},
+	}, []model.CostAlertEvent{{
+		NotificationType: model.CostAlertNotificationReminder,
+		Severity:         "warning",
+		Title:            "每百万 Tokens 成本异常",
+		UserKey:          "42",
+		Message:          "仍然异常",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(message)
+	if !strings.Contains(text, "[warning][持续]") {
+		t.Fatalf("continuous notification label is missing: %s", text)
+	}
+
+	message, err = buildCostAlertMessage(config.EmailConfig{
+		From: "sender@qq.com",
+		To:   []string{"admin@example.com"},
+	}, []model.CostAlertEvent{{
+		NotificationType: model.CostAlertNotificationRecovery,
+		Severity:         "info",
+		Title:            "费用异常已恢复",
+		UserKey:          "42",
+		Message:          "已恢复",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = string(message)
+	if !strings.Contains(text, "[info][恢复]") {
+		t.Fatalf("recovery notification label is missing: %s", text)
+	}
+}

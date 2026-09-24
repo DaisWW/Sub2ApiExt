@@ -27,6 +27,9 @@ func (s *Service) runCostAlerts(ctx context.Context) error {
 		}
 		return err
 	}
+	if err := s.store.FinalizeCostAlertNotifications(ctx, events); err != nil {
+		s.log.Warn("finalize cost alert notifications failed", "error", err)
+	}
 	s.log.Info("cost anomaly email sent", "events", len(events))
 	return nil
 }
