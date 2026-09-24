@@ -29,35 +29,6 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\manage-runtime.ps1')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\scripts\manage-runtime.bat') `
     -Destination (Join-Path $runtimeRoot 'manage.bat') -Force
 
-function Merge-RateSyncConfigTemplate {
-    param(
-        [Parameter(Mandatory = $true)][string]$Destination,
-        [Parameter(Mandatory = $true)][string]$Template
-    )
-
-    $config = Get-Content -LiteralPath $Destination -Raw | ConvertFrom-Json
-    $templateConfig = Get-Content -LiteralPath $Template -Raw | ConvertFrom-Json
-    if ($null -eq $config -or $config -is [array] -or $null -eq $templateConfig -or $templateConfig -is [array]) {
-        throw "Rate-sync configuration must be a JSON object: $Destination"
-    }
-
-    $changed = $false
-    foreach ($property in $templateConfig.PSObject.Properties) {
-        $existing = $config.PSObject.Properties[$property.Name]
-        if ($null -eq $existing) {
-            $config | Add-Member -MemberType NoteProperty -Name $property.Name -Value $property.Value
-            $changed = $true
-        } elseif ($null -eq $existing.Value) {
-            $existing.Value = $property.Value
-            $changed = $true
-        }
-    }
-    if ($changed) {
-        $encoding = New-Object System.Text.UTF8Encoding($false)
-        [IO.File]::WriteAllText($Destination, ($config | ConvertTo-Json -Depth 20), $encoding)
-    }
-}
-
 $configs = @(
     @{ Name = 'config.json'; Example = 'config.example.json'; LegacyContainer = 'sub2api-rate-sync' },
     @{ Name = 'account-config.json'; Example = 'account-config.example.json'; LegacyContainer = 'sub2api-rate-sync-account' }
@@ -79,9 +50,6 @@ foreach ($config in $configs) {
         }
         Copy-Item -LiteralPath $source -Destination $destination
     }
-    Merge-RateSyncConfigTemplate `
-        -Destination $destination `
-        -Template (Join-Path $PSScriptRoot $config.Example)
     Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json | Out-Null
 }
 

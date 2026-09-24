@@ -58,6 +58,7 @@ func loadConfig(path string) (*Config, error) {
 
 	var raw fileConfig
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
 	}
