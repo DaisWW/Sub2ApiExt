@@ -134,6 +134,9 @@ WHERE alert_key = $1`, state.alertKey, nullableTimeValue(state.lastAlertedAt), s
 }
 
 func observeCostAlert(state costAlertState, exists bool, candidate model.CostAlertEvent, now time.Time, cooldown time.Duration) (costAlertState, model.CostAlertEvent, bool) {
+	if state.alertKey == "" {
+		state.alertKey = candidate.AlertKey
+	}
 	shouldNotify := false
 	if !exists || !state.active {
 		state.active = true
@@ -175,6 +178,9 @@ func (s *Store) persistCostAlertCandidates(ctx context.Context, candidates []mod
 	if err != nil {
 		return nil, err
 	}
+	if err := retireObsoleteCostAlertStates(ctx, tx, states); err != nil {
+		return nil, err
+	}
 	byKey := costAlertCandidatesByKey(candidates)
 	keys := sortedCostAlertKeys(byKey)
 	seen := make(map[string]struct{}, len(keys))
@@ -205,6 +211,26 @@ func (s *Store) persistCostAlertCandidates(ctx context.Context, candidates []mod
 		return nil, err
 	}
 	return newAlerts, nil
+}
+
+func retireObsoleteCostAlertStates(ctx context.Context, tx *sql.Tx, states map[string]costAlertState) error {
+	for key, state := range states {
+		if costAlertStateAllowedInAggregateMode(state) {
+			continue
+		}
+		state.active = false
+		state.pendingRecovery = false
+		state.normalSinceAt = nil
+		if err := persistCostAlertStateSnapshot(ctx, tx, state); err != nil {
+			return err
+		}
+		delete(states, key)
+	}
+	return nil
+}
+
+func costAlertStateAllowedInAggregateMode(state costAlertState) bool {
+	return state.lastEvent.Kind == model.CostAlertTotalCost || state.lastEvent.Kind == model.CostAlertBudgetBurn
 }
 
 func costAlertCandidatesByKey(candidates []model.CostAlertEvent) map[string]model.CostAlertEvent {
@@ -331,14 +357,19 @@ func costAlertCooldownElapsed(last sql.NullTime, now time.Time, cooldown time.Du
 
 func buildCostAlertRecovery(state costAlertState, now time.Time, window time.Duration) model.CostAlertEvent {
 	event := state.lastEvent
+	event.AlertKey = state.alertKey
 	userLabel := model.FormatIdentity(event.UserName, event.UserEmail, event.UserKey, "用户")
+	scope := event.Model
+	if scope == "" {
+		scope = "总费用"
+	}
 	event.ID = 0
 	event.NotificationType = model.CostAlertNotificationRecovery
 	event.Severity = "info"
 	event.Title = "费用异常已恢复"
 	event.Message = fmt.Sprintf(
 		"用户 %s 的 %s 费用异常已连续两个分析窗口未再触发，监控标记为恢复。",
-		userLabel, event.Model,
+		userLabel, scope,
 	)
 	event.WindowStart = now.Add(-window)
 	event.WindowEnd = now

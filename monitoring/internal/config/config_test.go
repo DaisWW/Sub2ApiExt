@@ -117,6 +117,19 @@ func TestLoadCostAlertEmailConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsToAggregateCostAlerts(t *testing.T) {
+	t.Setenv("DATABASE_HOST", "db.example.test")
+	t.Setenv("REDIS_HOST", "redis.example.test")
+	t.Setenv("MONITORING_COST_TOTAL_MIN_COST", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CostAlerts.TotalMinCost != 5 {
+		t.Fatalf("unexpected total cost default: %v", c.CostAlerts.TotalMinCost)
+	}
+}
+
 func TestLoadRejectsPartialCostAlertEmailConfiguration(t *testing.T) {
 	t.Setenv("DATABASE_HOST", "db.example.test")
 	t.Setenv("REDIS_HOST", "redis.example.test")
@@ -129,8 +142,8 @@ func TestLoadRejectsPartialCostAlertEmailConfiguration(t *testing.T) {
 func TestLoadRejectsNonFiniteCostAlertThreshold(t *testing.T) {
 	t.Setenv("DATABASE_HOST", "db.example.test")
 	t.Setenv("REDIS_HOST", "redis.example.test")
-	t.Setenv("MONITORING_COST_UNIT_COST_RATIO", "NaN")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "cost alert ratios") {
+	t.Setenv("MONITORING_COST_TOTAL_MIN_COST", "NaN")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "cost alert sample thresholds") {
 		t.Fatalf("non-finite cost threshold error = %v", err)
 	}
 }

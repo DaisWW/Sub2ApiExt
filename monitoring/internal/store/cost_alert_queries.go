@@ -3,8 +3,6 @@ package store
 import (
 	"context"
 	"time"
-
-	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/config"
 )
 
 // costUsageQuery reads a bounded baseline window and aggregates the current
@@ -65,13 +63,6 @@ SELECT user_key,
        COALESCE(SUM(output_cost) FILTER (WHERE created_at >= $1), 0)::double precision AS current_output_cost,
        COALESCE(SUM(cache_creation_cost) FILTER (WHERE created_at >= $1), 0)::double precision AS current_cache_creation_cost,
        COALESCE(SUM(cache_read_cost) FILTER (WHERE created_at >= $1), 0)::double precision AS current_cache_read_cost,
-       COALESCE(MAX(actual_cost) FILTER (WHERE created_at >= $1), 0)::double precision AS current_max_request_cost,
-       COALESCE(MAX(CASE WHEN base_cost > 0 AND base_cost >= $6 THEN actual_cost / base_cost END)
-                FILTER (WHERE created_at >= $1), 0)::double precision AS current_max_multiplier,
-       COUNT(*) FILTER (WHERE created_at >= $1
-                         AND base_cost > 0
-                         AND base_cost >= $6
-                         AND actual_cost / base_cost >= $5)::bigint AS current_high_multiplier_requests,
        COUNT(*) FILTER (WHERE created_at < $4)::bigint AS baseline_requests,
        COALESCE(SUM(input_tokens) FILTER (WHERE created_at < $4), 0)::bigint AS baseline_input_tokens,
        COALESCE(SUM(output_tokens) FILTER (WHERE created_at < $4), 0)::bigint AS baseline_output_tokens,
@@ -125,21 +116,18 @@ GROUP BY usage.user_key, usage.api_key_id, bounds.day_start
 ORDER BY usage.user_key, usage.api_key_id`
 
 type costUsageGroup struct {
-	userKey                string
-	userName               string
-	userEmail              string
-	model                  string
-	apiKeyID               int64
-	apiKeyName             string
-	channelID              int64
-	channelName            string
-	accountID              int64
-	accountName            string
-	current                costUsageMetrics
-	baseline               costUsageMetrics
-	maxRequestCost         float64
-	maxMultiplier          float64
-	highMultiplierRequests int64
+	userKey     string
+	userName    string
+	userEmail   string
+	model       string
+	apiKeyID    int64
+	apiKeyName  string
+	channelID   int64
+	channelName string
+	accountID   int64
+	accountName string
+	current     costUsageMetrics
+	baseline    costUsageMetrics
 }
 
 type costUsageMetrics struct {
@@ -198,10 +186,9 @@ type costDailyUsage struct {
 	dailyCost      float64
 }
 
-func (s *Store) loadCostUsageGroups(ctx context.Context, bounds costAlertBounds, policy config.CostAlertConfig) ([]costUsageGroup, error) {
+func (s *Store) loadCostUsageGroups(ctx context.Context, bounds costAlertBounds) ([]costUsageGroup, error) {
 	rows, err := s.db.QueryContext(ctx, costUsageQuery,
-		bounds.currentStart, bounds.now, bounds.baselineStart, bounds.baselineEnd,
-		policy.MultiplierRatio, policy.MinBaseCost)
+		bounds.currentStart, bounds.now, bounds.baselineStart, bounds.baselineEnd)
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +218,6 @@ func scanCostUsageGroup(scan func(...any) error) (costUsageGroup, error) {
 		&current.CacheCreationTokens, &current.CacheReadTokens,
 		&current.BaseCost, &current.ActualCost, &current.InputCost,
 		&current.OutputCost, &current.CacheCreationCost, &current.CacheReadCost,
-		&group.maxRequestCost, &group.maxMultiplier, &group.highMultiplierRequests,
 		&baseline.Requests, &baseline.InputTokens, &baseline.OutputTokens,
 		&baseline.CacheCreationTokens, &baseline.CacheReadTokens,
 		&baseline.BaseCost, &baseline.ActualCost,

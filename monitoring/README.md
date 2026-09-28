@@ -139,7 +139,7 @@ manage.bat start
 
 容器没有指向 Git 工程的绑定挂载，部署后启动和重启不依赖本仓库。
 
-费用异常分析只读取已完成的 `usage_logs`，按用户、API Key、模型和渠道的滚动窗口判断单条请求成本过高、缓存骤降、实际倍率异常、每百万 Tokens 成本异常及可选的个人预算燃烧。它不会读取提示词或响应正文，也不会修改网关路由、账户状态或额度。请求完成并写入数据库后，默认在一个监控周期内分析；同一异常按“开始 → 持续 → 升级 → 恢复”管理生命周期：首次触发发送开始邮件，异常仍在且达到冷却时间发送持续邮件，严重级别从普通升为严重时立即发送升级邮件，连续两个分析窗口未再触发后发送恢复邮件。持续和恢复邮件失败会保留冷却时间，避免每个扫描周期重复发送；恢复邮件成功后才关闭事件。
+费用异常分析只读取已完成的 `usage_logs`，按用户和 API Key 汇总最近窗口的总费用；只有窗口请求数、Tokens 和总费用都达到门槛时才进入邮件告警。模型、渠道或账户级的单条异常，以及低费用的缓存波动，不会单独发邮件；个人预算燃烧仍可单独启用。分析不会读取提示词或响应正文，也不会修改网关路由、账户状态或额度。请求完成并写入数据库后，默认在一个监控周期内分析；同一异常按“开始 → 持续 → 恢复”管理生命周期：首次触发发送开始邮件，异常仍在且达到冷却时间发送持续邮件，连续两个分析窗口未再触发后发送恢复邮件。持续和恢复邮件失败会保留冷却时间，避免每个扫描周期重复发送；恢复邮件成功后才关闭事件。
 
 QQ 邮箱通知使用 SMTP 授权码，不使用 QQ 登录密码。默认连接 `smtp.qq.com:465` 的隐式 TLS；需要 587 端口时将安全模式改为 `starttls`。把以下变量写入 `C:\ProgramData\Sub2API\extensions\monitoring\settings.env`：
 
@@ -150,7 +150,7 @@ MONITORING_COST_EMAIL_FROM=your-account@qq.com
 MONITORING_COST_EMAIL_TO=admin@example.com
 ```
 
-保存后在该目录运行 `docker compose up -d --force-recreate monitoring`，使新的邮箱变量进入容器。`MONITORING_COST_DAILY_BUDGET=0` 时不启用个人预算燃烧告警；缓存、倍率和单位成本规则仍然工作。日预算按监控容器 `TZ` 的本地自然日计算。未配置完整 SMTP 参数时费用分析不会启动。单位成本和缓存规则需要同一用户/API Key、模型、渠道的历史基线和足够样本；倍率规则没有历史基线时按绝对倍率判断。邮件通知失败不会影响健康探测和面板服务；开始、持续、升级和恢复通知各自遵守上述状态及冷却规则，不会记录 SMTP 密码。
+保存后在该目录运行 `docker compose up -d --force-recreate monitoring`，使新的邮箱变量进入容器。默认只发送按用户/API Key 汇总的总费用告警。`MONITORING_COST_DAILY_BUDGET=0` 时不启用个人预算燃烧告警。日预算按监控容器 `TZ` 的本地自然日计算。未配置完整 SMTP 参数时费用分析不会启动。邮件通知失败不会影响健康探测和面板服务；开始、持续和恢复通知各自遵守上述状态及冷却规则，不会记录 SMTP 密码。
 
 费用告警优先使用 `usage_logs.user_id + api_key_id` 作为范围；没有 API Key ID 时退化为用户范围。它不会把同一个用户不同 API Key 的成本混在一起，但仍不能在同一个 Key 内区分多个没有任务标识的进程。
 
@@ -174,16 +174,9 @@ MONITORING_COST_EMAIL_TO=admin@example.com
 | `MONITORING_COST_WINDOW` | `15m` | 当前费用分析窗口 |
 | `MONITORING_COST_BASELINE` | `168h` | 历史基线窗口；必须大于当前窗口 |
 | `MONITORING_COST_COOLDOWN` | `30m` | 同一异常持续/恢复重试邮件的最短间隔；严重级别升级会立即通知 |
-| `MONITORING_COST_MIN_REQUESTS` | `3` | 缓存/单位成本窗口的最少请求数；倍率异常仍可由单条请求触发 |
+| `MONITORING_COST_MIN_REQUESTS` | `3` | 总费用窗口的最少请求数 |
 | `MONITORING_COST_MIN_TOKENS` | `100000` | 费用异常最少 Tokens 数 |
-| `MONITORING_COST_MIN_COST` | `0.5` | 窗口费用异常最低成本门槛，单位与 `usage_logs.actual_cost` 相同 |
-| `MONITORING_COST_SINGLE_REQUEST_COST` | `5` | 单条请求成本上限；0 表示关闭单条请求告警 |
-| `MONITORING_COST_MIN_BASE_COST` | `0.1` | 倍率异常的最低原始成本门槛；避免小数值噪声 |
-| `MONITORING_COST_CACHE_BASELINE_MIN` | `0.60` | 缓存告警要求的历史最低命中率 |
-| `MONITORING_COST_CACHE_CURRENT_MAX` | `0.20` | 缓存告警要求的当前最高命中率 |
-| `MONITORING_COST_CACHE_COST_RATIO` | `1.5` | 缓存异常相对历史单位成本倍数 |
-| `MONITORING_COST_UNIT_COST_RATIO` | `1.5` | 单位成本异常相对历史倍数 |
-| `MONITORING_COST_MULTIPLIER_RATIO` | `2.0` | 实际倍率相对历史基线的倍数；没有历史基线时按绝对倍率判断 |
+| `MONITORING_COST_TOTAL_MIN_COST` | `5` | 用户/API Key 在当前窗口的最低总费用门槛，单位与 `usage_logs.actual_cost` 相同 |
 | `MONITORING_COST_DAILY_BUDGET` | `0` | 每个用户/API Key 的日预算，单位与 `actual_cost` 相同；0 表示关闭预算燃烧告警 |
 | `MONITORING_COST_BURN_RATIO` | `1.5` | 近窗口燃烧速度相对日预算速度倍数 |
 | `MONITORING_COST_EMAIL_HOST` | `smtp.qq.com` | SMTP 主机 |

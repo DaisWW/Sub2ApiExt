@@ -118,6 +118,11 @@ ALTER TABLE monitoring_cost_alert_states
     ADD COLUMN IF NOT EXISTS last_event JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE monitoring_cost_alert_states
     ADD COLUMN IF NOT EXISTS pending_recovery BOOLEAN NOT NULL DEFAULT FALSE;
+-- Older versions could persist an active state without its candidate key.
+-- Such rows cannot be matched to a future incident and must not emit recovery
+-- notifications on their own.
+DELETE FROM monitoring_cost_alert_states
+WHERE BTRIM(alert_key) = '';
 CREATE INDEX IF NOT EXISTS monitoring_cost_alert_states_active_idx
     ON monitoring_cost_alert_states (alert_key)
     WHERE active = TRUE;

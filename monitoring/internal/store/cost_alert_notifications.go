@@ -40,8 +40,9 @@ WHERE alert_key = $1
 	return err
 }
 
-// DiscardCostAlertNotifications removes rows for a failed email send. Active
-// incidents keep their state so the next permitted cooldown can retry them.
+// DiscardCostAlertNotifications removes rows for a failed email send. Ongoing
+// reminders and recoveries keep their cooldown state; a failed start is reset
+// so the next scan can retry the missing initial notification.
 func (s *Store) DiscardCostAlertNotifications(ctx context.Context, events []model.CostAlertEvent) error {
 	if len(events) == 0 {
 		return nil
@@ -75,6 +76,19 @@ WHERE id = $1 AND alert_key = $2`, event.ID, event.AlertKey); err != nil {
 UPDATE monitoring_cost_alert_states
 SET pending_recovery = FALSE, updated_at = NOW()
 WHERE alert_key = $1
+  AND last_alerted_at IS NOT DISTINCT FROM $2::timestamptz`, event.AlertKey, event.CreatedAt)
+		return err
+	}
+	if event.NotificationType == model.CostAlertNotificationStart {
+		// A failed start email must not turn the first observation into a
+		// silent incident. Reset it so the next scan can send a new start.
+		_, err := tx.ExecContext(ctx, `
+UPDATE monitoring_cost_alert_states
+SET last_alerted_at = NULL, active = FALSE, first_seen_at = NULL,
+    last_seen_at = NULL, normal_since_at = NULL, last_severity = '',
+    last_event = '{}'::jsonb, pending_recovery = FALSE, updated_at = NOW()
+WHERE alert_key = $1
+  AND active = TRUE
   AND last_alerted_at IS NOT DISTINCT FROM $2::timestamptz`, event.AlertKey, event.CreatedAt)
 		return err
 	}

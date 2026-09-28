@@ -39,7 +39,7 @@ func (s *Store) AnalyzeCostAlerts(ctx context.Context, policy config.CostAlertCo
 		return nil, nil
 	}
 	bounds := newCostAlertBounds(time.Now().UTC(), policy)
-	groups, err := s.loadCostUsageGroups(ctx, bounds, policy)
+	groups, err := s.loadCostUsageGroups(ctx, bounds)
 	if err != nil {
 		return nil, fmt.Errorf("load cost usage: %w", err)
 	}
@@ -52,9 +52,12 @@ func (s *Store) AnalyzeCostAlerts(ctx context.Context, policy config.CostAlertCo
 }
 
 func buildCostAlertCandidates(groups []costUsageGroup, daily map[string]costDailyUsage, policy config.CostAlertConfig, bounds costAlertBounds) []model.CostAlertEvent {
-	candidates := make([]model.CostAlertEvent, 0, len(groups))
-	for _, group := range groups {
-		candidates = append(candidates, evaluateCostUsageGroup(group, policy, bounds.currentStart, bounds.now)...)
+	aggregated := aggregateCostUsageGroups(groups)
+	candidates := make([]model.CostAlertEvent, 0, len(aggregated))
+	for _, group := range aggregated {
+		if event, ok := evaluateTotalCostAlert(group, policy, bounds.currentStart, bounds.now); ok {
+			candidates = append(candidates, event)
+		}
 	}
 	candidates = append(candidates, evaluateBudgetBurn(daily, policy, bounds.now)...)
 	addDailyCosts(candidates, daily)

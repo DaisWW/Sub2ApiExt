@@ -32,26 +32,19 @@ type Config struct {
 	CostAlerts         CostAlertConfig
 }
 
-// CostAlertConfig controls read-only request-cost anomaly analysis. A zero
-// daily budget disables the budget-burn rule; the other rules remain active.
+// CostAlertConfig controls read-only request-cost anomaly analysis. Cost
+// alerts are aggregated by user and API key before threshold evaluation.
 type CostAlertConfig struct {
-	Enabled           bool
-	Window            time.Duration
-	Baseline          time.Duration
-	Cooldown          time.Duration
-	MinRequests       int
-	MinTokens         int64
-	MinCost           float64
-	SingleRequestCost float64
-	MinBaseCost       float64
-	CacheBaselineMin  float64
-	CacheCurrentMax   float64
-	CacheCostRatio    float64
-	UnitCostRatio     float64
-	MultiplierRatio   float64
-	DailyBudget       float64
-	BurnRatio         float64
-	Email             EmailConfig
+	Enabled      bool
+	Window       time.Duration
+	Baseline     time.Duration
+	Cooldown     time.Duration
+	MinRequests  int
+	MinTokens    int64
+	TotalMinCost float64
+	DailyBudget  float64
+	BurnRatio    float64
+	Email        EmailConfig
 }
 
 type EmailConfig struct {
@@ -122,22 +115,15 @@ func loadCostAlertConfig() CostAlertConfig {
 		from = username
 	}
 	return CostAlertConfig{
-		Enabled:           envBool("MONITORING_COST_ALERTS_ENABLED", true),
-		Window:            envDuration("MONITORING_COST_WINDOW", 15*time.Minute),
-		Baseline:          envDuration("MONITORING_COST_BASELINE", 7*24*time.Hour),
-		Cooldown:          envDuration("MONITORING_COST_COOLDOWN", 30*time.Minute),
-		MinRequests:       envInt("MONITORING_COST_MIN_REQUESTS", 3),
-		MinTokens:         envInt64("MONITORING_COST_MIN_TOKENS", 100_000),
-		MinCost:           envFloat("MONITORING_COST_MIN_COST", 0.5),
-		SingleRequestCost: envFloat("MONITORING_COST_SINGLE_REQUEST_COST", 5),
-		MinBaseCost:       envFloat("MONITORING_COST_MIN_BASE_COST", 0.1),
-		CacheBaselineMin:  envFloat("MONITORING_COST_CACHE_BASELINE_MIN", 0.60),
-		CacheCurrentMax:   envFloat("MONITORING_COST_CACHE_CURRENT_MAX", 0.20),
-		CacheCostRatio:    envFloat("MONITORING_COST_CACHE_COST_RATIO", 1.5),
-		UnitCostRatio:     envFloat("MONITORING_COST_UNIT_COST_RATIO", 1.5),
-		MultiplierRatio:   envFloat("MONITORING_COST_MULTIPLIER_RATIO", 2.0),
-		DailyBudget:       envFloat("MONITORING_COST_DAILY_BUDGET", 0),
-		BurnRatio:         envFloat("MONITORING_COST_BURN_RATIO", 1.5),
+		Enabled:      envBool("MONITORING_COST_ALERTS_ENABLED", true),
+		Window:       envDuration("MONITORING_COST_WINDOW", 15*time.Minute),
+		Baseline:     envDuration("MONITORING_COST_BASELINE", 7*24*time.Hour),
+		Cooldown:     envDuration("MONITORING_COST_COOLDOWN", 30*time.Minute),
+		MinRequests:  envInt("MONITORING_COST_MIN_REQUESTS", 3),
+		MinTokens:    envInt64("MONITORING_COST_MIN_TOKENS", 100_000),
+		TotalMinCost: envFloat("MONITORING_COST_TOTAL_MIN_COST", 5),
+		DailyBudget:  envFloat("MONITORING_COST_DAILY_BUDGET", 0),
+		BurnRatio:    envFloat("MONITORING_COST_BURN_RATIO", 1.5),
 		Email: EmailConfig{
 			Host:     envString("MONITORING_COST_EMAIL_HOST", "smtp.qq.com"),
 			Port:     envInt("MONITORING_COST_EMAIL_PORT", 465),
@@ -155,13 +141,10 @@ func validateCostAlertConfig(c CostAlertConfig) error {
 	if c.Window <= 0 || c.Baseline <= c.Window || c.Cooldown <= 0 {
 		return fmt.Errorf("cost alert window, baseline, and cooldown are invalid")
 	}
-	if c.MinRequests <= 0 || c.MinTokens <= 0 ||
-		!finiteNonNegative(c.MinCost) || !finiteNonNegative(c.SingleRequestCost) || !finiteNonNegative(c.MinBaseCost) {
+	if c.MinRequests <= 0 || c.MinTokens <= 0 || !finiteNonNegative(c.TotalMinCost) {
 		return fmt.Errorf("cost alert sample thresholds are invalid")
 	}
-	if !finiteBetween(c.CacheBaselineMin, 0, 1) || !finiteBetween(c.CacheCurrentMax, 0, 1) ||
-		!finiteAtLeast(c.CacheCostRatio, 1) || !finiteAtLeast(c.UnitCostRatio, 1) ||
-		!finiteAtLeast(c.MultiplierRatio, 1) || !finiteNonNegative(c.DailyBudget) || !finiteAtLeast(c.BurnRatio, 1) {
+	if !finiteNonNegative(c.DailyBudget) || !finiteAtLeast(c.BurnRatio, 1) {
 		return fmt.Errorf("cost alert ratios or budget are invalid")
 	}
 	if c.Email.Timeout <= 0 {
@@ -185,10 +168,6 @@ func validateCostAlertConfig(c CostAlertConfig) error {
 
 func finiteNonNegative(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
-}
-
-func finiteBetween(value, minimum, maximum float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= minimum && value <= maximum
 }
 
 func finiteAtLeast(value, minimum float64) bool {

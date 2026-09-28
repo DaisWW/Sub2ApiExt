@@ -72,7 +72,7 @@ func costAlertBody(events []model.CostAlertEvent) string {
 		writeCostAlertMetrics(&body, event)
 		body.WriteString(fmt.Sprintf("说明: %s\n", event.Message))
 	}
-	body.WriteString("\n建议检查对应用户的客户端、模型/渠道切换、缓存字段和倍率配置。\n")
+	body.WriteString("\n建议检查对应用户或 API Key 的总用量。\n")
 	return body.String()
 }
 

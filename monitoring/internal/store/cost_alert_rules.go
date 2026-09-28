@@ -9,15 +9,72 @@ import (
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
-func evaluateCostUsageGroup(group costUsageGroup, policy config.CostAlertConfig, start, end time.Time) []model.CostAlertEvent {
-	base := buildCostAlertBaseEvent(group, start, end)
-	userLabel := model.FormatIdentity(group.userName, group.userEmail, group.userKey, "用户")
-	events := evaluateImmediateCostRules(group, policy, base, userLabel)
-	if !hasWindowEvidence(group, policy) {
-		return withCostAlertKeys(events)
+func aggregateCostUsageGroups(groups []costUsageGroup) []costUsageGroup {
+	byKey := make(map[string]costUsageGroup, len(groups))
+	for _, group := range groups {
+		key := costUserTargetKey(group.userKey, group.apiKeyID)
+		aggregate, exists := byKey[key]
+		if !exists {
+			aggregate = group
+			aggregate.model = ""
+			aggregate.channelID = 0
+			aggregate.channelName = ""
+			aggregate.accountID = 0
+			aggregate.accountName = ""
+			aggregate.current = costUsageMetrics{}
+			aggregate.baseline = costUsageMetrics{}
+		}
+		aggregate.current = addCostUsageMetrics(aggregate.current, group.current)
+		aggregate.baseline = addCostUsageMetrics(aggregate.baseline, group.baseline)
+		byKey[key] = aggregate
 	}
-	events = append(events, evaluateBaselineCostRules(group, policy, base, userLabel)...)
-	return withCostAlertKeys(events)
+	keys := make([]string, 0, len(byKey))
+	for key := range byKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]costUsageGroup, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, byKey[key])
+	}
+	return result
+}
+
+func addCostUsageMetrics(left, right costUsageMetrics) costUsageMetrics {
+	return costUsageMetrics{
+		Requests:            left.Requests + right.Requests,
+		InputTokens:         left.InputTokens + right.InputTokens,
+		OutputTokens:        left.OutputTokens + right.OutputTokens,
+		CacheCreationTokens: left.CacheCreationTokens + right.CacheCreationTokens,
+		CacheReadTokens:     left.CacheReadTokens + right.CacheReadTokens,
+		BaseCost:            left.BaseCost + right.BaseCost,
+		ActualCost:          left.ActualCost + right.ActualCost,
+		InputCost:           left.InputCost + right.InputCost,
+		OutputCost:          left.OutputCost + right.OutputCost,
+		CacheCreationCost:   left.CacheCreationCost + right.CacheCreationCost,
+		CacheReadCost:       left.CacheReadCost + right.CacheReadCost,
+	}
+}
+
+func evaluateTotalCostAlert(group costUsageGroup, policy config.CostAlertConfig, start, end time.Time) (model.CostAlertEvent, bool) {
+	if group.current.Requests < int64(policy.MinRequests) ||
+		group.current.TotalTokens() < policy.MinTokens ||
+		group.current.ActualCost < policy.TotalMinCost {
+		return model.CostAlertEvent{}, false
+	}
+	event := buildCostAlertBaseEvent(group, start, end)
+	target := costUserTargetKey(group.userKey, group.apiKeyID)
+	event.Kind = model.CostAlertTotalCost
+	event.TargetKey = target
+	event.AlertKey = model.CostAlertTotalCost + "|" + target
+	event.Title = "总费用持续偏高"
+	event.Message = fmt.Sprintf(
+		"用户 %s 在最近窗口累计费用 %.4f，已达到告警门槛 %.4f；本窗口请求 %d 次、Tokens %d。",
+		model.FormatIdentity(group.userName, group.userEmail, group.userKey, "用户"),
+		group.current.ActualCost, policy.TotalMinCost, group.current.Requests, group.current.TotalTokens(),
+	)
+	event.Severity = "warning"
+	return event, true
 }
 
 func buildCostAlertBaseEvent(group costUsageGroup, start, end time.Time) model.CostAlertEvent {
@@ -35,7 +92,6 @@ func buildCostAlertBaseEvent(group costUsageGroup, start, end time.Time) model.C
 		AccountName:          group.accountName,
 		Requests:             current.Requests,
 		TotalTokens:          current.TotalTokens(),
-		MaxRequestCost:       group.maxRequestCost,
 		InputTokens:          current.InputTokens,
 		OutputTokens:         current.OutputTokens,
 		CacheCreationTokens:  current.CacheCreationTokens,
@@ -59,127 +115,6 @@ func buildCostAlertBaseEvent(group costUsageGroup, start, end time.Time) model.C
 	}
 }
 
-func evaluateImmediateCostRules(group costUsageGroup, policy config.CostAlertConfig, base model.CostAlertEvent, userLabel string) []model.CostAlertEvent {
-	events := make([]model.CostAlertEvent, 0, 2)
-	if policy.SingleRequestCost > 0 && group.maxRequestCost >= policy.SingleRequestCost {
-		events = append(events, singleRequestCostAlert(group, policy, base, userLabel))
-	}
-	if multiplierSpike(group, policy) {
-		events = append(events, multiplierCostAlert(group, base, userLabel))
-	}
-	return events
-}
-
-func singleRequestCostAlert(group costUsageGroup, policy config.CostAlertConfig, base model.CostAlertEvent, userLabel string) model.CostAlertEvent {
-	base.Kind = model.CostAlertSingleRequest
-	base.Title = "单条请求成本过高"
-	base.Message = fmt.Sprintf(
-		"用户 %s 的 %s 在 %s 出现单条成本 %.4f，已超过配置上限 %.4f。",
-		userLabel, group.model, group.channelName, group.maxRequestCost, policy.SingleRequestCost,
-	)
-	base.Severity = "critical"
-	return base
-}
-
-func multiplierCostAlert(group costUsageGroup, base model.CostAlertEvent, userLabel string) model.CostAlertEvent {
-	base.Kind = model.CostAlertMultiplier
-	base.Title = "实际倍率异常"
-	base.Message = fmt.Sprintf(
-		"用户 %s 的 %s 在 %s 最近窗口实际倍率 %.2fx，历史 %.2fx，最高单条倍率 %.2fx。",
-		userLabel, group.model, group.channelName, base.CurrentMultiplier,
-		base.BaselineMultiplier, group.maxMultiplier,
-	)
-	base.Severity = "critical"
-	return base
-}
-
-func hasWindowEvidence(group costUsageGroup, policy config.CostAlertConfig) bool {
-	return group.current.Requests >= int64(policy.MinRequests) &&
-		group.current.ActualCost >= policy.MinCost &&
-		group.current.TotalTokens() >= policy.MinTokens
-}
-
-func evaluateBaselineCostRules(group costUsageGroup, policy config.CostAlertConfig, base model.CostAlertEvent, userLabel string) []model.CostAlertEvent {
-	if !baselineReady(group, policy) {
-		return nil
-	}
-	events := make([]model.CostAlertEvent, 0, 2)
-	if cacheDegraded(group.current, group.baseline, policy) {
-		events = append(events, cacheCostAlert(group, base, userLabel))
-	}
-	if unitCostSpike(group.current, group.baseline, policy) {
-		events = append(events, unitCostAlert(group, policy, base, userLabel))
-	}
-	return events
-}
-
-func baselineReady(group costUsageGroup, policy config.CostAlertConfig) bool {
-	return group.baseline.Requests >= int64(policy.MinRequests) &&
-		group.baseline.TotalTokens() >= policy.MinTokens
-}
-
-func cacheCostAlert(group costUsageGroup, base model.CostAlertEvent, userLabel string) model.CostAlertEvent {
-	base.Kind = model.CostAlertCacheDegraded
-	base.Title = "疑似缓存失效"
-	base.Message = fmt.Sprintf(
-		"用户 %s 的 %s 在 %s 最近窗口缓存命中率 %.1f%%（历史 %.1f%%），单位成本 %.4f（历史 %.4f）。",
-		userLabel, group.model, group.channelName, base.CurrentCacheHitRate,
-		base.BaselineCacheHitRate, base.CurrentUnitCost, base.BaselineUnitCost,
-	)
-	return base
-}
-
-func unitCostAlert(group costUsageGroup, policy config.CostAlertConfig, base model.CostAlertEvent, userLabel string) model.CostAlertEvent {
-	base.Kind = model.CostAlertUnitCost
-	base.Title = "每百万 Tokens 成本异常"
-	base.Message = fmt.Sprintf(
-		"用户 %s 的 %s 在 %s 最近窗口单位成本 %.4f，历史基线 %.4f，当前成本 %.4f，最高单条成本 %.4f。",
-		userLabel, group.model, group.channelName, base.CurrentUnitCost,
-		base.BaselineUnitCost, base.CurrentCost, base.MaxRequestCost,
-	)
-	if base.BaselineUnitCost > 0 && base.CurrentUnitCost >= base.BaselineUnitCost*policy.UnitCostRatio*1.5 {
-		base.Severity = "critical"
-	}
-	return base
-}
-
-func withCostAlertKeys(events []model.CostAlertEvent) []model.CostAlertEvent {
-	for index := range events {
-		events[index].AlertKey = events[index].Kind + "|" + events[index].TargetKey
-	}
-	return events
-}
-
-func cacheDegraded(current, baseline costUsageMetrics, policy config.CostAlertConfig) bool {
-	if current.CacheableTokens() < policy.MinTokens || baseline.CacheableTokens() < policy.MinTokens {
-		return false
-	}
-	if baseline.CacheHitRate()/100 < policy.CacheBaselineMin || current.CacheHitRate()/100 > policy.CacheCurrentMax {
-		return false
-	}
-	return current.UnitCost() > 0 && baseline.UnitCost() > 0 &&
-		current.UnitCost() >= baseline.UnitCost()*policy.CacheCostRatio
-}
-
-func unitCostSpike(current, baseline costUsageMetrics, policy config.CostAlertConfig) bool {
-	return current.TotalTokens() >= policy.MinTokens && baseline.TotalTokens() >= policy.MinTokens &&
-		current.UnitCost() > 0 && baseline.UnitCost() > 0 &&
-		current.UnitCost() >= baseline.UnitCost()*policy.UnitCostRatio
-}
-
-func multiplierSpike(group costUsageGroup, policy config.CostAlertConfig) bool {
-	current := group.current.Multiplier()
-	baseline := group.baseline.Multiplier()
-	if group.current.BaseCost < policy.MinBaseCost || current <= 0 {
-		return false
-	}
-	if baseline > 0 {
-		threshold := baseline * policy.MultiplierRatio
-		return current >= threshold || group.maxMultiplier >= threshold
-	}
-	return current >= policy.MultiplierRatio || group.highMultiplierRequests >= 2
-}
-
 func evaluateBudgetBurn(usage map[string]costDailyUsage, policy config.CostAlertConfig, now time.Time) []model.CostAlertEvent {
 	if policy.DailyBudget <= 0 {
 		return nil
@@ -199,7 +134,7 @@ func evaluateBudgetBurn(usage map[string]costDailyUsage, policy config.CostAlert
 }
 
 func budgetBurnAlert(item costDailyUsage, policy config.CostAlertConfig, now time.Time) (model.CostAlertEvent, bool) {
-	if item.dayStart.IsZero() || (item.windowCost < policy.MinCost && item.dailyCost < policy.DailyBudget) {
+	if item.dayStart.IsZero() {
 		return model.CostAlertEvent{}, false
 	}
 	elapsed := now.Sub(item.dayStart)
