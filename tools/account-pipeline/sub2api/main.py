@@ -597,6 +597,50 @@ def result_count(result: Mapping[str, Any], name: str) -> int:
         raise Sub2ApiError("Sub2API API 结果格式无效") from exc
 
 
+def safe_api_message(value: Any) -> str:
+    """保留服务端诊断文本，同时隐藏可能误返回的凭据。"""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", value).strip()
+    text = re.sub(
+        r"(?i)\b(?:eyJ[\w-]*\.[\w-]+\.[\w-]+|rt\.[A-Za-z0-9._-]{20,})\b",
+        "<已隐藏>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(\b(?:access|refresh|id)[_-]?token\b\s*(?:=|:)\s*)\S+",
+        r"\1<已隐藏>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(\b(?:password|passwd|secret|api[_-]?key|authorization)\b\s*(?:=|:)\s*)\S+",
+        r"\1<已隐藏>",
+        text,
+    )
+    text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "<已隐藏>", text)
+    return text[:240]
+
+
+def failed_item_message(result: Mapping[str, Any], index: int) -> str:
+    """从批量导入结果提取指定账号的脱敏失败原因。"""
+    candidates = []
+    for key in ("items", "errors"):
+        values = result.get(key, [])
+        if not isinstance(values, list):
+            continue
+        candidates.extend(
+            item
+            for item in values
+            if isinstance(item, dict) and item.get("index") in (None, index)
+        )
+    for item in candidates:
+        for key in ("message", "error", "detail"):
+            message = safe_api_message(item.get(key))
+            if message:
+                return message
+    return ""
+
+
 def snapshot(account: Dict[str, Any], managed_extra: Iterable[str]) -> Dict[str, Any]:
     extra = account_extra(account)
     credentials = {
@@ -887,7 +931,12 @@ def run_import(
                 raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号返回格式无效")
             failed = result_count(result, "failed")
             if failed > 0:
-                raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号导入失败；凭据内容未输出")
+                detail = failed_item_message(result, index + 1)
+                detail_suffix = f"：{detail}" if detail else ""
+                raise Sub2ApiError(
+                    f"第 {batch.index} 个批次第 {index + 1} 个账号导入失败"
+                    f"{detail_suffix}；凭据内容未输出"
+                )
             items = result.get("items", [])
             if not isinstance(items, list):
                 items = []

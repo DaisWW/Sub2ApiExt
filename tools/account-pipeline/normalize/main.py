@@ -174,6 +174,18 @@ def decode_jwt_claims(token: Optional[str]) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def jwt_expiration(claims: Mapping[str, Any]) -> Optional[int]:
+    """读取 JWT 的 Unix 到期时间；无效 claim 交给调用方按旧格式处理。"""
+    value = claims.get("exp")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
 def nested_claim(claims: Dict[str, Any], keys: Iterable[str]) -> Optional[str]:
     wanted = {key.lower() for key in keys}
     stack: List[Any] = [claims]
@@ -253,8 +265,14 @@ def canonical_record(record: Dict[str, Any], number: int) -> Dict[str, Any]:
         normalized["id_token"] = id_token
     if account_id:
         normalized["account_id"] = account_id
-    expires_at = record.get("expires_at")
-    if isinstance(expires_at, (str, int, float)) and not isinstance(expires_at, bool):
+    expires_at = jwt_expiration(claims)
+    if expires_at is None:
+        expires_at = record.get("expires_at")
+        if not isinstance(expires_at, (str, int, float)) or isinstance(
+            expires_at, bool
+        ):
+            expires_at = None
+    if expires_at is not None:
         normalized["expires_at"] = expires_at
     return normalized
 
