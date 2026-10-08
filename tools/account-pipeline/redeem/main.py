@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import io
 import json
 import os
@@ -481,6 +482,23 @@ def refresh_account_keys(rows: list[dict]) -> list[str]:
     return result
 
 
+def code_account_bindings(rows: list[dict]) -> dict[str, str | None]:
+    """只保存卡密摘要和账户邮箱；失败卡密用 null 表示。"""
+    bindings = {}
+    for row in rows:
+        code = field(row.get("code"))
+        if not code:
+            continue
+        digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+        email = next((field(row.get(name)) for name in ("account", "email", "user_email", "account_email")
+                      if field(row.get(name))), "").casefold()
+        account = email if row.get("ok") is True else None
+        if digest in bindings and bindings[digest] != account:
+            raise RedeemError("同一卡密返回了不同的账户对应关系；已停止处理")
+        bindings[digest] = account
+    return bindings
+
+
 def progress_phase(value) -> str | None:
     """把兑换站可能返回的阶段名称归一化。"""
     phase = field(value).lower().replace("-", "_").replace(" ", "_")
@@ -709,6 +727,7 @@ def write_manifest(
         "success": sum(1 for row in rows if row.get("ok") is True),
         "failed": sum(1 for row in rows if row.get("ok") is not True),
         "refresh_accounts": refresh_account_keys(rows),
+        "code_accounts": code_account_bindings(rows),
     }
     temporary = path.with_name(path.name + ".tmp")
     try:

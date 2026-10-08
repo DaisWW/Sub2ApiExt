@@ -397,6 +397,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         redeem_code = 0
         data_dir: Optional[Path] = None
         refresh_keys: set[str] = set()
+        code_accounts = None
         if has_codes:
             codes_file = run_dir / "inputs" / "redeem-codes.txt"
             codes_file.parent.mkdir(parents=True, exist_ok=True)
@@ -416,6 +417,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
 
             redeem_info = read_redeem_manifest(redeem_manifest, redeem_dir)
             data_dir = Path(redeem_info["data_dir"])
+            code_accounts = redeem_info.get("code_accounts")
             manifest["redeem"] = {
                 key: redeem_info.get(key)
                 for key in (
@@ -459,7 +461,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         )
         records = normalized_records(Path(normalized["cockpit_input"]))
         account_configs, config_fingerprints = account_config.compile(
-            records,
+            records, active_codes=inputs.codes, code_accounts=code_accounts,
         )
         incremental_module.write_json(
             Path(normalized["sub2api_input"]), incremental_module.sub2api_payload(records, account_configs),

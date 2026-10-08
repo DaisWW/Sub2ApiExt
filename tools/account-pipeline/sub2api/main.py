@@ -815,7 +815,7 @@ def account_settings(config: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 class AccountConfig:
-    """默认设置和邮箱覆盖的唯一解析入口。"""
+    """默认设置、兑换码覆盖和邮箱覆盖的唯一解析入口。"""
 
     def __init__(self, config: Mapping[str, Any]):
         defaults = config.get("defaults", {})
@@ -825,24 +825,34 @@ class AccountConfig:
             **defaults,
         })
         self.accounts: Dict[str, Dict[str, Any]] = {}
-        entries = config.get("accounts", {})
-        if not isinstance(entries, dict):
-            raise Sub2ApiError("accounts 必须是 JSON 对象")
-        for email, override in entries.items():
-            if not isinstance(email, str) or not EMAIL_PATTERN.fullmatch(email.strip()):
-                raise Sub2ApiError("accounts 的键必须是账户邮箱")
-            key = email.strip().casefold()
-            if key in self.accounts:
-                raise Sub2ApiError("accounts 包含重复标识")
-            self._validate_override(override, "accounts")
-            settings = account_settings({
-                **self.defaults, **override,
-                "extra": {**self.defaults["extra"], **override.get("extra", {})},
-            })
-            self.accounts[key] = {
-                name: copy.deepcopy(value if name == "extra" else settings[name])
-                for name, value in override.items()
-            }
+        self.redeem_codes: Dict[str, Dict[str, Any]] = {}
+        for field_name, target in (("accounts", self.accounts), ("redeem_codes", self.redeem_codes)):
+            entries = config.get(field_name, {})
+            if not isinstance(entries, dict):
+                raise Sub2ApiError(f"{field_name} 必须是 JSON 对象")
+            for identifier, override in entries.items():
+                if not isinstance(identifier, str) or not identifier.strip():
+                    raise Sub2ApiError(f"{field_name} 包含空标识")
+                identifier = identifier.strip()
+                if field_name == "accounts":
+                    if not EMAIL_PATTERN.fullmatch(identifier):
+                        raise Sub2ApiError("accounts 的键必须是账户邮箱")
+                    key = identifier.casefold()
+                else:
+                    if any(char.isspace() for char in identifier):
+                        raise Sub2ApiError("redeem_codes 的键必须是单个兑换码")
+                    key = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
+                if key in target:
+                    raise Sub2ApiError(f"{field_name} 包含重复标识")
+                self._validate_override(override, field_name)
+                settings = account_settings({
+                    **self.defaults, **override,
+                    "extra": {**self.defaults["extra"], **override.get("extra", {})},
+                })
+                target[key] = {
+                    name: copy.deepcopy(value if name == "extra" else settings[name])
+                    for name, value in override.items()
+                }
 
     @staticmethod
     def _validate_override(value: Any, label: str) -> None:
@@ -862,15 +872,46 @@ class AccountConfig:
         })
 
     def compile(
-        self, records: Sequence[Dict[str, Any]],
+        self, records: Sequence[Dict[str, Any]], *, active_codes: Iterable[str] = (),
+        code_accounts: Optional[Mapping[str, Optional[str]]] = None,
     ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+        if code_accounts is not None and not isinstance(code_accounts, dict):
+            raise Sub2ApiError("兑换码与账户的对应关系必须是 JSON 对象")
+        emails = {str(record.get("email", "")).strip().casefold() for record in records}
+        code_overrides: Dict[str, Dict[str, Any]] = {}
+        for code in active_codes:
+            digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+            if digest not in self.redeem_codes:
+                continue
+            if code_accounts is None or digest not in code_accounts:
+                raise Sub2ApiError("兑换结果缺少已配置卡密的账户对应关系；已停止导入")
+            email = code_accounts[digest]
+            if email is None:
+                continue  # 失败卡密没有账户，不影响其他成功输入。
+            if not isinstance(email, str) or email.strip().casefold() not in emails:
+                raise Sub2ApiError("已配置卡密的账户无法匹配下载内容；已停止导入")
+            email = email.strip().casefold()
+            combined = code_overrides.setdefault(email, {})
+            account = self.accounts.get(email, {})
+            for name, value in self.redeem_codes[digest].items():
+                if name == "group_names":
+                    combined[name] = sorted(set(combined.get(name, [])) | set(value))
+                    continue
+                values = value.items() if name == "extra" else [(name, value)]
+                target = combined.setdefault("extra", {}) if name == "extra" else combined
+                final = account.get("extra", {}) if name == "extra" else account
+                for field_name, field_value in values:
+                    if field_name in target and comparable(target[field_name]) != comparable(field_value) and field_name not in final:
+                        field_label = f"extra.{field_name}" if name == "extra" else field_name
+                        raise Sub2ApiError(f"账户 {email} 的兑换码配置冲突：{field_label}；已停止导入")
+                    target[field_name] = field_value
         configs, fingerprints = {}, {}
         for index, record in enumerate(records):
             key = record_key(record)
             if key is None:
                 raise Sub2ApiError("账户缺少 email/account_id，无法解析配置")
             email = str(record.get("email", "")).strip()
-            settings = self.resolve(email)
+            settings = self.resolve(email, code_overrides.get(email.casefold()))
             prefix = settings["name_prefix"]
             settings["name"] = (
                 prefix + f"{settings['name_start'] + index:0{settings['name_width']}d}" if prefix else email

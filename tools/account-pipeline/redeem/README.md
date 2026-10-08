@@ -10,3 +10,5 @@ run.bat --action check [卡密文件]
 ```
 
 未传文件时读取 `..\input\redeem-codes.txt`。结果和缓存默认写入 `..\cache`；可通过 `--result-file`、`--cache-dir` 或 `--run-dir` 覆盖。
+
+总入口 `..\run.bat` 会合并输入目录中的卡密文件；子目录不决定账户配置。需要在兑换前指定账户设置时，在 Sub2API 主配置的 `redeem_codes` 中按卡密填写覆盖项，规则见上级 README。逐卡结果的卡密摘要与邮箱关系写入 manifest，供总入口在兑换后关联配置，不写入明文卡密或账户凭据。

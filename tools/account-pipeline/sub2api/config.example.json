@@ -35,5 +35,16 @@
         "codex_cli_only": false
       }
     }
+  },
+  "redeem_codes": {
+    "PLUS-EXAMPLE": {
+      "group_names": [
+        "西郊-gpt",
+        "西郊-gpt-cursor"
+      ],
+      "extra": {
+        "codex_cli_only": false
+      }
+    }
   }
 }
