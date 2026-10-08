@@ -340,12 +340,13 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
     main_config = sub2api_module.json_file(sub2api_config, "Sub2API 导入配置")
     if not isinstance(main_config, dict):
         raise PipelineError("Sub2API 导入配置必须是 JSON 对象")
-    account_config = InputConfig(main_config, inputs, INPUT_DIR)
+    account_config = None if refresh_tokens else InputConfig(main_config, inputs, INPUT_DIR)
     local_records = inputs.load(
         allow_empty=args.incremental or refresh_tokens,
         conflict_file=runtime_dir / "results" / "input-conflicts.txt",
     )
-    account_config.compile(local_records)
+    if account_config is not None:
+        account_config.compile(local_records, failed_accounts=inputs.failures)
     has_codes = bool(inputs.codes)
     for path in inputs.codes_files:
         print(f"卡密输入：{path}")
@@ -355,10 +356,14 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         print(f"账户文本输入：{path}")
     if not inputs.accounts_files:
         print("账户文本输入：未提供")
-    for path in account_config.config_files:
-        print(f"账户设置配置：{path}")
+    if account_config is not None:
+        for path in account_config.config_files:
+            print(f"账户设置配置：{path}")
     print(f"运行根目录：{runtime_dir}")
     if args.dry_run:
+        if inputs.failures:
+            print(f"检查完成；失败项 {len(inputs.failures)} 个，其他有效账户检查通过；未执行导入。")
+            return 1
         print("检查通过；dry-run 未访问兑换站，也未执行导入。")
         return 0
 
@@ -394,7 +399,9 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
     }
     manifest["codes_files"] = [str(path) for path in inputs.codes_files]
     manifest["accounts_files"] = [str(path) for path in inputs.accounts_files]
-    manifest["config_files"] = [str(path) for path in account_config.config_files]
+    manifest["config_files"] = [str(path) for path in account_config.config_files] if account_config is not None else []
+    account_failures: Dict[str, str] = dict(inputs.failures)
+    manifest["account_failures"] = account_failures
     stage = "redeem" if has_codes else "normalize"
     try:
         write_json(pipeline_manifest, manifest)
@@ -462,14 +469,19 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             data_dir, normalized_dir,
             allow_empty=(args.incremental or refresh_tokens) and not has_codes,
             conflict_file=conflict_file, record_sources=inputs.sources,
+            failed_accounts=account_failures,
         )
         records = normalized_records(Path(normalized["cockpit_input"]))
-        account_configs, config_fingerprints = account_config.compile(
-            records, active_codes=inputs.codes, code_accounts=code_accounts,
-        )
-        incremental_module.write_json(
-            Path(normalized["sub2api_input"]), incremental_module.sub2api_payload(records, account_configs),
-        )
+        if account_config is not None:
+            account_configs, config_fingerprints = account_config.compile(
+                records, active_codes=inputs.codes, code_accounts=code_accounts,
+                failed_accounts=account_failures,
+            )
+            records = [record for record in records if incremental_module.account_key(record) in account_configs]
+            incremental_module.write_json(Path(normalized["cockpit_input"]), records)
+            incremental_module.write_json(
+                Path(normalized["sub2api_input"]), incremental_module.sub2api_payload(records, account_configs),
+            )
         manifest["normalized"] = normalized
         write_json(pipeline_manifest, manifest)
         source_counts = normalized.get("source_counts", {})
@@ -486,7 +498,6 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
 
         if refresh_tokens:
             stage = "token-refresh"
-            records = normalized_records(Path(normalized["cockpit_input"]))
             token_snapshot = token_state_module.read_snapshot(token_snapshot_file)
             token_delta = token_state_module.compare(records, token_snapshot)
             print(
@@ -506,6 +517,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                     token_delta.changed,
                     summary_file=refresh_summary,
                 )
+                account_failures.update(refresh_result.failed_accounts)
                 changed_by_key = {
                     token_state_module.account_key(record): record
                     for record in token_delta.changed
@@ -555,31 +567,27 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                 )
                 write_json(pipeline_manifest, manifest)
                 if incomplete:
-                    return stage_error(
-                        manifest,
-                        pipeline_manifest,
-                        "token-refresh",
-                        1,
-                        f"有 {incomplete} 个账号未完成 token 刷新；日志未包含 token 内容",
-                    )
+                    print(f"[Token] {incomplete} 个账户未完成更新，其余账户已继续处理。")
             else:
                 print("[Token] 没有 token 变化，跳过 Sub2API 和 Cockpit。")
 
             redeem_warning = redeem_code == 2
+            final_code = 1 if account_failures else 0
             manifest.update(
                 {
                     "status": (
-                        "success_with_redeem_warnings"
+                        "partial_failure" if account_failures
+                        else "success_with_redeem_warnings"
                         if redeem_warning
                         else "success"
                     ),
                     "finished_at": datetime.now().isoformat(timespec="seconds"),
-                    "exit_code": 0,
+                    "exit_code": final_code,
                 }
             )
             write_json(pipeline_manifest, manifest)
             print(f"Token 刷新完成。运行记录：{pipeline_manifest}")
-            return 0
+            return final_code
 
         incremental_delta = None
         baseline_sub2api_ids: Dict[str, int] = {}
@@ -591,6 +599,13 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             )
         )
         if args.incremental:
+            token_snapshot = token_state_module.read_snapshot(token_snapshot_file)
+            token_accounts = token_snapshot["accounts"]
+            refresh_keys.update(
+                incremental_module.account_key(record)
+                for record in token_state_module.compare(records, token_snapshot).changed
+                if incremental_module.account_key(record) in token_accounts
+            )
             incremental_state = incremental_module.read_state(incremental_state_file)
             incremental_delta = incremental_module.compare(
                 records,
@@ -606,35 +621,49 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             if is_baseline:
                 stage = "incremental-baseline"
                 baseline_sub2api_ids = sub2api_module.resolve_account_ids(
-                    sub2api_config, records, require_managed=True
+                    sub2api_config, records, require_managed=True,
+                    failed_accounts=account_failures,
                 )
                 baseline_keys = set(baseline_sub2api_ids)
                 incremental_delta.current = {
                     key: record
                     for key, record in incremental_delta.current.items()
-                    if key in baseline_keys
+                    if key not in account_failures
                 }
-                incremental_delta.added = []
+                incremental_delta.added = [
+                    record for key, record in incremental_delta.current.items()
+                    if key not in baseline_keys
+                ]
                 incremental_delta.refreshed = [
                     record
                     for key, record in incremental_delta.current.items()
-                    if key in refresh_keys
+                    if key in baseline_keys and key in refresh_keys
                 ]
                 incremental_delta.configured = [
                     record for key, record in incremental_delta.current.items()
-                    if key not in refresh_keys
+                    if key in baseline_keys and key not in refresh_keys
                 ]
                 incremental_delta.removed = []
                 incremental_delta.unchanged = (
                     len(incremental_delta.current) - len(incremental_delta.refreshed)
-                    - len(incremental_delta.configured)
+                    - len(incremental_delta.configured) - len(incremental_delta.added)
                 )
                 print(
-                    "[增量] 首次运行建立安全基线；同步已归属账号的设置，"
-                    "授权更新账号仍会导入；"
+                    "[增量] 建立基线；同步已归属账号的设置，"
+                    "授权更新及未匹配账号仍会逐账户导入或校验归属；"
                     f"已匹配 {len(baseline_sub2api_ids)} 个工具维护的 Sub2API 账户，"
-                    f"忽略 {len(records) - len(baseline_sub2api_ids)} 个未带归属标记的账户。"
+                    f"待导入或校验 {len(incremental_delta.added)} 个账户。"
                 )
+            unidentified_failure = any(not key.startswith(("email:", "id:")) for key in account_failures)
+            failed_previous_keys = {
+                key for key, item in incremental_delta.previous.items()
+                if key in account_failures
+                or "id:" + str(item.get("account_id", "")).casefold() in account_failures
+            }
+            incremental_delta.removed = [
+                record for record in incremental_delta.removed
+                if not unidentified_failure and incremental_module.account_key(record) not in failed_previous_keys
+            ]
             incremental_files = incremental_module.write_delta(
                 incremental_dir, incremental_delta, account_configs=account_configs,
             )
@@ -730,8 +759,8 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                 if args.incremental and incremental_delta is not None
                 else len(records)
             )
-            if args.incremental and incremental_delta is not None and import_count == 0:
-                print("[增量] 没有新增、授权或配置更新账号，跳过 Sub2API 导入。")
+            if import_count == 0:
+                print("没有待导入或更新的有效账号，跳过 Sub2API 导入。")
                 sub2api_code = 0
             else:
                 if args.incremental:
@@ -754,9 +783,16 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             manifest["sub2api_exit_code"] = sub2api_code
             write_json(pipeline_manifest, manifest)
             if sub2api_code != 0:
-                return stage_error(
-                    manifest, pipeline_manifest, "sub2api", sub2api_code, "Sub2API 导入未完成"
-                )
+                summary = json.loads(sub2api_summary_file.read_text(encoding="utf-8-sig")) if sub2api_summary_file.is_file() else {}
+                failures = summary.get("failed_accounts", {})
+                if not isinstance(failures, dict) or not failures:
+                    return stage_error(
+                        manifest, pipeline_manifest, "sub2api", sub2api_code, "Sub2API 导入未完成"
+                    )
+                account_failures.update(failures)
+                manifest["account_failures"] = account_failures
+                write_json(pipeline_manifest, manifest)
+                print(f"[Sub2API] {len(failures)} 个账户失败，其他成功账户继续交给 Cockpit。")
         else:
             print("已跳过 Sub2API 导入。")
 
@@ -799,7 +835,8 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                 cockpit_code = cockpit_module.execute(
                     cockpit_input, wait_seconds=wait_seconds
                 )
-                print(f"[Cockpit] 已提交 {len(cockpit_records)} 个账号。")
+                if cockpit_code == 0:
+                    print(f"[Cockpit] 已提交 {len(cockpit_records)} 个账号。")
             manifest["cockpit_exit_code"] = cockpit_code
             write_json(pipeline_manifest, manifest)
             if cockpit_code != 0:
@@ -837,6 +874,27 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                 source_keys=source_keys,
                 config_fingerprints=config_fingerprints,
             )
+            # 设置失败保留旧指纹，重跑仍只改设置，避免旧 token 覆盖远端凭据。
+            failed_settings = [
+                record for record in incremental_delta.configured
+                if incremental_module.account_key(record) in account_failures
+            ]
+            previous_settings = incremental_module.build_state(
+                failed_settings, source_scope, sub2api_ids, source_keys=source_keys,
+            )["accounts"]
+            for key, item in previous_settings.items():
+                state_value["accounts"][key] = incremental_delta.previous.get(key, item)
+            failed_credentials = {
+                incremental_module.account_key(record)
+                for record in incremental_delta.refreshed
+                if incremental_module.account_key(record) in account_failures
+            }
+            # 输入失败不等于授权变化；只有实际凭据导入失败才安排凭据重试。
+            for key, item in incremental_delta.previous.items():
+                if (key in account_failures or key in failed_previous_keys or (unidentified_failure and key not in incremental_delta.current)) and key not in state_value["accounts"]:
+                    state_value["accounts"][key] = {
+                        **item, "retry": item.get("retry", False) or key in failed_credentials,
+                    }
             incremental_module.write_state(incremental_state_file, state_value)
             print(f"[增量] 快照已更新：{incremental_state_file}")
 
@@ -852,18 +910,22 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             )
 
         redeem_warning = redeem_code == 2
-        final_code = 0
+        final_code = 1 if account_failures else 0
         manifest.update(
             {
                 "status": (
-                    "success_with_redeem_warnings" if redeem_warning else "success"
+                    "partial_failure" if account_failures
+                    else "success_with_redeem_warnings" if redeem_warning else "success"
                 ),
+                "account_failures": account_failures,
                 "finished_at": datetime.now().isoformat(timespec="seconds"),
                 "exit_code": final_code,
-        }
+            }
         )
         write_json(pipeline_manifest, manifest)
-        if redeem_warning:
+        if account_failures:
+            print(f"流水线已处理完成：失败项 {len(account_failures)} 个，其他有效账户已继续处理。运行记录：{pipeline_manifest}")
+        elif redeem_warning:
             message = "兑换结果含异常，已继续导入；异常仅记录。"
             print(f"流水线完成：{message}运行记录：{pipeline_manifest}")
         else:

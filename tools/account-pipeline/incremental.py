@@ -101,6 +101,7 @@ def _state_accounts(value: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
                 if isinstance(value, str) and value.strip()
             ),
             "config_fingerprint": text(item.get("config_fingerprint")),
+            "retry": item.get("retry") is True,
         }
     return result
 
@@ -132,11 +133,11 @@ def compare(
     refreshed = [
         record
         for key, record in current.items()
-        if key in previous and key in forced_refresh
+        if key in previous and (key in forced_refresh or previous[key].get("retry"))
     ]
     configured = [
         record for key, record in current.items()
-        if key in previous and key not in forced_refresh
+        if key in previous and key not in forced_refresh and not previous[key].get("retry")
         and config_fingerprints is not None
         and config_fingerprints.get(key) != previous[key].get("config_fingerprint")
     ]

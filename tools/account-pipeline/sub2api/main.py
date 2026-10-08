@@ -61,6 +61,7 @@ class Batch:
     records: List[Dict[str, Any]]
     account_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     settings_only_keys: set[str] = field(default_factory=set)
+    failures: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,6 +70,7 @@ class CredentialRefreshResult:
     missing: List[str] = field(default_factory=list)
     manual: List[str] = field(default_factory=list)
     failed: List[str] = field(default_factory=list)
+    failed_accounts: Dict[str, str] = field(default_factory=dict)
 
 
 def json_file(path: Path, label: str) -> Any:
@@ -124,7 +126,7 @@ def integer_value(value: Any, name: str) -> int:
         raise Sub2ApiError(f"{name} 必须是整数")
     try:
         return int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise Sub2ApiError(f"{name} 必须是整数") from exc
 
 
@@ -133,7 +135,7 @@ def number_value(value: Any, name: str) -> float:
         raise Sub2ApiError(f"{name} 必须是数字")
     try:
         result = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise Sub2ApiError(f"{name} 必须是数字") from exc
     if not math.isfinite(result):
         raise Sub2ApiError(f"{name} 必须是有限数字")
@@ -175,6 +177,7 @@ def read_records(
     path: Path, source_type: str, *,
     account_configs: Optional[Dict[str, Dict[str, Any]]] = None,
     settings_only_keys: Optional[set[str]] = None,
+    failed_accounts: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     source = json_file(path, "账号 JSON")
     if isinstance(source, dict) and "accounts" in source:
@@ -182,28 +185,34 @@ def read_records(
         if not isinstance(raw, list):
             raise Sub2ApiError(f"账号 JSON 的 accounts 必须是数组：{path}")
         records = []
-        for item in raw:
-            if not isinstance(item, dict) or not isinstance(item.get("credentials"), dict):
-                continue
-            records.append(item["credentials"])
-            settings_only = item.get("settings_only", False)
-            if not isinstance(settings_only, bool):
-                raise Sub2ApiError(f"settings_only 必须是 true 或 false：{path}")
-            if settings_only:
-                key = record_key(item["credentials"])
-                if key is None:
+        for index, item in enumerate(raw, 1):
+            record = item.get("credentials") if isinstance(item, dict) else None
+            key = record_key(record) if isinstance(record, dict) else record_key(item) if isinstance(item, dict) else None
+            try:
+                if not isinstance(record, dict):
+                    raise Sub2ApiError("账户 credentials 必须是 JSON 对象")
+                settings_only = item.get("settings_only", False)
+                if not isinstance(settings_only, bool):
+                    raise Sub2ApiError(f"settings_only 必须是 true 或 false：{path}")
+                if settings_only and key is None:
                     raise Sub2ApiError(f"仅更新设置的账号缺少 email/account_id：{path}")
-                if settings_only_keys is not None:
+                if "config" in item:
+                    settings = item["config"]
+                    if not isinstance(settings, dict):
+                        raise Sub2ApiError(f"账号配置必须是 JSON 对象：{path}")
+                    if key is None:
+                        raise Sub2ApiError(f"账号配置缺少 email/account_id：{path}")
+                    if account_configs is not None:
+                        account_configs[key] = settings
+                if settings_only and settings_only_keys is not None:
                     settings_only_keys.add(key)
-            if "config" in item:
-                settings = item["config"]
-                if not isinstance(settings, dict):
-                    raise Sub2ApiError(f"账号配置必须是 JSON 对象：{path}")
-                key = record_key(item["credentials"])
-                if key is None:
-                    raise Sub2ApiError(f"账号配置缺少 email/account_id：{path}")
-                if account_configs is not None:
-                    account_configs[key] = settings
+                records.append(record)
+            except Sub2ApiError as exc:
+                if failed_accounts is None:
+                    raise
+                failure_key = key or f"source:{path}:record:{index}"
+                failed_accounts[failure_key] = safe_api_message(str(exc))
+                print(f"[Sub2API][失败] {failure_key}：{failed_accounts[failure_key]}")
     elif isinstance(source, list):
         records = source
     elif isinstance(source, dict):
@@ -218,12 +227,8 @@ def read_records(
         record_type = str(record.get("type", ""))
         if source_type and record_type.lower() != source_type.lower():
             continue
-        if not optional_string(record.get("access_token")) and not optional_string(
-            record.get("accessToken")
-        ):
-            raise Sub2ApiError(f"账号 JSON 中存在缺少 access_token/accessToken 的记录：{path}")
         filtered.append(copy.deepcopy(record))
-    if not filtered:
+    if not filtered and not failed_accounts:
         raise Sub2ApiError(
             f"账号 JSON 中没有符合 source_type='{source_type}' 的记录：{path}"
         )
@@ -263,16 +268,18 @@ def build_batches(
             ) or ""
             account_configs: Dict[str, Dict[str, Any]] = {}
             settings_only_keys: set[str] = set()
+            failures: Dict[str, str] = {}
             records = read_records(path, batch_source, account_configs=account_configs,
-                                   settings_only_keys=settings_only_keys)
+                                   settings_only_keys=settings_only_keys, failed_accounts=failures)
             batches.append(
                 Batch(number, raw_batch, path, str(path), batch_source, groups, records,
-                      account_configs=account_configs, settings_only_keys=settings_only_keys)
+                      account_configs=account_configs, settings_only_keys=settings_only_keys, failures=failures)
             )
         return batches
 
     account_configs = {}
     settings_only_keys = set()
+    failures = {}
     if cockpit_tools:
         try:
             records = load_cockpit_records()
@@ -291,11 +298,11 @@ def build_batches(
         if not path.is_file():
             raise Sub2ApiError(f"找不到账号 JSON：{path}")
         records = read_records(path, source_type, account_configs=account_configs,
-                               settings_only_keys=settings_only_keys)
+                               settings_only_keys=settings_only_keys, failed_accounts=failures)
         label = str(path)
     groups = as_string_list(config.get("defaults", {}).get("group_names", config.get("group_names", [])), "group_names")
     return [Batch(1, None, path, label, source_type, groups, records,
-                  account_configs=account_configs, settings_only_keys=settings_only_keys)]
+                  account_configs=account_configs, settings_only_keys=settings_only_keys, failures=failures)]
 
 
 def loopback_url(value: str, runtime: Dict[str, str]) -> str:
@@ -438,22 +445,25 @@ def record_keys(record: Mapping[str, Any]) -> List[str]:
     return values
 
 
-def account_emails(account: Mapping[str, Any]) -> List[str]:
-    values = []
-    for key in ("email", "name"):
-        value = optional_string(account.get(key))
-        if value and EMAIL_PATTERN.fullmatch(value):
-            values.append(value)
+def account_credentials(account: Mapping[str, Any]) -> Dict[str, Any]:
     credentials = account.get("credentials")
     if isinstance(credentials, str):
         try:
             credentials = json.loads(credentials)
         except (TypeError, ValueError):
             credentials = None
-    if isinstance(credentials, dict):
-        value = optional_string(credentials.get("email"))
+    return credentials if isinstance(credentials, dict) else {}
+
+
+def account_emails(account: Mapping[str, Any]) -> List[str]:
+    values = []
+    for key in ("email", "name"):
+        value = optional_string(account.get(key))
         if value and EMAIL_PATTERN.fullmatch(value):
             values.append(value)
+    value = optional_string(account_credentials(account).get("email"))
+    if value and EMAIL_PATTERN.fullmatch(value):
+        values.append(value)
     return list(dict.fromkeys(values))
 
 
@@ -476,15 +486,7 @@ def is_tool_managed(account: Mapping[str, Any]) -> bool:
 
 def account_keys(account: Mapping[str, Any]) -> List[str]:
     values = ["email:" + email.casefold() for email in account_emails(account)]
-    sources: List[Mapping[str, Any]] = [account]
-    credentials = account.get("credentials")
-    if isinstance(credentials, str):
-        try:
-            credentials = json.loads(credentials)
-        except (TypeError, ValueError):
-            credentials = None
-    if isinstance(credentials, dict):
-        sources.append(credentials)
+    sources: List[Mapping[str, Any]] = [account, account_credentials(account)]
     for source in sources:
         for field_name in ("email", "user_email", "account_email", "accountEmail"):
             email = optional_string(source.get(field_name))
@@ -532,33 +534,34 @@ def refresh_credentials(
 
     _, _, client, token = admin_session(config_file)
     remote_index = account_index(get_accounts(client, token))
-    for record in record_list:
+    for index, record in enumerate(record_list, 1):
+        identity = optional_string(record.get("email")) or optional_string(record.get("account_id")) or "未知账户"
         key = record_key(record)
-        if key is None:
-            raise Sub2ApiError("token 刷新账号缺少 email/account_id")
-        identity = optional_string(record.get("email")) or optional_string(
-            record.get("account_id")
-        ) or key
-        account = matching_account(remote_index, record)
-        if account is None:
-            result.missing.append(identity)
-            print(f"[Token][跳过] Sub2API 中找不到账号：{identity}")
-            continue
-        account_id = account_database_id(account)
-        detail = account_detail(client, token, account_id)
-        if not set(record_keys(record)).intersection(account_keys(detail)):
-            raise Sub2ApiError(f"账号 {identity} 的远端标识已变化；已停止 token 刷新")
-        if not is_tool_managed(detail):
-            result.manual.append(identity)
-            print(f"[Token][跳过] 账号不属于自动化维护：{identity}（ID {account_id}）")
-            continue
-
-        credentials: Dict[str, str] = {}
-        for field_name in TOKEN_CREDENTIAL_FIELDS:
-            value = optional_string(record.get(field_name))
-            if value:
-                credentials[field_name] = value
+        failure_key = key or f"source:token-refresh:record:{index}"
         try:
+            if key is None:
+                raise Sub2ApiError("token 刷新账号缺少 email/account_id")
+            account = matching_account(remote_index, record)
+            if account is None:
+                result.missing.append(identity)
+                result.failed_accounts[key] = "Sub2API 中找不到账户"
+                print(f"[Token][跳过] Sub2API 中找不到账号：{identity}")
+                continue
+            account_id = account_database_id(account)
+            detail = account_detail(client, token, account_id)
+            if key not in account_keys(detail):
+                raise Sub2ApiError(f"账号 {identity} 的远端标识已变化；已停止 token 刷新")
+            if not is_tool_managed(detail):
+                result.manual.append(identity)
+                result.failed_accounts[key] = "账户不属于自动化维护"
+                print(f"[Token][跳过] 账号不属于自动化维护：{identity}（ID {account_id}）")
+                continue
+
+            credentials: Dict[str, str] = {}
+            for field_name in TOKEN_CREDENTIAL_FIELDS:
+                value = optional_string(record.get(field_name))
+                if value:
+                    credentials[field_name] = value
             updated = client.request(
                 "POST",
                 "/admin/accounts/bulk-update",
@@ -574,15 +577,19 @@ def refresh_credentials(
             verified = account_detail(client, token, account_id)
             if not is_tool_managed(verified) or key not in account_keys(verified):
                 raise Sub2ApiError("更新后的账户归属或标识校验失败")
-        except Sub2ApiError:
+            verified_credentials = account_credentials(verified)
+            if any(verified_credentials.get(name) != value for name, value in credentials.items()):
+                raise Sub2ApiError("更新后的账户凭据复核不匹配")
+        except Sub2ApiError as exc:
             result.failed.append(identity)
-            print(f"[Token][失败] Sub2API 凭据未更新：{identity}")
+            result.failed_accounts[failure_key] = safe_api_message(str(exc))
+            print(f"[Token][失败] {identity}：{result.failed_accounts[failure_key]}")
             continue
         result.updated[key] = account_id
         print(f"[Token][完成] 已更新 Sub2API 凭据：{identity}（ID {account_id}）")
 
     if summary_file is not None:
-        write_managed_summary(summary_file, result.updated)
+        write_managed_summary(summary_file, result.updated, failed_accounts=result.failed_accounts)
     print(
         "[Token] Sub2API 更新完成："
         f"成功 {len(result.updated)}，找不到 {len(result.missing)}，"
@@ -591,12 +598,16 @@ def refresh_credentials(
     return result
 
 
-def write_managed_summary(path: Path, account_ids: Dict[str, int]) -> None:
+def write_managed_summary(
+    path: Path, account_ids: Dict[str, int], *,
+    failed_accounts: Optional[Dict[str, str]] = None,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     try:
         temporary.write_text(
-            json.dumps({"version": 2, "accounts": account_ids}, ensure_ascii=False, indent=2)
+            json.dumps({"version": 2, "accounts": account_ids, "failed_accounts": failed_accounts or {}},
+                       ensure_ascii=False, indent=2)
             + "\n",
             encoding="utf-8",
         )
@@ -654,15 +665,12 @@ def safe_api_message(value: Any) -> str:
         text,
     )
     text = re.sub(
-        r"(?i)(\b(?:access|refresh|id)[_-]?token\b\s*(?:=|:)\s*)\S+",
+        r'''(?i)(\b(?:(?:access|refresh|id)[_-]?token|password|passwd|secret|api[_-]?key|authorization)'''
+        r'''\b["']?\s*(?:=|:)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:Bearer|Basic)\s+[^\s,;}]+|[^\s,;}]+)''',
         r"\1<已隐藏>",
         text,
     )
-    text = re.sub(
-        r"(?i)(\b(?:password|passwd|secret|api[_-]?key|authorization)\b\s*(?:=|:)\s*)\S+",
-        r"\1<已隐藏>",
-        text,
-    )
+    text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1<已隐藏>@", text)
     text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "<已隐藏>", text)
     return text[:240]
 
@@ -829,11 +837,12 @@ class AccountConfig:
         })
         self.accounts = copy.deepcopy(parent.accounts) if parent is not None else {}
         self.redeem_codes = copy.deepcopy(parent.redeem_codes) if parent is not None else {}
+        self.failures = dict(parent.failures) if parent is not None else {}
         for field_name, target in (("accounts", self.accounts), ("redeem_codes", self.redeem_codes)):
             entries = config.get(field_name, {})
             if not isinstance(entries, dict):
                 raise Sub2ApiError(f"{field_name} 必须是 JSON 对象")
-            seen = set()
+            seen_keys = set()
             for identifier, override in entries.items():
                 if not isinstance(identifier, str) or not identifier.strip():
                     raise Sub2ApiError(f"{field_name} 包含空标识")
@@ -846,22 +855,26 @@ class AccountConfig:
                     if any(char.isspace() for char in identifier):
                         raise Sub2ApiError("redeem_codes 的键必须是单个兑换码")
                     key = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
-                if key in seen:
+                if key in seen_keys:
                     raise Sub2ApiError(f"{field_name} 包含重复标识")
-                seen.add(key)
-                self._validate_override(override, field_name)
-                previous = target.get(key, {})
-                override = {**previous, **override}
-                if "extra" in override:
-                    override["extra"] = {**previous.get("extra", {}), **override["extra"]}
-                settings = account_settings({
-                    **self.defaults, **override,
-                    "extra": {**self.defaults["extra"], **override.get("extra", {})},
-                })
-                target[key] = {
-                    name: copy.deepcopy(value if name == "extra" else settings[name])
-                    for name, value in override.items()
-                }
+                seen_keys.add(key)
+                try:
+                    self._validate_override(override, field_name)
+                    previous = target.get(key, {})
+                    override = {**previous, **override}
+                    if "extra" in override:
+                        override["extra"] = {**previous.get("extra", {}), **override["extra"]}
+                    settings = account_settings({
+                        **self.defaults, **override,
+                        "extra": {**self.defaults["extra"], **override.get("extra", {})},
+                    })
+                    target[key] = {
+                        name: copy.deepcopy(value if name == "extra" else settings[name])
+                        for name, value in override.items()
+                    }
+                except Sub2ApiError as exc:
+                    failure_key = ("email:" if field_name == "accounts" else "code:") + key
+                    self.failures[failure_key] = safe_api_message(str(exc))
 
     @staticmethod
     def _validate_override(value: Any, label: str) -> None:
@@ -874,6 +887,9 @@ class AccountConfig:
 
     def resolve(self, email: str, overrides: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         overrides = overrides or {}
+        failure = self.failures.get("email:" + email.strip().casefold())
+        if failure:
+            raise Sub2ApiError(failure)
         account = self.accounts.get(email.strip().casefold(), {})
         return account_settings({
             **self.defaults, **overrides, **account,
@@ -883,6 +899,8 @@ class AccountConfig:
     def compile(
         self, records: Sequence[Dict[str, Any]], *, active_codes: Iterable[str] = (),
         code_accounts: Optional[Mapping[str, Optional[str]]] = None,
+        failed_accounts: Optional[Dict[str, str]] = None,
+        record_indices: Optional[Mapping[str, int]] = None,
     ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
         if code_accounts is not None and not isinstance(code_accounts, dict):
             raise Sub2ApiError("兑换码与账户的对应关系必须是 JSON 对象")
@@ -890,43 +908,69 @@ class AccountConfig:
         code_overrides: Dict[str, Dict[str, Any]] = {}
         for code in active_codes:
             digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
-            if digest not in self.redeem_codes:
+            code_failure = self.failures.get("code:" + digest)
+            if digest not in self.redeem_codes and not code_failure:
                 continue
             if code_accounts is None or digest not in code_accounts:
                 raise Sub2ApiError("兑换结果缺少已配置卡密的账户对应关系；已停止导入")
             email = code_accounts[digest]
             if email is None:
                 continue  # 失败卡密没有账户，不影响其他成功输入。
-            if not isinstance(email, str) or email.strip().casefold() not in emails:
+            if not isinstance(email, str) or not EMAIL_PATTERN.fullmatch(email.strip()):
                 raise Sub2ApiError("已配置卡密的账户无法匹配下载内容；已停止导入")
             email = email.strip().casefold()
+            if email not in emails:
+                if failed_accounts is None:
+                    raise Sub2ApiError("已配置卡密的账户无法匹配下载内容；已停止导入")
+                failed_accounts.setdefault("email:" + email, "已配置卡密的账户无法匹配有效下载内容")
+                continue
+            if code_failure:
+                if failed_accounts is None:
+                    raise Sub2ApiError(code_failure)
+                failed_accounts["email:" + email] = code_failure
+                continue
             combined = code_overrides.setdefault(email, {})
             account = self.accounts.get(email, {})
-            for name, value in self.redeem_codes[digest].items():
-                if name == "group_names":
-                    combined[name] = sorted(set(combined.get(name, [])) | set(value))
-                    continue
-                values = value.items() if name == "extra" else [(name, value)]
-                target = combined.setdefault("extra", {}) if name == "extra" else combined
-                final = account.get("extra", {}) if name == "extra" else account
-                for field_name, field_value in values:
-                    if field_name in target and comparable(target[field_name]) != comparable(field_value) and field_name not in final:
-                        field_label = f"extra.{field_name}" if name == "extra" else field_name
-                        raise Sub2ApiError(f"账户 {email} 的兑换码配置冲突：{field_label}；已停止导入")
-                    target[field_name] = field_value
+            try:
+                for name, value in self.redeem_codes[digest].items():
+                    if name == "group_names":
+                        combined[name] = sorted(set(combined.get(name, [])) | set(value))
+                        continue
+                    values = value.items() if name == "extra" else [(name, value)]
+                    target = combined.setdefault("extra", {}) if name == "extra" else combined
+                    final = account.get("extra", {}) if name == "extra" else account
+                    for field_name, field_value in values:
+                        if field_name in target and comparable(target[field_name]) != comparable(field_value) and field_name not in final:
+                            field_label = f"extra.{field_name}" if name == "extra" else field_name
+                            raise Sub2ApiError(f"账户 {email} 的兑换码配置冲突：{field_label}；已停止导入")
+                        target[field_name] = field_value
+            except Sub2ApiError as exc:
+                if failed_accounts is None:
+                    raise
+                failed_accounts["email:" + email] = safe_api_message(str(exc))
+                print(f"[配置][失败] email:{email}：{failed_accounts['email:' + email]}")
         configs, fingerprints = {}, {}
         for index, record in enumerate(records):
             key = record_key(record)
             if key is None:
                 raise Sub2ApiError("账户缺少 email/account_id，无法解析配置")
-            email = str(record.get("email", "")).strip()
-            settings = self.resolve(email, code_overrides.get(email.casefold()))
-            prefix = settings["name_prefix"]
-            settings["name"] = (
-                prefix + f"{settings['name_start'] + index:0{settings['name_width']}d}" if prefix else email
-            )
-            configs[key] = settings
-            fingerprints[key] = hashlib.sha256(comparable(settings).encode("utf-8")).hexdigest()
+            if failed_accounts is not None and key in failed_accounts:
+                continue
+            try:
+                email = str(record.get("email", "")).strip()
+                settings = self.resolve(email, code_overrides.get(email.casefold()))
+                prefix = settings["name_prefix"]
+                name_index = index if record_indices is None else record_indices[key]
+                settings["name"] = (
+                    prefix + f"{settings['name_start'] + name_index:0{settings['name_width']}d}" if prefix else email
+                )
+                configs[key] = settings
+                fingerprints[key] = hashlib.sha256(comparable(settings).encode("utf-8")).hexdigest()
+            except Sub2ApiError as exc:
+                if failed_accounts is None:
+                    raise
+                failed_accounts[key] = safe_api_message(str(exc))
+                print(f"[配置][失败] {key}：{failed_accounts[key]}")
         return configs, fingerprints
 
 
@@ -973,58 +1017,69 @@ def run_import(
     config_dir = config_path.parent
     batches = build_batches(config_value, config_dir, input_file, cockpit_tools)
 
-    groups_value = client.request("GET", "/admin/groups/all?include_inactive=true", token=token)
-    groups = groups_value if isinstance(groups_value, list) else []
-    if not isinstance(groups_value, list):
+    groups = client.request("GET", "/admin/groups/all?include_inactive=true", token=token)
+    if not isinstance(groups, list):
         raise Sub2ApiError("Sub2API 分组列表格式无效")
     prepared: Dict[tuple[int, int], Dict[str, Any]] = {}
+    failures: Dict[str, str] = {key: message for batch in batches for key, message in batch.failures.items()}
     proxies: Optional[List[Dict[str, Any]]] = None
     for batch in batches:
         for index, record in enumerate(batch.records):
-            key = record_key(record)
-            if key is None:
-                raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email/account_id")
-            overrides = batch.account_configs.get(key, {})
-            base = account_config.resolve(str(record.get("email", "")), {
-                "group_names": batch.group_names, **(batch.config or {}),
-            })
-            combined = {**base, **overrides}
-            combined["extra"] = {
-                **base["extra"],
-                **(overrides.get("extra") or {}),
-            }
-            settings = account_settings(combined)
-            settings["group_ids"] = []
-            for group_name in settings["group_names"]:
-                group = resolve_unique(groups, group_name, "分组")
-                if group.get("platform") != "openai" or group.get("status") != "active":
-                    raise Sub2ApiError(f"分组 '{group_name}' 必须是启用状态的 OpenAI 分组")
-                try:
-                    settings["group_ids"].append(int(group["id"]))
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise Sub2ApiError(f"分组 '{group_name}' 的 ID 无效") from exc
-            settings["proxy_id"] = None
-            proxy_name = settings["proxy_name"]
-            if proxy_name:
-                if proxies is None:
-                    proxies = client.request("GET", "/admin/proxies/all", token=token)
-                    if not isinstance(proxies, list):
-                        raise Sub2ApiError("Sub2API 代理列表格式无效")
-                proxy = resolve_unique(proxies, proxy_name, "代理")
-                if proxy.get("status") != "active":
-                    raise Sub2ApiError(f"代理 '{proxy_name}' 当前未启用")
-                try:
-                    settings["proxy_id"] = int(proxy["id"])
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise Sub2ApiError(f"代理 '{proxy_name}' 的 ID 无效") from exc
-            prefix = settings["name_prefix"]
-            settings["name"] = overrides.get("name") or (
-                prefix + f"{settings['name_start'] + index:0{settings['name_width']}d}"
-                if prefix else str(record.get("email", "")).strip()
-            )
-            if not settings["name"]:
-                raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email，无法按邮箱命名")
-            prepared[(batch.index, index)] = settings
+            key = record_key(record) or f"batch:{batch.index}:record:{index + 1}"
+            if key in failures:
+                continue
+            try:
+                if record_key(record) is None:
+                    raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email/account_id")
+                if not optional_string(record.get("access_token")) and not optional_string(record.get("accessToken")):
+                    raise Sub2ApiError("账户缺少 access_token/accessToken")
+                overrides = batch.account_configs.get(key, {})
+                if "extra" in overrides and not isinstance(overrides["extra"], dict):
+                    raise Sub2ApiError("账户配置 extra 必须是 JSON 对象")
+                base = account_config.resolve(str(record.get("email", "")), {
+                    "group_names": batch.group_names, **(batch.config or {}),
+                })
+                combined = {**base, **overrides}
+                combined["extra"] = {
+                    **base["extra"],
+                    **(overrides.get("extra") or {}),
+                }
+                settings = account_settings(combined)
+                settings["group_ids"] = []
+                for group_name in settings["group_names"]:
+                    group = resolve_unique(groups, group_name, "分组")
+                    if group.get("platform") != "openai" or group.get("status") != "active":
+                        raise Sub2ApiError(f"分组 '{group_name}' 必须是启用状态的 OpenAI 分组")
+                    try:
+                        settings["group_ids"].append(int(group["id"]))
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise Sub2ApiError(f"分组 '{group_name}' 的 ID 无效") from exc
+                settings["proxy_id"] = None
+                proxy_name = settings["proxy_name"]
+                if proxy_name:
+                    if proxies is None:
+                        proxies_value = client.request("GET", "/admin/proxies/all", token=token)
+                        if not isinstance(proxies_value, list):
+                            raise Sub2ApiError("Sub2API 代理列表格式无效")
+                        proxies = proxies_value
+                    proxy = resolve_unique(proxies, proxy_name, "代理")
+                    if proxy.get("status") != "active":
+                        raise Sub2ApiError(f"代理 '{proxy_name}' 当前未启用")
+                    try:
+                        settings["proxy_id"] = int(proxy["id"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise Sub2ApiError(f"代理 '{proxy_name}' 的 ID 无效") from exc
+                prefix = settings["name_prefix"]
+                settings["name"] = overrides.get("name") or (
+                    prefix + f"{settings['name_start'] + index:0{settings['name_width']}d}"
+                    if prefix else str(record.get("email", "")).strip()
+                )
+                if not settings["name"]:
+                    raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email，无法按邮箱命名")
+                prepared[(batch.index, index)] = settings
+            except Sub2ApiError as exc:
+                failures[key] = safe_api_message(str(exc))
+                print(f"[Sub2API][失败] {key}：{failures[key]}")
     managed_extra = sorted(
         {name for settings in prepared.values() for name in settings["extra"]}
         - {"imported_at", "access_token_sha256", OWNERSHIP_EXTRA_KEY}
@@ -1043,190 +1098,194 @@ def run_import(
     created = modified = unchanged = skipped = manual_skipped = 0
     for batch in batches:
         for index, record in enumerate(batch.records):
-            settings = prepared[(batch.index, index)]
-            claim_existing_accounts = settings["claim_existing_accounts"]
-            key = record_key(record)
-            if key is None:
-                raise Sub2ApiError(
-                    f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email/account_id"
-                )
-            existing_account = (
-                matching_account(remote_index, record) if not what_if else None
-            )
-            if existing_account is not None:
-                existing_account = account_detail(
-                    client, token, account_database_id(existing_account)
-                )
-                if not set(record_keys(record)).intersection(account_keys(existing_account)):
-                    raise Sub2ApiError(
-                        f"第 {batch.index} 个批次第 {index + 1} 个账号的远端标识已变化；已停止导入"
-                    )
-            if (
-                existing_account is not None
-                and not is_tool_managed(existing_account)
-                and not claim_existing_accounts
-            ):
-                existing_id = account_database_id(existing_account)
-                print(
-                    f"跳过手动账户：{account_label(None, existing_id, str(record.get('email', '')), batch.index, index + 1)}"
-                )
-                manual_skipped += 1
+            if (batch.index, index) not in prepared:
                 continue
-            existing_id = account_database_id(existing_account) if existing_account else 0
-            if (
-                existing_account is not None
-                and not is_tool_managed(existing_account)
-                and claim_existing_accounts
-            ):
-                print(
-                    f"认领已有账户：{account_label(None, existing_id, str(record.get('email', '')), batch.index, index + 1)}"
-                )
-            if existing_id > 0:
-                managed_ids[key] = existing_id
-            if key in batch.settings_only_keys and existing_id <= 0 and not what_if:
-                raise Sub2ApiError("仅更新设置的账号在 Sub2API 中不存在；请先完成账户导入")
-            name = settings["name"]
-            expires_at = expires_timestamp(settings["expires_at"])
-            update_payload = {
-                "name": name,
-                "notes": settings["notes"],
-                "proxy_id": settings["proxy_id"] or 0,
-                "concurrency": settings["concurrency"],
-                "priority": settings["priority"],
-                "rate_multiplier": settings["rate_multiplier"],
-                "load_factor": settings["load_factor"] or 0,
-                "group_ids": settings["group_ids"],
-                # 更新接口用 0 清除可选值；省略或 null 会保留旧设置。
-                "expires_at": expires_at or 0,
-                "auto_pause_on_expired": settings["auto_pause_on_expired"],
-                "extra": settings["extra"],
-            }
-            if what_if:
-                print(
-                    f"校验通过：{name}；分组={', '.join(settings['group_names']) or '无'}；"
-                    f"代理={settings['proxy_name'] or '直连'}；并发={settings['concurrency']}；"
-                    f"优先级={settings['priority']}；倍率={settings['rate_multiplier']}"
-                )
-                continue
-
-            if key in batch.settings_only_keys:
-                update_payload["extra"] = {**account_extra(existing_account), **settings["extra"]}
-                account_snapshots[str(existing_id)] = snapshot(existing_account, managed_extra)
-                client.request("PUT", f"/admin/accounts/{existing_id}", token=token, body=update_payload)
-                result = {"failed": 0, "items": [{"action": "updated", "account_id": existing_id}]}
-            else:
-                payload = {
-                    **update_payload,
-                    "content": json.dumps(record, ensure_ascii=False, separators=(",", ":")),
-                    "proxy_id": settings["proxy_id"],
-                    "update_existing": existing_id > 0,
-                }
-                for field_name, value in (("load_factor", settings["load_factor"]), ("expires_at", expires_at)):
-                    if value is None:
-                        payload.pop(field_name)
-                result = client.request(
-                    "POST",
-                    "/admin/accounts/import/codex-session",
-                    token=token,
-                    body=payload,
-                )
-            if not isinstance(result, dict):
-                raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号返回格式无效")
-            failed = result_count(result, "failed")
-            if failed > 0:
-                detail = failed_item_message(result, index + 1)
-                detail_suffix = f"：{detail}" if detail else ""
-                raise Sub2ApiError(
-                    f"第 {batch.index} 个批次第 {index + 1} 个账号导入失败"
-                    f"{detail_suffix}；凭据内容未输出"
-                )
-            items = result.get("items", [])
-            if not isinstance(items, list):
-                items = []
-            item = items[0] if items and isinstance(items[0], dict) else {}
-            action = str(item.get("action", ""))
-            if not action:
-                action = next(
-                    (
-                        candidate
-                        for candidate, key in (
-                            ("created", "created"),
-                            ("updated", "updated"),
-                            ("skipped", "skipped"),
-                        )
-                        if result_count(result, key) > 0
-                    ),
-                    "",
-                )
+            key = record_key(record) or f"batch:{batch.index}:record:{index + 1}"
             try:
-                account_id = int(item.get("account_id", item.get("id", 0)) or 0)
-            except (TypeError, ValueError):
-                account_id = 0
-            if account_id <= 0 and existing_id > 0:
-                account_id = existing_id
-            fallback_name = str(item.get("name", name))
-            before = account_snapshots.get(str(account_id))
-            after = None
-            if account_id > 0 and action in ("created", "updated", "skipped"):
-                after_value = account_detail(client, token, account_id)
-                if not is_tool_managed(after_value):
-                    raise Sub2ApiError(
-                        f"账户 ID {account_id} 导入后未带工具归属标记；已停止写入增量映射"
-                    )
-                if key not in account_keys(after_value):
-                    raise Sub2ApiError(
-                        f"账户 ID {account_id} 导入后的账号标识不匹配；已停止写入增量映射"
-                    )
-                if existing_id > 0 and account_id != existing_id:
-                    raise Sub2ApiError(
-                        f"账户 ID {account_id} 与导入前确认的 ID {existing_id} 不一致；已停止写入增量映射"
-                    )
-                if key not in batch.settings_only_keys and action in ("created", "updated"):
-                    # 凭据导入接口不会更新名称、备注或清空分组，再用设置接口统一行为。
-                    update_payload["extra"] = {**account_extra(after_value), **settings["extra"]}
-                    if not optional_string(record.get("refresh_token")):
-                        # 保留上游为 accessToken-only 账户计算的到期和自动暂停策略。
-                        update_payload.pop("expires_at")
-                        update_payload.pop("auto_pause_on_expired")
-                    client.request("PUT", f"/admin/accounts/{account_id}", token=token, body=update_payload)
-                    after_value = account_detail(client, token, account_id)
-                after = snapshot(after_value, managed_extra)
-                managed_ids[key] = account_id
-                account_snapshots[str(account_id)] = after
-                remote_accounts = [
-                    account
-                    for account in remote_accounts
-                    if account_database_id(account) != account_id
-                ]
-                remote_accounts.append(after_value)
-                remote_index = account_index(remote_accounts)
-            elif action in ("created", "updated"):
-                raise Sub2ApiError(
-                    f"第 {batch.index} 个批次第 {index + 1} 个账号导入成功但没有返回账户 ID"
+                settings = prepared[(batch.index, index)]
+                claim_existing_accounts = settings["claim_existing_accounts"]
+                existing_account = (
+                    matching_account(remote_index, record) if not what_if else None
                 )
-            label = account_label(after, account_id, fallback_name, batch.index, index + 1)
-            if action == "created":
-                created += 1
-                print(f"新增账户：{label}")
-            elif action == "updated":
-                fields = changed_fields(before, after) if before is not None and after is not None else ["无法确定（缺少账户快照）"]
-                if fields:
-                    modified += 1
-                    print(f"修改账户：{label}；字段：{'、'.join(fields)}")
+                if existing_account is not None:
+                    existing_account = account_detail(
+                        client, token, account_database_id(existing_account)
+                    )
+                    if key not in account_keys(existing_account):
+                        raise Sub2ApiError(
+                            f"第 {batch.index} 个批次第 {index + 1} 个账号的远端标识已变化；已停止导入"
+                        )
+                if (
+                    existing_account is not None
+                    and not is_tool_managed(existing_account)
+                    and not claim_existing_accounts
+                ):
+                    existing_id = account_database_id(existing_account)
+                    print(
+                        f"跳过手动账户：{account_label(None, existing_id, str(record.get('email', '')), batch.index, index + 1)}"
+                    )
+                    manual_skipped += 1
+                    continue
+                existing_id = account_database_id(existing_account) if existing_account else 0
+                if (
+                    existing_account is not None
+                    and not is_tool_managed(existing_account)
+                    and claim_existing_accounts
+                ):
+                    print(
+                        f"认领已有账户：{account_label(None, existing_id, str(record.get('email', '')), batch.index, index + 1)}"
+                    )
+                if key in batch.settings_only_keys and existing_id <= 0 and not what_if:
+                    raise Sub2ApiError("仅更新设置的账号在 Sub2API 中不存在；请先完成账户导入")
+                name = settings["name"]
+                expires_at = expires_timestamp(settings["expires_at"])
+                update_payload = {
+                    "name": name,
+                    "notes": settings["notes"],
+                    "proxy_id": settings["proxy_id"] or 0,
+                    "concurrency": settings["concurrency"],
+                    "priority": settings["priority"],
+                    "rate_multiplier": settings["rate_multiplier"],
+                    "load_factor": settings["load_factor"] or 0,
+                    "group_ids": settings["group_ids"],
+                    # 更新接口用 0 清除可选值；省略或 null 会保留旧设置。
+                    "expires_at": expires_at or 0,
+                    "auto_pause_on_expired": settings["auto_pause_on_expired"],
+                    "extra": settings["extra"],
+                }
+                if what_if:
+                    print(
+                        f"校验通过：{name}；分组={', '.join(settings['group_names']) or '无'}；"
+                        f"代理={settings['proxy_name'] or '直连'}；并发={settings['concurrency']}；"
+                        f"优先级={settings['priority']}；倍率={settings['rate_multiplier']}"
+                    )
+                    continue
+
+                if key in batch.settings_only_keys:
+                    update_payload["extra"] = {**account_extra(existing_account), **settings["extra"]}
+                    account_snapshots[str(existing_id)] = snapshot(existing_account, managed_extra)
+                    client.request("PUT", f"/admin/accounts/{existing_id}", token=token, body=update_payload)
+                    result = {"failed": 0, "items": [{"action": "updated", "account_id": existing_id}]}
                 else:
-                    unchanged += 1
-            elif action == "skipped":
-                skipped += 1
-            else:
-                raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号返回了无法识别的导入结果")
+                    payload = {
+                        **update_payload,
+                        "content": json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                        "proxy_id": settings["proxy_id"],
+                        "update_existing": existing_id > 0,
+                    }
+                    for field_name, value in (("load_factor", settings["load_factor"]), ("expires_at", expires_at)):
+                        if value is None:
+                            payload.pop(field_name)
+                    result = client.request(
+                        "POST",
+                        "/admin/accounts/import/codex-session",
+                        token=token,
+                        body=payload,
+                    )
+                if not isinstance(result, dict):
+                    raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号返回格式无效")
+                failed = result_count(result, "failed")
+                if failed > 0:
+                    detail = failed_item_message(result, 1)
+                    detail_suffix = f"：{detail}" if detail else ""
+                    raise Sub2ApiError(
+                        f"第 {batch.index} 个批次第 {index + 1} 个账号导入失败"
+                        f"{detail_suffix}；凭据内容未输出"
+                    )
+                items = result.get("items", [])
+                if not isinstance(items, list):
+                    items = []
+                item = items[0] if items and isinstance(items[0], dict) else {}
+                action = str(item.get("action", ""))
+                if not action:
+                    action = next(
+                        (
+                            candidate
+                            for candidate, key in (
+                                ("created", "created"),
+                                ("updated", "updated"),
+                                ("skipped", "skipped"),
+                            )
+                            if result_count(result, key) > 0
+                        ),
+                        "",
+                    )
+                try:
+                    account_id = int(item.get("account_id", item.get("id", 0)) or 0)
+                except (TypeError, ValueError):
+                    account_id = 0
+                if account_id <= 0 and existing_id > 0:
+                    account_id = existing_id
+                fallback_name = str(item.get("name", name))
+                before = account_snapshots.get(str(account_id))
+                after = None
+                if account_id > 0 and action in ("created", "updated", "skipped"):
+                    after_value = account_detail(client, token, account_id)
+                    if not is_tool_managed(after_value):
+                        raise Sub2ApiError(
+                            f"账户 ID {account_id} 导入后未带工具归属标记；已停止写入增量映射"
+                        )
+                    if key not in account_keys(after_value):
+                        raise Sub2ApiError(
+                            f"账户 ID {account_id} 导入后的账号标识不匹配；已停止写入增量映射"
+                        )
+                    if existing_id > 0 and account_id != existing_id:
+                        raise Sub2ApiError(
+                            f"账户 ID {account_id} 与导入前确认的 ID {existing_id} 不一致；已停止写入增量映射"
+                        )
+                    if key not in batch.settings_only_keys and action in ("created", "updated"):
+                        # 凭据导入接口不会更新名称、备注或清空分组，再用设置接口统一行为。
+                        update_payload["extra"] = {**account_extra(after_value), **settings["extra"]}
+                        if not optional_string(record.get("refresh_token")):
+                            # 保留上游为 accessToken-only 账户计算的到期和自动暂停策略。
+                            update_payload.pop("expires_at")
+                            update_payload.pop("auto_pause_on_expired")
+                        client.request("PUT", f"/admin/accounts/{account_id}", token=token, body=update_payload)
+                        after_value = account_detail(client, token, account_id)
+                        if not is_tool_managed(after_value) or key not in account_keys(after_value):
+                            raise Sub2ApiError(f"账户 ID {account_id} 设置更新后的归属或标识不匹配")
+                    after = snapshot(after_value, managed_extra)
+                    managed_ids[key] = account_id
+                    account_snapshots[str(account_id)] = after
+                    remote_accounts = [
+                        account
+                        for account in remote_accounts
+                        if account_database_id(account) != account_id
+                    ]
+                    remote_accounts.append(after_value)
+                    remote_index = account_index(remote_accounts)
+                elif action in ("created", "updated"):
+                    raise Sub2ApiError(
+                        f"第 {batch.index} 个批次第 {index + 1} 个账号导入成功但没有返回账户 ID"
+                    )
+                label = account_label(after, account_id, fallback_name, batch.index, index + 1)
+                if action == "created":
+                    created += 1
+                    print(f"新增账户：{label}")
+                elif action == "updated":
+                    fields = changed_fields(before, after) if before is not None and after is not None else ["无法确定（缺少账户快照）"]
+                    if fields:
+                        modified += 1
+                        print(f"修改账户：{label}；字段：{'、'.join(fields)}")
+                    else:
+                        unchanged += 1
+                elif action == "skipped":
+                    skipped += 1
+                else:
+                    raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号返回了无法识别的导入结果")
+
+            except Sub2ApiError as exc:
+                managed_ids.pop(key, None)
+                failures[key] = safe_api_message(str(exc))
+                print(f"[Sub2API][失败] {key}：{failures[key]}")
 
     if not what_if:
         skipped_total = skipped + manual_skipped
         suffix = f"，跳过 {skipped_total}" if skipped_total else ""
-        print(f"导入完成：新增 {created}，修改 {modified}，无变化 {unchanged}{suffix}")
+        print(f"导入完成：新增 {created}，修改 {modified}，无变化 {unchanged}{suffix}，失败 {len(failures)}")
         if summary_file is not None:
-            write_managed_summary(summary_file, managed_ids)
-    return 0
+            write_managed_summary(summary_file, managed_ids, failed_accounts=failures)
+    return 1 if failures else 0
 
 
 def resolve_account_ids(
@@ -1234,6 +1293,7 @@ def resolve_account_ids(
     records: Iterable[Dict[str, Any]],
     *,
     require_managed: bool = True,
+    failed_accounts: Optional[Dict[str, str]] = None,
 ) -> Dict[str, int]:
     """只读查询输入账号对应的、可安全确认的 Sub2API 数据库 ID。"""
     record_list = list(records)
@@ -1257,20 +1317,29 @@ def resolve_account_ids(
             continue
         for key in set(account_keys(account)) & wanted.keys():
             canonical = wanted[key]
-            detail = details.get(account_id)
-            if detail is None:
-                detail = account_detail(client, token, account_id)
-                details[account_id] = detail
-            if require_managed and not is_tool_managed(detail):
+            if failed_accounts is not None and canonical in failed_accounts:
                 continue
-            if key not in account_keys(detail):
-                continue
-            previous = result.get(canonical)
-            if previous is not None and previous != account_id:
-                raise Sub2ApiError(
-                    f"账号 {canonical} 匹配到多个 Sub2API 账户；已停止以避免误匹配"
-                )
-            result[canonical] = account_id
+            try:
+                detail = details.get(account_id)
+                if detail is None:
+                    detail = account_detail(client, token, account_id)
+                    details[account_id] = detail
+                if require_managed and not is_tool_managed(detail):
+                    continue
+                if canonical not in account_keys(detail):
+                    raise Sub2ApiError(f"账户 {canonical} 的远端主标识不匹配")
+                previous = result.get(canonical)
+                if previous is not None and previous != account_id:
+                    raise Sub2ApiError(
+                        f"账号 {canonical} 匹配到多个 Sub2API 账户；已停止以避免误匹配"
+                    )
+                result[canonical] = account_id
+            except Sub2ApiError as exc:
+                if failed_accounts is None:
+                    raise
+                result.pop(canonical, None)
+                failed_accounts[canonical] = safe_api_message(str(exc))
+                print(f"[Sub2API][失败] {canonical}：{failed_accounts[canonical]}")
     return result
 
 

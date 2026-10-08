@@ -201,16 +201,15 @@ class DirectoryConfigTests(unittest.TestCase):
             self.assertEqual(client.imports, [])
             self.assertTrue(all("credentials" not in value for value in client.updates))
 
-    def test_invalid_directory_config_stops_all_modes_before_network_access(self):
+    def test_invalid_shared_directory_config_stops_before_network_access(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.input(root, [record("one@example.com")], name="cursor/accounts.txt", codes="CARD\n")
             config_file = root / "main.json"
             config_file.write_text("{}", encoding="utf-8")
-            for value in ({"access_token": "PRIVATE"}, {"sub2api_url": "http://elsewhere"}, {"extra": []},
-                          {"redeem_codes": {"PRIVATE-CARD": {"priority": 0}}}):
+            for value in ({"access_token": "PRIVATE"}, {"sub2api_url": "http://elsewhere"}, {"extra": []}):
                 self.configuration(root, "cursor", value)
-                for mode in ({}, {"incremental_mode": True}, {"refresh_tokens": True}):
+                for mode in ({}, {"incremental_mode": True}):
                     with self.subTest(value=value, mode=mode), patch.object(pipeline, "INPUT_DIR", root / "input"), patch.object(
                         sub2api, "admin_session", side_effect=AssertionError("logged in")
                     ), patch.object(redeem, "execute", side_effect=AssertionError("redeemed")), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

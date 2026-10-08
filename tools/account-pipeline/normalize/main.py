@@ -69,11 +69,13 @@ def candidate_records(value: Any) -> Iterable[Dict[str, Any]]:
         return
 
     credentials = value.get("credentials")
+    candidate = value
     if isinstance(credentials, dict):
         merged = merge_record(value, credentials)
         if has_token(merged):
             yield merged
             return
+        candidate = merged
 
     if has_token(value):
         yield value
@@ -82,14 +84,10 @@ def candidate_records(value: Any) -> Iterable[Dict[str, Any]]:
     accounts = value.get("accounts")
     if isinstance(accounts, list):
         for item in accounts:
-            if isinstance(item, dict) and isinstance(item.get("credentials"), dict):
-                merged = merge_record(item, item["credentials"])
-                if has_token(merged):
-                    yield merged
-            else:
-                yield from candidate_records(item)
+            yield from candidate_records(item)
         return
 
+    found = False
     for key in ("data", "items", "records", "result", "auth", "tokens"):
         nested = value.get(key)
         if isinstance(nested, (dict, list)):
@@ -97,13 +95,30 @@ def candidate_records(value: Any) -> Iterable[Dict[str, Any]]:
                 merged = merge_record(value, nested)
                 if has_token(merged):
                     yield merged
+                    found = True
                     continue
-            yield from candidate_records(nested)
+            for record in candidate_records(nested):
+                yield record
+                found = True
+    if not found and (
+        pick_string(candidate, EMAIL_KEYS) or pick_string(candidate, ACCOUNT_ID_KEYS)
+        or text_value(candidate.get("type")) in SUPPORTED_TYPES
+        or pick_string(candidate, REFRESH_KEYS + ID_TOKEN_KEYS)
+    ):
+        yield candidate
 
 
 def parse_documents(text: str, label: str) -> List[Any]:
     """读取一个或多个连续 JSON 文档，文档之间允许空行。"""
-    decoder = json.JSONDecoder()
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise NormalizeError(f"{label}包含重复 JSON 键")
+            value[key] = item
+        return value
+
+    decoder = json.JSONDecoder(object_pairs_hook=unique_object)
     values: List[Any] = []
     offset = 0
     length = len(text)
@@ -225,11 +240,11 @@ def first_claim(
 def canonical_record(record: Dict[str, Any], number: int) -> Dict[str, Any]:
     record_type = text_value(record.get("type"))
     if record_type and record_type.lower() not in SUPPORTED_TYPES:
-        raise NormalizeError(f"第 {number} 个账号类型不受支持：{record_type}")
+        raise NormalizeError(f"第 {number} 个账号类型不受支持")
     if record_type and record_type.lower() == "oauth":
         platform = text_value(record.get("platform"))
         if platform and platform.lower() not in SUPPORTED_PLATFORMS:
-            raise NormalizeError(f"第 {number} 个账号平台不受支持：{platform}")
+            raise NormalizeError(f"第 {number} 个账号平台不受支持")
 
     access_token = pick_string(record, TOKEN_KEYS)
     if not access_token:
@@ -287,6 +302,23 @@ def record_key(record: Dict[str, Any]) -> str:
     raise NormalizeError("标准化账号缺少 email/account_id，无法建立来源标识")
 
 
+def canonical_sources(
+    records: Iterable[Tuple[Dict[str, Any], str]], failures: Dict[str, str],
+) -> List[Tuple[Dict[str, Any], str]]:
+    result = []
+    for number, (record, source) in enumerate(records, 1):
+        try:
+            result.append((canonical_record(record, number), source))
+        except NormalizeError as exc:
+            email = pick_string(record, EMAIL_KEYS)
+            account_id = pick_string(record, ACCOUNT_ID_KEYS)
+            key = ("email:" + email.casefold() if email else "id:" + account_id.casefold()
+                   if account_id else f"source:{source}:record:{number}")
+            failures[key] = str(exc)
+            print(f"[输入][失败] {key}：{exc}")
+    return result
+
+
 def deduplicate_with_sources(
     records: Iterable[Tuple[Dict[str, Any], str]],
 ) -> Tuple[
@@ -306,7 +338,7 @@ def deduplicate_with_sources(
         account_match = (
             seen_account_ids.get(account_id.casefold()) if account_id else None
         )
-        if key not in seen and account_match is not None:
+        if account_match is not None and account_match[2] != key:
             previous, previous_source, previous_key = account_match
             fields = {
                 name
@@ -324,6 +356,7 @@ def deduplicate_with_sources(
             )
             conflict["sources"].update((previous_source, source))
             conflict["fields"].update(fields or {"email"})
+            conflicts[key] = {**conflict, "email": record.get("email", "")}
             continue
         if key in seen:
             previous, previous_source = seen[key]
@@ -344,12 +377,14 @@ def deduplicate_with_sources(
                 )
                 conflict["sources"].update((previous_source, source))
                 conflict["fields"].update(fields)
+            if account_id:
+                seen_account_ids[account_id.casefold()] = (record, source, key)
             continue
         seen[key] = (record, source)
         if account_id:
             seen_account_ids[account_id.casefold()] = (record, source, key)
         result.append(record)
-    return result, sources, conflicts
+    return [record for record in result if record_key(record) not in conflicts], sources, conflicts
 
 
 def write_conflict_report(
@@ -412,6 +447,7 @@ def normalize(
     allow_empty: bool = False,
     conflict_file: Optional[Path] = None,
     record_sources: Optional[Iterable[Tuple[Dict[str, Any], str]]] = None,
+    failed_accounts: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     files = (
         source_files(data_dir, allow_empty=account_file is not None or record_sources is not None)
@@ -420,40 +456,47 @@ def normalize(
     )
     if not files and account_file is None and record_sources is None and not allow_empty:
         raise NormalizeError("没有提供兑换解压目录或独立账户文本")
+    failures = failed_accounts if failed_accounts is not None else {}
     source_records: List[Tuple[Dict[str, Any], str]] = list(record_sources or ())
     for path in files:
-        source_records.extend(
-            (record, "redeem")
-            for record in records_from_values(read_json(path, "下载文件"))
-        )
+        try:
+            source_records.extend(
+                (record, "redeem")
+                for record in records_from_values(read_json(path, "下载文件"))
+            )
+        except NormalizeError as exc:
+            failures["source:" + str(path)] = str(exc)
+            print(f"[输入][失败] {path}：{exc}")
     account_path: Optional[Path] = None
     if account_file is not None:
         account_path = account_file.expanduser().resolve()
-        source_records.extend(
-            (record, "accounts-file")
-            for record in records_from_values(
-                read_json(account_path, "账户文本", allow_empty=True)
+        try:
+            source_records.extend(
+                (record, "accounts-file")
+                for record in records_from_values(
+                    read_json(account_path, "账户文本", allow_empty=True)
+                )
             )
-        )
-    if not source_records and not allow_empty:
+        except NormalizeError as exc:
+            failures["source:" + str(account_path)] = str(exc)
+            print(f"[输入][失败] {account_path}：{exc}")
+    if not source_records and not allow_empty and not failures:
         raise NormalizeError("输入中没有找到包含 access_token 的 Codex 账号")
     if record_sources is None and len(source_records) > MAX_ACCOUNTS:
         raise NormalizeError(f"账号数量超过 {MAX_ACCOUNTS} 个")
 
-    canonical_sources = (
-        (canonical_record(record, index), source)
-        for index, (record, source) in enumerate(source_records, start=1)
-    )
-    records, sources, conflicts = deduplicate_with_sources(canonical_sources)
+    canonical = canonical_sources(source_records, failures)
+    records, sources, conflicts = deduplicate_with_sources(canonical)
+    for key in conflicts:
+        failures[key] = "同账号凭据冲突；已隔离，不选择任一来源的 token"
+        print(f"[输入][失败] {key}：{failures[key]}")
+    records = [record for record in records if record_key(record) not in failures]
+    sources = {record_key(record): sources[record_key(record)] for record in records}
     if len(records) > MAX_ACCOUNTS:
         raise NormalizeError(f"账号数量超过 {MAX_ACCOUNTS} 个")
     conflict_path = conflict_file or (output_dir / "input-conflicts.txt")
     write_conflict_report(conflict_path, conflicts)
-    if conflicts:
-        raise NormalizeError(
-            f"发现 {len(conflicts)} 个同账号凭据冲突；已停止导入，详见：{conflict_path}"
-        )
-    if not records and not allow_empty:
+    if not records and not allow_empty and not failures:
         raise NormalizeError("标准化后没有可导入账号")
 
     sub2api_accounts = [
@@ -484,6 +527,7 @@ def normalize(
         "sub2api_input": str(sub2api_path.resolve()),
         "cockpit_input": str(cockpit_path.resolve()),
         "conflict_file": str(conflict_path.resolve()),
+        "failed_accounts": dict(failures),
         "source_keys": {
             key: sorted(values) for key, values in sorted(sources.items())
         },
@@ -517,7 +561,7 @@ def main() -> int:
     )
     print(f"Sub2API 输入：{metadata['sub2api_input']}")
     print(f"Cockpit 输入：{metadata['cockpit_input']}")
-    return 0
+    return 1 if metadata["failed_accounts"] else 0
 
 
 if __name__ == "__main__":

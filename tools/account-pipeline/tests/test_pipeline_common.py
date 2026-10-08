@@ -84,8 +84,8 @@ class PipelineCommonTests(unittest.TestCase):
                 with self.subTest(mode=mode):
                     code, console, log = self.run_check(root, accounts, mode)
                     self.assertEqual(code, 1)
-                    self.assertIn("流水线失败", console)
-                    self.assertIn("流水线失败", log)
+                    self.assertIn("失败", console)
+                    self.assertIn("失败", log)
 
     def test_runtime_lock_blocks_other_modes_and_releases_after_exit(self):
         with tempfile.TemporaryDirectory() as directory:
