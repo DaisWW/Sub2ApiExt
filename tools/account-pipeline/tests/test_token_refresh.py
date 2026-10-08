@@ -161,11 +161,15 @@ class TokenRefreshTests(unittest.TestCase):
     def test_refresh_pipeline_updates_changed_tokens_once(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            codes.write_text("", encoding="utf-8")
             accounts = root / "accounts.txt"
             accounts.write_text(
                 json.dumps(record("one@example.com", "plain-access")),
                 encoding="utf-8",
             )
+            args = self.pipeline_args(root, accounts)
+            args.codes_file = codes
             submitted: list[str] = []
 
             def fake_refresh(_config, records, *, summary_file=None):
@@ -191,7 +195,7 @@ class TokenRefreshTests(unittest.TestCase):
                 pipeline.cockpit_module, "execute", side_effect=fake_cockpit
             ):
                 self.assertEqual(
-                    pipeline.run(self.pipeline_args(root, accounts)), 0
+                    pipeline.run(args), 0
                 )
 
             self.assertEqual(submitted, ["one@example.com"])
@@ -215,7 +219,7 @@ class TokenRefreshTests(unittest.TestCase):
                 side_effect=AssertionError("unchanged token reached Cockpit"),
             ):
                 self.assertEqual(
-                    pipeline.run(self.pipeline_args(root, accounts)), 0
+                    pipeline.run(args), 0
                 )
 
 

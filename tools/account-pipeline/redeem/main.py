@@ -82,7 +82,9 @@ def shown(path: Path) -> str:
     return str(path.resolve())
 
 
-def read_codes(path: Path, *, allow_empty: bool = False) -> list[str]:
+def read_codes(
+    path: Path, *, allow_empty: bool = False, allow_blank: bool = False
+) -> list[str]:
     if not path.is_file():
         raise RedeemError(f"找不到卡密文件：{shown(path)}")
     try:
@@ -96,7 +98,7 @@ def read_codes(path: Path, *, allow_empty: bool = False) -> list[str]:
                 raise RedeemError("卡密文件必须是 UTF-8 或 GB18030 编码") from exc
     except OSError as exc:
         raise RedeemError(f"读取卡密文件失败：{exc}") from exc
-    if not raw:
+    if not raw and not allow_blank:
         raise RedeemError(f"卡密文件为空：{shown(path)}")
     if len(raw) > MAX_TEXT_BYTES:
         raise RedeemError(f"卡密文件超过 {MAX_TEXT_BYTES} 字节限制")
@@ -108,7 +110,7 @@ def read_codes(path: Path, *, allow_empty: bool = False) -> list[str]:
             continue
         code = content.split(None, 1)[0]
         codes.append(code)
-    if not codes and (
+    if not codes and not allow_blank and (
         not allow_empty
         or not any(line.lstrip().startswith("#") for line in text.splitlines())
     ):

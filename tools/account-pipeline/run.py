@@ -183,13 +183,20 @@ def validate_layout(
 ) -> bool:
     if sys.version_info < (3, 8):
         raise PipelineError("需要 Python 3.8 或更高版本")
+    has_accounts = False
+    if accounts_file is not None:
+        has_accounts = normalize_module.validate_input_file(
+            accounts_file, allow_empty=True
+        )
     has_codes = False
     if codes_file is not None:
         has_codes = bool(
-            redeem_module.read_codes(codes_file, allow_empty=incremental)
+            redeem_module.read_codes(
+                codes_file, allow_empty=incremental, allow_blank=has_accounts
+            )
         )
-    if accounts_file is not None:
-        normalize_module.validate_input_file(accounts_file, allow_empty=True)
+    if not has_codes and not has_accounts and not incremental:
+        raise PipelineError("输入中没有可用卡密或账户；请填写卡密或账户文本")
     if sub2api_config is not None:
         sub2api_module.validate_config(sub2api_config)
     return has_codes

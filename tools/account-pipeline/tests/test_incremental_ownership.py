@@ -155,6 +155,46 @@ class IncrementalOwnershipTests(unittest.TestCase):
             with self.assertRaises(redeem.RedeemError):
                 redeem.read_codes(codes, allow_empty=True)
 
+    def test_blank_codes_are_optional_when_accounts_are_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            accounts = root / "accounts.txt"
+            accounts.write_text(json.dumps(record("direct@example.com")), encoding="utf-8")
+            for content in ("", "\n \t\n", "\ufeff", "# PLUS-DISABLED\n"):
+                codes.write_text(content, encoding="utf-8")
+                for incremental_mode in (False, True):
+                    with self.subTest(content=repr(content), incremental=incremental_mode):
+                        self.assertFalse(
+                            pipeline.validate_layout(
+                                codes, accounts, None, incremental=incremental_mode
+                            )
+                        )
+
+    def test_blank_accounts_do_not_block_enabled_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            codes.write_text("PLUS-VALID\n", encoding="utf-8")
+            accounts = root / "accounts.txt"
+            for content in ("", "\n \t\n", "\ufeff", "[]"):
+                accounts.write_text(content, encoding="utf-8")
+                with self.subTest(content=repr(content)):
+                    self.assertTrue(pipeline.validate_layout(codes, accounts, None))
+
+    def test_full_run_rejects_inputs_without_codes_or_accounts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            codes.write_text("\n", encoding="utf-8")
+            accounts = root / "accounts.txt"
+            for content in ("", "\n \t\n", "[]", "{}"):
+                accounts.write_text(content, encoding="utf-8")
+                for codes_file in (None, codes):
+                    with self.subTest(content=repr(content), codes=codes_file):
+                        with self.assertRaises((pipeline.PipelineError, redeem.RedeemError)):
+                            pipeline.validate_layout(codes_file, accounts, None)
+
     def test_blank_accounts_file_is_optional_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -396,6 +436,8 @@ class IncrementalOwnershipTests(unittest.TestCase):
     def test_full_run_imports_all_standardized_accounts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            codes = root / "redeem-codes.txt"
+            codes.write_text("\n \t\n", encoding="utf-8")
             accounts = root / "accounts.txt"
             accounts.write_text(
                 json.dumps(record("first@example.com"))
@@ -436,6 +478,12 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 return 0
 
             with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
+                pipeline, "NEW_CODES_FILE", codes
+            ), patch.object(
+                pipeline, "NEW_ACCOUNTS_FILE", accounts
+            ), patch.object(
+                pipeline.redeem_module, "execute", side_effect=AssertionError("redeem called")
+            ), patch.object(
                 pipeline.sub2api_module, "execute", side_effect=fake_sub2api
             ), patch.object(
                 pipeline.cockpit_module, "execute", side_effect=fake_cockpit
@@ -443,7 +491,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 self.assertEqual(
                     pipeline.run(
                         self.pipeline_args(
-                            root, accounts=accounts, incremental_mode=False
+                            root, incremental_mode=False
                         )
                     ),
                     0,
@@ -577,7 +625,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codes = root / "redeem-codes.txt"
-            codes.write_text("# PLUS-OLD\n", encoding="utf-8")
+            codes.write_text("\n", encoding="utf-8")
             accounts = root / "accounts.txt"
             accounts.write_text(json.dumps(record("keep@example.com")), encoding="utf-8")
             state_path = root / "cache" / "state" / "incremental.json"

@@ -404,7 +404,7 @@ def records_from_values(values: Iterable[Any]) -> List[Dict[str, Any]]:
     return records
 
 
-def validate_input_file(path: Path, *, allow_empty: bool = False) -> None:
+def validate_input_file(path: Path, *, allow_empty: bool = False) -> bool:
     """校验独立账户文本，不访问网络也不写输出。"""
     values = read_json(
         path.expanduser().resolve(), "账户文本", allow_empty=allow_empty
@@ -416,6 +416,7 @@ def validate_input_file(path: Path, *, allow_empty: bool = False) -> None:
         raise NormalizeError(f"账户文本中的账号数量超过 {MAX_ACCOUNTS} 个")
     for index, record in enumerate(raw_records, start=1):
         canonical_record(record, index)
+    return bool(raw_records)
 
 
 def normalize(
