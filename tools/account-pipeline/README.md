@@ -19,20 +19,20 @@ incremental.bat
 refresh-tokens.bat
 ```
 
-不传输入参数时读取 `input` 根目录和一层子目录：卡密文件固定为 `redeem-codes.txt`，账户文件使用 `accounts*.txt`、`accounts*.json` 或 `accounts*.jsonl`，示例文件会忽略，不递归读取更深目录。可以把账户分散保存到多个文件，每个账户只需保存一份凭据。目录名不再决定分组，目录 `config.json` 不再生效。
+不传输入参数时读取 `input` 根目录和一层子目录：卡密文件使用 `redeem-codes*.txt`，账户文件使用 `accounts*.txt`、`accounts*.json` 或 `accounts*.jsonl`，示例文件会忽略，不递归读取更深目录。两种来源都可以分散保存到多个文件。每个账户的原始信息建议只保存一份；所在目录的可选 `config.json` 单独提供账户设置，不需要复制凭据。目录名称只用于归类，实际分组由 `group_names` 数组指定。
 
 卡密文件一行一个卡密，空行和 `#` 开头的行会忽略；卡密后可用空格附加注释。重复卡密只提交一次。账户文本可以是单个对象、数组、JSONL 或连续的完整 JSON 对象，中间允许空行。首次使用可把 `input\accounts.example.txt` 复制到 `input\accounts.txt`，再填写真实账户对象。
 
-位置参数会自动识别卡密或账户文本，并只处理拖入的这一种来源。使用 `--codes-file`、`--accounts-file` 时只读取明确指定的文件，两个选项一起传才会合并这两种来源。所有输入方式使用同一份账户配置。`--dry-run` 验证本地输入和配置，不访问兑换站或导入服务；兑换码对应的邮箱及远端分组、代理仍需在实际运行时校验。
+位置参数会自动识别卡密或账户文本，并只处理拖入的这一种来源。使用 `--codes-file`、`--accounts-file` 时只读取明确指定的文件，两个选项一起传才会合并这两种来源。明确指定的输入同样应用所在目录的 `config.json`。`--dry-run` 验证本地输入和配置，不访问兑换站或导入服务；兑换码对应的邮箱及远端分组、代理仍需在实际运行时校验。
 
-## 默认配置、邮箱覆盖和兑换码覆盖
+## 默认配置、目录配置和账户覆盖
 
-账户凭据保存在输入文件，设置集中保存在 Sub2API 主配置中。连接地址、登录环境和来源类型为顶层字段，账户设置放在 `defaults`；旧配置的顶层账户字段仍可作为默认值使用。以下只展示账户设置部分，完整示例见 `sub2api/config.example.json`：
+账户凭据保存在输入文件，统一默认设置保存在 Sub2API 主配置中。连接地址、登录环境和来源类型为顶层字段，账户设置放在 `defaults`；旧配置的顶层账户字段仍可作为默认值使用。以下只展示账户设置部分，完整示例见 `sub2api/config.example.json`：
 
 ```json
 {
   "defaults": {
-    "group_names": ["西郊-gpt"],
+    "group_names": ["西郊-gpt", "西郊-gpt-6"],
     "concurrency": 3,
     "priority": 50,
     "rate_multiplier": 0.1,
@@ -45,24 +45,48 @@ refresh-tokens.bat
   },
   "accounts": {
     "user@example.com": {
-      "group_names": ["西郊-gpt", "西郊-gpt-cursor"],
+      "group_names": ["西郊-gpt", "西郊-gpt-6", "西郊-gpt-cursor"],
       "extra": { "codex_cli_only": false }
     }
   },
   "redeem_codes": {
     "PLUS-EXAMPLE": {
-      "group_names": ["西郊-gpt", "西郊-gpt-cursor"],
+      "group_names": ["西郊-gpt", "西郊-gpt-6", "西郊-gpt-cursor"],
       "extra": { "codex_cli_only": false }
     }
   }
 }
 ```
 
-`accounts` 和 `redeem_codes` 均可省略。已知邮箱时写 `accounts`；兑换前不知道邮箱时写 `redeem_codes`，同时将该卡密填入 `redeem-codes.txt`。配置条目本身不会产生输入，也不会触发兑换。邮箱去除首尾空格并忽略大小写；兑换码去除首尾空格后精确匹配。
+`accounts` 和 `redeem_codes` 均可省略。已知邮箱时写 `accounts`；兑换前不知道邮箱时写 `redeem_codes`，同时将该卡密填入 `redeem-codes*.txt`。覆盖项只需要邮箱或兑换码，以及需要修改的设置，不需要完整账户 JSON。配置条目本身不会产生输入，也不会触发兑换。邮箱去除首尾空格并忽略大小写；兑换码去除首尾空格后精确匹配。
 
-覆盖优先级为 **默认值 → 兑换码 → 邮箱**。普通字段覆盖，未写字段继承；`extra` 按键覆盖。`group_names` 缺省时继承，显式填写时就是最终完整列表，空数组清除分组；需要同时加入两个分组时直接列出两个名称。分组必须是已存在且启用的 OpenAI 分组。`codex_cli_only` 是账户级设置，对该账户所在的所有分组生效。
+通常直接按目录批量归类即可：
 
-兑换接口的逐卡结果提供卡密与邮箱的对应关系，manifest 只新增卡密 SHA-256 摘要与邮箱的关联。已配置的成功卡密若缺少对应关系或无法匹配账户，会在导入前停止；失败卡密仍按兑换警告处理，不阻塞其他成功输入。同一账户由多个卡密提供设置时，卡密的分组列表合并去重；其他字段或同一 `extra` 键不同则报冲突，邮箱配置中明确设置的字段优先。凭据不一致的重复账户仍会报错，不按文件顺序选择。
+```text
+input/
+├─ 西郊-gpt/
+│  ├─ accounts.json
+│  └─ redeem-codes.txt
+└─ 西郊-gpt-cursor/
+   ├─ accounts.json
+   ├─ redeem-codes.txt
+   └─ config.json
+```
+
+普通目录不需要配置，全部继承主配置。cursor 目录的 `config.json` 只写差异：
+
+```json
+{
+  "group_names": ["西郊-gpt", "西郊-gpt-6", "西郊-gpt-cursor"],
+  "extra": { "codex_cli_only": false }
+}
+```
+
+把账户或卡密移动到 cursor 目录，就会使用这套设置，一个账户可以同时属于数组中的多个分组。目录配置也可包含 `accounts` 和 `redeem_codes`，写法与主配置一致，只对该目录输入的账户生效。同一邮箱或卡密的条目沿主配置、根目录配置、所在目录配置继承，子级只覆盖明确填写的字段。需要调整全部输入时，可选用 `input/config.json`；目录配置只能包含账户设置、`defaults`、`accounts` 和 `redeem_codes`，连接参数仍放在主配置。示例见 `input/config.example.json` 和 `input/西郊-gpt-cursor/config.example.json`。
+
+公共设置依次继承 **主配置默认值 → input 根目录配置 → 所在目录配置**，然后应用 **兑换码覆盖 → 邮箱覆盖**。普通字段覆盖，未写字段继承；`extra` 按键覆盖。`group_names` 缺省时继承，显式填写时就是最终完整列表，空数组清除分组；需要同时加入两个分组时直接列出两个名称。分组必须是已存在且启用的 OpenAI 分组。`codex_cli_only` 是账户级设置，对该账户所在的所有分组生效。
+
+兑换接口的逐卡结果提供卡密与邮箱的对应关系，manifest 只保存卡密 SHA-256 摘要与邮箱的关联，用于把目录设置或卡密覆盖关联到下载的账户。已配置的成功卡密若缺少对应关系或无法匹配账户，会在导入前停止；失败卡密仍按兑换警告处理，不阻塞其他成功输入。同一目录内，同一账户由多个卡密提供设置时，卡密的分组列表合并去重；其他字段或同一 `extra` 键不同则报冲突，邮箱配置中明确设置的字段优先。同一账户来自多个目录时，只有最终设置完全一致才允许合并，否则报出目录和冲突字段，不按文件顺序选择。凭据不一致的重复账户仍会报错。
 
 删除邮箱覆盖条目会恢复兑换码设置或默认值，不会删除账户；移除一个分组只需修改最终分组数组。账户从全部输入中移除后仍只记录待手动处理清单，不自动删除远端账户。
 
@@ -156,7 +180,7 @@ manifest 保存路径、数量、任务号、阶段状态、授权更新账号�
 | Sub2API 待手动处理清单 | `tools\account-pipeline\cache\results\sub2api-pending-deletions.txt` |
 | 增量状态和日志 | `tools\account-pipeline\cache\state\`、`tools\account-pipeline\cache\logs\` |
 
-这些缓存不写入 Git 工作区。若需要换到其他目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input` 中的卡密和账户文件是本机输入，已加入 Git 忽略规则；示例文件可以提交。账户配置保存在 ProgramData，不依赖 Git 工作区。
+这些缓存不写入 Git 工作区。若需要换到其他目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input` 中的卡密、账户文件和目录 `config.json` 都是本机配置，已加入 Git 忽略规则；示例文件可以提交。连接参数和统一默认账户设置保存在 ProgramData，目录覆盖随本地输入保存。
 
 ## Sub2API 配置
 

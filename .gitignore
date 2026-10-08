@@ -38,8 +38,8 @@ runtime/
 .serena/
 
 # Unified account pipeline local input, configuration, and runtime data
-tools/account-pipeline/input/redeem-codes.txt
-tools/account-pipeline/input/**/redeem-codes.txt
+tools/account-pipeline/input/**/redeem-codes*.txt
+!tools/account-pipeline/input/**/redeem-codes.example.txt
 tools/account-pipeline/input/**/accounts*.txt
 tools/account-pipeline/input/**/accounts*.json
 tools/account-pipeline/input/**/accounts*.jsonl

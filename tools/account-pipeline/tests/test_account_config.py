@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import incremental
 from inputs import InputFiles
+from input_config import InputConfig
 import run as pipeline
 from normalize import main as normalize
 from sub2api import main as sub2api
@@ -51,7 +52,7 @@ class AccountConfigTests(unittest.TestCase):
         inputs.load(allow_empty=False, conflict_file=root / "cache" / "results" / "input-conflicts.txt")
         metadata = normalize.normalize(None, root / "run", record_sources=inputs.sources)
         records = pipeline.normalized_records(Path(metadata["cockpit_input"]))
-        configs, fingerprints = sub2api.AccountConfig(config).compile(records)
+        configs, fingerprints = InputConfig(config, inputs, root / "input").compile(records)
         incremental.write_json(Path(metadata["sub2api_input"]), incremental.sub2api_payload(records, configs))
         return metadata, configs, fingerprints
 

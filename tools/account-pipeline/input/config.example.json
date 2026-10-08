@@ -1,0 +1,12 @@
+{
+  "accounts": {
+    "user@example.com": {
+      "priority": 70
+    }
+  },
+  "redeem_codes": {
+    "PLUS-EXAMPLE": {
+      "concurrency": 1
+    }
+  }
+}

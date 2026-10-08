@@ -817,19 +817,23 @@ def account_settings(config: Mapping[str, Any]) -> Dict[str, Any]:
 class AccountConfig:
     """默认设置、兑换码覆盖和邮箱覆盖的唯一解析入口。"""
 
-    def __init__(self, config: Mapping[str, Any]):
+    def __init__(self, config: Mapping[str, Any], *, parent: Optional[AccountConfig] = None):
         defaults = config.get("defaults", {})
         self._validate_override(defaults, "defaults")
+        inherited = parent.defaults if parent is not None else {}
+        flat = {name: value for name, value in config.items() if name in ACCOUNT_CONFIG_FIELDS}
+        self._validate_override(flat, "默认账户设置")
         self.defaults = account_settings({
-            **{name: value for name, value in config.items() if name in ACCOUNT_CONFIG_FIELDS},
-            **defaults,
+            **inherited, **flat, **defaults,
+            "extra": {**inherited.get("extra", {}), **(flat.get("extra") or {}), **defaults.get("extra", {})},
         })
-        self.accounts: Dict[str, Dict[str, Any]] = {}
-        self.redeem_codes: Dict[str, Dict[str, Any]] = {}
+        self.accounts = copy.deepcopy(parent.accounts) if parent is not None else {}
+        self.redeem_codes = copy.deepcopy(parent.redeem_codes) if parent is not None else {}
         for field_name, target in (("accounts", self.accounts), ("redeem_codes", self.redeem_codes)):
             entries = config.get(field_name, {})
             if not isinstance(entries, dict):
                 raise Sub2ApiError(f"{field_name} 必须是 JSON 对象")
+            seen = set()
             for identifier, override in entries.items():
                 if not isinstance(identifier, str) or not identifier.strip():
                     raise Sub2ApiError(f"{field_name} 包含空标识")
@@ -842,9 +846,14 @@ class AccountConfig:
                     if any(char.isspace() for char in identifier):
                         raise Sub2ApiError("redeem_codes 的键必须是单个兑换码")
                     key = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
-                if key in target:
+                if key in seen:
                     raise Sub2ApiError(f"{field_name} 包含重复标识")
+                seen.add(key)
                 self._validate_override(override, field_name)
+                previous = target.get(key, {})
+                override = {**previous, **override}
+                if "extra" in override:
+                    override["extra"] = {**previous.get("extra", {}), **override["extra"]}
                 settings = account_settings({
                     **self.defaults, **override,
                     "extra": {**self.defaults["extra"], **override.get("extra", {})},

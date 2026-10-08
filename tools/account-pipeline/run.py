@@ -20,6 +20,7 @@ if str(BASE_DIR) not in sys.path:
 from cockpit import main as cockpit_module  # noqa: E402
 import incremental as incremental_module  # noqa: E402
 from inputs import InputFiles  # noqa: E402
+from input_config import InputConfig  # noqa: E402
 from normalize import main as normalize_module  # noqa: E402
 from redeem import main as redeem_module  # noqa: E402
 from sub2api import main as sub2api_module  # noqa: E402
@@ -339,7 +340,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
     main_config = sub2api_module.json_file(sub2api_config, "Sub2API 导入配置")
     if not isinstance(main_config, dict):
         raise PipelineError("Sub2API 导入配置必须是 JSON 对象")
-    account_config = sub2api_module.AccountConfig(main_config)
+    account_config = InputConfig(main_config, inputs, INPUT_DIR)
     local_records = inputs.load(
         allow_empty=args.incremental or refresh_tokens,
         conflict_file=runtime_dir / "results" / "input-conflicts.txt",
@@ -354,6 +355,8 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         print(f"账户文本输入：{path}")
     if not inputs.accounts_files:
         print("账户文本输入：未提供")
+    for path in account_config.config_files:
+        print(f"账户设置配置：{path}")
     print(f"运行根目录：{runtime_dir}")
     if args.dry_run:
         print("检查通过；dry-run 未访问兑换站，也未执行导入。")
@@ -391,6 +394,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
     }
     manifest["codes_files"] = [str(path) for path in inputs.codes_files]
     manifest["accounts_files"] = [str(path) for path in inputs.accounts_files]
+    manifest["config_files"] = [str(path) for path in account_config.config_files]
     stage = "redeem" if has_codes else "normalize"
     try:
         write_json(pipeline_manifest, manifest)
