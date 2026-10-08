@@ -654,15 +654,12 @@ def safe_api_message(value: Any) -> str:
         text,
     )
     text = re.sub(
-        r"(?i)(\b(?:access|refresh|id)[_-]?token\b\s*(?:=|:)\s*)\S+",
+        r'''(?i)(\b(?:(?:access|refresh|id)[_-]?token|password|passwd|secret|api[_-]?key|authorization)'''
+        r'''\b["']?\s*(?:=|:)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:Bearer|Basic)\s+[^\s,;}]+|[^\s,;}]+)''',
         r"\1<已隐藏>",
         text,
     )
-    text = re.sub(
-        r"(?i)(\b(?:password|passwd|secret|api[_-]?key|authorization)\b\s*(?:=|:)\s*)\S+",
-        r"\1<已隐藏>",
-        text,
-    )
+    text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1<已隐藏>@", text)
     text = re.sub(r"\b[A-Za-z0-9_-]{32,}\b", "<已隐藏>", text)
     return text[:240]
 
