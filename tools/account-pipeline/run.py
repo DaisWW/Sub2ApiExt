@@ -594,6 +594,13 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             )
         )
         if args.incremental:
+            token_snapshot = token_state_module.read_snapshot(token_snapshot_file)
+            token_accounts = token_snapshot["accounts"]
+            refresh_keys.update(
+                incremental_module.account_key(record)
+                for record in token_state_module.compare(records, token_snapshot).changed
+                if incremental_module.account_key(record) in token_accounts
+            )
             incremental_state = incremental_module.read_state(incremental_state_file)
             incremental_delta = incremental_module.compare(
                 records,
