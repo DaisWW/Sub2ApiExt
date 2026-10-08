@@ -65,7 +65,7 @@ class InputConfig:
                     continue
                 keys.add(key)
             for key in sorted(keys):
-                if key in selected and configs[key] != values[key]:
+                if key in selected and fingerprints[key] != hashes[key]:
                     fields = [name for name in configs[key] if name != "extra" and comparable(configs[key][name]) != comparable(values[key][name])]
                     fields.extend(
                         f"extra.{name}" for name in sorted(configs[key]["extra"].keys() | values[key]["extra"].keys())

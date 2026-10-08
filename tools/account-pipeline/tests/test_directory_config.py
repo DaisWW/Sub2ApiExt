@@ -104,6 +104,15 @@ class DirectoryConfigTests(unittest.TestCase):
             self.assertEqual(metadata["accounts"], 1)
             self.assertEqual(len(configs), 1)
 
+    def test_directory_settings_with_different_json_types_are_conflicting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for folder in ("ordinary", "cursor"):
+                self.input(root, [record("same@example.com")], name=f"{folder}/accounts.txt")
+            self.configuration(root, "cursor", {"extra": {"flag": 0}})
+            with self.assertRaisesRegex(sub2api.Sub2ApiError, "extra.flag"):
+                self.prepare(root, {"defaults": {"extra": {"flag": False}}})
+
     def test_directory_codes_require_bindings_and_failed_codes_are_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
