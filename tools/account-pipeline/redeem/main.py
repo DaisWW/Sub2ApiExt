@@ -30,6 +30,7 @@ DEFAULT_RUNTIME_DIR = PIPELINE_DIR / "cache"
 CODES_FILE = PIPELINE_DIR / "input" / "redeem-codes.txt"
 CACHE_DIR = DEFAULT_RUNTIME_DIR / "runs"
 RESULT_FILE = DEFAULT_RUNTIME_DIR / "results" / "redeem-result.txt"
+CODE_EMAIL_MAP_FILE = PIPELINE_DIR / "input" / "redeem-code-email-map.json"
 MAX_CODES = 200
 MAX_TEXT_BYTES = 8000
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
@@ -274,6 +275,13 @@ class RedeemClient:
                     data = []
                     if not isinstance(payload, dict):
                         raise RedeemError("兑换站返回了无效任务事件")
+                    observed_rows = payload.get("rows", [])
+                    if not isinstance(observed_rows, list):
+                        observed_rows = []
+                    if "code" in payload:
+                        observed_rows = [*observed_rows, payload]
+                    if observed_rows:
+                        update_code_email_map(CODE_EMAIL_MAP_FILE, observed_rows)
                     if event == "progress":
                         done = payload.get("done", "?")
                         total = payload.get("total", "?")
@@ -497,6 +505,42 @@ def code_account_bindings(rows: list[dict]) -> dict[str, str | None]:
             raise RedeemError("同一卡密返回了不同的账户对应关系；已停止处理")
         bindings[digest] = account
     return bindings
+
+
+def update_code_email_map(path: Path, rows: list[dict]) -> None:
+    """累计已获取的卡密和邮箱，不按任务或账号状态过滤。"""
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else {}
+        if not isinstance(previous, dict) or any(
+            not isinstance(emails, list) or any(not isinstance(email, str) for email in emails)
+            for emails in previous.values()
+        ):
+            raise ValueError("映射必须是兑换码到邮箱列表的 JSON 对象")
+        mapping = {code: set(emails) for code, emails in previous.items()}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            code = field(row.get("code"))
+            if not code:
+                continue
+            emails = mapping.setdefault(code, set())
+            for name in ("account", "email", "user_email", "account_email"):
+                email = field(row.get(name)).casefold()
+                if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                    emails.add(email)
+        value = {code: sorted(emails) for code, emails in sorted(mapping.items())}
+        if path.is_file() and value == previous:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    except (OSError, ValueError) as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RedeemError(f"更新兑换码邮箱映射失败：{shown(path)}") from exc
 
 
 def progress_phase(value) -> str | None:
@@ -775,6 +819,7 @@ def process(
         if isinstance(raw_rows, list)
         else []
     )
+    update_code_email_map(CODE_EMAIL_MAP_FILE, rows)
     normal_count = sum(1 for row in rows if row.get("ok") is True)
     print(
         "[兑换] 结果整理："
