@@ -19,14 +19,14 @@ if str(BASE_DIR) not in sys.path:
 
 from cockpit import main as cockpit_module  # noqa: E402
 import incremental as incremental_module  # noqa: E402
+from inputs import InputFiles  # noqa: E402
 from normalize import main as normalize_module  # noqa: E402
 from redeem import main as redeem_module  # noqa: E402
 from sub2api import main as sub2api_module  # noqa: E402
 import token_state as token_state_module  # noqa: E402
 
 
-NEW_CODES_FILE = BASE_DIR / "input" / "redeem-codes.txt"
-NEW_ACCOUNTS_FILE = BASE_DIR / "input" / "accounts.txt"
+INPUT_DIR = BASE_DIR / "input"
 DEFAULT_RUNTIME_DIR = BASE_DIR / "cache"
 PIPELINE_CONFIG = BASE_DIR / "config.json"
 
@@ -178,11 +178,6 @@ def choose_inputs(
         else:
             codes_file = path
 
-    if argument is None and codes_argument is None and accounts_argument is None:
-        if codes_file is None and NEW_CODES_FILE.is_file():
-            codes_file = resolved(NEW_CODES_FILE)
-        if accounts_file is None and NEW_ACCOUNTS_FILE.is_file():
-            accounts_file = resolved(NEW_ACCOUNTS_FILE)
     if codes_file is None and accounts_file is None:
         raise PipelineError(
             "没有找到输入；请填写 input\\redeem-codes.txt 或 input\\accounts.txt，"
@@ -211,35 +206,6 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
         except OSError:
             pass
         raise PipelineError(f"写入流水线 manifest 失败：{path}") from exc
-
-
-def validate_layout(
-    codes_file: Optional[Path],
-    accounts_file: Optional[Path],
-    sub2api_config: Optional[Path],
-    *,
-    incremental: bool = False,
-    conflict_file: Optional[Path] = None,
-) -> bool:
-    if sys.version_info < (3, 8):
-        raise PipelineError("需要 Python 3.8 或更高版本")
-    has_accounts = False
-    if accounts_file is not None:
-        has_accounts = normalize_module.validate_input_file(
-            accounts_file, allow_empty=True, conflict_file=conflict_file
-        )
-    has_codes = False
-    if codes_file is not None:
-        has_codes = bool(
-            redeem_module.read_codes(
-                codes_file, allow_empty=incremental, allow_blank=has_accounts
-            )
-        )
-    if not has_codes and not has_accounts and not incremental:
-        raise PipelineError("输入中没有可用卡密或账户；请填写卡密或账户文本")
-    if sub2api_config is not None:
-        sub2api_module.validate_config(sub2api_config)
-    return has_codes
 
 
 def read_redeem_manifest(path: Path, fallback_data_dir: Path) -> Dict[str, Any]:
@@ -340,9 +306,16 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         raise PipelineError(
             "增量和 Token 刷新模式需要同时同步 Sub2API 和 Cockpit，不能使用跳过选项"
         )
-    codes_file, accounts_file = choose_inputs(
-        args.input_file, args.codes_file, args.accounts_file
-    )
+    default_inputs = args.input_file is None and args.codes_file is None and args.accounts_file is None
+    if default_inputs:
+        inputs = InputFiles.discover(INPUT_DIR)
+    else:
+        codes_file, accounts_file = choose_inputs(
+            args.input_file, args.codes_file, args.accounts_file
+        )
+        inputs = InputFiles([codes_file] if codes_file else [], [accounts_file] if accounts_file else [])
+    codes_file = next(iter(inputs.codes_files), None)
+    accounts_file = next(iter(inputs.accounts_files), None)
 
     sub2api_config = (
         resolved(args.sub2api_config)
@@ -360,20 +333,26 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
     if not 10 <= wait_seconds <= 300:
         raise PipelineError("Cockpit 等待时间必须在 10 到 300 秒之间")
 
-    has_codes = validate_layout(
-        codes_file,
-        accounts_file,
-        sub2api_config,
-        incremental=args.incremental or refresh_tokens,
+    if sys.version_info < (3, 8):
+        raise PipelineError("需要 Python 3.8 或更高版本")
+    sub2api_config = sub2api_module.resolve_config(sub2api_config)
+    main_config = sub2api_module.json_file(sub2api_config, "Sub2API 导入配置")
+    if not isinstance(main_config, dict):
+        raise PipelineError("Sub2API 导入配置必须是 JSON 对象")
+    account_config = sub2api_module.AccountConfig(main_config)
+    local_records = inputs.load(
+        allow_empty=args.incremental or refresh_tokens,
         conflict_file=runtime_dir / "results" / "input-conflicts.txt",
     )
-    if codes_file is not None:
-        print(f"卡密输入：{codes_file}")
-    else:
+    account_config.compile(local_records)
+    has_codes = bool(inputs.codes)
+    for path in inputs.codes_files:
+        print(f"卡密输入：{path}")
+    if not inputs.codes_files:
         print("卡密输入：未提供（跳过兑换）")
-    if accounts_file is not None:
-        print(f"账户文本输入：{accounts_file}")
-    else:
+    for path in inputs.accounts_files:
+        print(f"账户文本输入：{path}")
+    if not inputs.accounts_files:
         print("账户文本输入：未提供")
     print(f"运行根目录：{runtime_dir}")
     if args.dry_run:
@@ -410,6 +389,8 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         "refresh_tokens": refresh_tokens,
         "conflict_file": str(conflict_file),
     }
+    manifest["codes_files"] = [str(path) for path in inputs.codes_files]
+    manifest["accounts_files"] = [str(path) for path in inputs.accounts_files]
     stage = "redeem" if has_codes else "normalize"
     try:
         write_json(pipeline_manifest, manifest)
@@ -417,6 +398,9 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         data_dir: Optional[Path] = None
         refresh_keys: set[str] = set()
         if has_codes:
+            codes_file = run_dir / "inputs" / "redeem-codes.txt"
+            codes_file.parent.mkdir(parents=True, exist_ok=True)
+            codes_file.write_text("\n".join(inputs.codes) + "\n", encoding="utf-8")
             redeem_code = redeem_module.execute(
                 codes_file,
                 action="sub2api",
@@ -469,11 +453,16 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         stage = "normalize"
         print("[流水线] 开始标准化账号数据……")
         normalized = normalize_module.normalize(
-            data_dir,
-            normalized_dir,
-            accounts_file,
+            data_dir, normalized_dir,
             allow_empty=(args.incremental or refresh_tokens) and not has_codes,
-            conflict_file=conflict_file,
+            conflict_file=conflict_file, record_sources=inputs.sources,
+        )
+        records = normalized_records(Path(normalized["cockpit_input"]))
+        account_configs, config_fingerprints = account_config.compile(
+            records,
+        )
+        incremental_module.write_json(
+            Path(normalized["sub2api_input"]), incremental_module.sub2api_payload(records, account_configs),
         )
         manifest["normalized"] = normalized
         write_json(pipeline_manifest, manifest)
@@ -589,15 +578,20 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         incremental_delta = None
         baseline_sub2api_ids: Dict[str, int] = {}
         source_keys = normalized["source_keys"]
-        source_scope = incremental_module.input_scope(codes_file, accounts_file)
+        source_scope = (
+            {"input_dir": str(INPUT_DIR.resolve())}
+            if default_inputs else incremental_module.input_scope(
+                next(iter(inputs.codes_files), None), accounts_file,
+            )
+        )
         if args.incremental:
-            records = normalized_records(Path(normalized["cockpit_input"]))
             incremental_state = incremental_module.read_state(incremental_state_file)
             incremental_delta = incremental_module.compare(
                 records,
                 incremental_state,
                 source_scope,
                 refresh_keys=refresh_keys,
+                config_fingerprints=config_fingerprints,
             )
             is_baseline = (
                 incremental_state.get("scope") is None
@@ -620,18 +614,23 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                     for key, record in incremental_delta.current.items()
                     if key in refresh_keys
                 ]
+                incremental_delta.configured = [
+                    record for key, record in incremental_delta.current.items()
+                    if key not in refresh_keys
+                ]
                 incremental_delta.removed = []
                 incremental_delta.unchanged = (
                     len(incremental_delta.current) - len(incremental_delta.refreshed)
+                    - len(incremental_delta.configured)
                 )
                 print(
-                    "[增量] 首次运行建立安全基线；普通已有账号不导入，"
+                    "[增量] 首次运行建立安全基线；同步已归属账号的设置，"
                     "授权更新账号仍会导入；"
                     f"已匹配 {len(baseline_sub2api_ids)} 个工具维护的 Sub2API 账户，"
                     f"忽略 {len(records) - len(baseline_sub2api_ids)} 个未带归属标记的账户。"
                 )
             incremental_files = incremental_module.write_delta(
-                incremental_dir, incremental_delta
+                incremental_dir, incremental_delta, account_configs=account_configs,
             )
             if incremental_delta.scope_changed:
                 print("[增量] 输入文件范围发生变化，本次按首次运行处理。")
@@ -639,6 +638,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                 "[增量] 比较完成："
                 f"新增 {len(incremental_delta.added)}，"
                 f"授权更新 {len(incremental_delta.refreshed)}，"
+                f"配置更新 {len(incremental_delta.configured)}，"
                 f"未变化 {incremental_delta.unchanged}，"
                 f"输入中减少 {len(incremental_delta.removed)}（仅记录待手动处理，不自动删除）。"
             )
@@ -652,6 +652,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             manifest["incremental_delta"] = {
                 "added": len(incremental_delta.added),
                 "refreshed": len(incremental_delta.refreshed),
+                "configured": len(incremental_delta.configured),
                 "removed": len(incremental_delta.removed),
                 "unchanged": incremental_delta.unchanged,
                 "scope_changed": incremental_delta.scope_changed,
@@ -718,16 +719,21 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
         token_snapshot_ids: Dict[str, int] = {}
         if not args.skip_sub2api:
             stage = "sub2api"
-            import_count = len(normalized_records(Path(normalized["cockpit_input"])))
+            import_count = (
+                len(incremental_delta.added) + len(incremental_delta.refreshed) + len(incremental_delta.configured)
+                if args.incremental and incremental_delta is not None
+                else len(records)
+            )
             if args.incremental and incremental_delta is not None and import_count == 0:
-                print("[增量] 没有新增或授权更新账号，跳过 Sub2API 导入。")
+                print("[增量] 没有新增、授权或配置更新账号，跳过 Sub2API 导入。")
                 sub2api_code = 0
             else:
                 if args.incremental:
                     print(
                         "[增量] 开始导入 Sub2API "
                         f"（新增 {len(incremental_delta.added)}，"
-                        f"授权更新 {len(incremental_delta.refreshed)}，共 {import_count} 个）……"
+                        f"授权更新 {len(incremental_delta.refreshed)}，"
+                        f"配置更新 {len(incremental_delta.configured)}，共 {import_count} 个）……"
                     )
                 else:
                     print(
@@ -812,17 +818,18 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
             sub2api_ids.update(summary_ids)
             managed_current_keys = (
                 set(incremental_delta.previous) & set(incremental_delta.current)
-            )
-            managed_current_keys.update(baseline_sub2api_ids)
+            ) - {
+                incremental_module.account_key(record)
+                for record in [*incremental_delta.refreshed, *incremental_delta.configured]
+            }
             managed_current_keys.update(summary_ids)
-            state_records = list(incremental_delta.current.values())
-            state_source_keys = dict(source_keys)
             state_value = incremental_module.build_state(
-                state_records,
+                incremental_delta.current.values(),
                 source_scope,
                 sub2api_ids,
                 managed_keys=managed_current_keys,
-                source_keys=state_source_keys,
+                source_keys=source_keys,
+                config_fingerprints=config_fingerprints,
             )
             incremental_module.write_state(incremental_state_file, state_value)
             print(f"[增量] 快照已更新：{incremental_state_file}")
@@ -886,7 +893,7 @@ def main() -> int:
     parser.add_argument(
         "--incremental",
         action="store_true",
-        help="只导入新增或授权已更新的账号，并记录输入中减少的账号",
+        help="只导入新增、授权或账户配置变化的账号，并记录输入中减少的账号",
     )
     parser.add_argument(
         "--refresh-tokens",

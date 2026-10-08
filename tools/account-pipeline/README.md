@@ -1,6 +1,6 @@
 # 账号流水线
 
-总入口 `run.bat` 启动 Python 编排器。完整流程支持两种输入：一行一个卡密的 TXT，以及可连续放置多个账户 JSON 对象的账户文本。两个输入同时存在时会合并、去重后生成统一数据，再分别导入 Sub2API 和 Cockpit；全量模式每次都会把本次合并后的全部账号交给两个导入模块，不按增量快照跳过。`incremental.bat` 只导入新增或兑换结果标记为“授权已更新”的账号。`refresh-tokens.bat` 只比较并刷新变化的 token，不提交账户设置。输入中减少的账号只记录待手动处理清单，不会自动删除。编排器依次调用四个独立模块：
+总入口 `run.bat` 启动 Python 编排器。完整流程支持两种输入：一行一个卡密的 TXT，以及可连续放置多个账户 JSON 对象的账户文本。两个输入同时存在时会合并、去重后生成统一数据，再分别导入 Sub2API 和 Cockpit；全量模式每次都会把本次合并后的全部账号交给两个导入模块，不按增量快照跳过。`incremental.bat` 导入新增、授权更新或账户设置发生变化的账号。`refresh-tokens.bat` 只比较并刷新变化的 token，不提交账户设置。输入中减少的账号只记录待手动处理清单，不会自动删除。编排器依次调用四个独立模块：
 
 1. `redeem`：提交卡密，按提取/检测阶段显示逐卡结果，覆盖写入固定结果 TXT，下载 ZIP 并安全解压。
 2. `normalize`：读取解压目录中的账号 JSON 和可选账户文本，校验来源冲突、去重并生成两个目标输入文件。
@@ -19,9 +19,48 @@ incremental.bat
 refresh-tokens.bat
 ```
 
-不传任何输入参数时分别读取 `input\redeem-codes.txt` 和 `input\accounts.txt`（存在才读取），适合一键同时处理两种来源。卡密文件一行一个卡密，空行和 `#` 开头的行会忽略；卡密后可用空格附加注释，注释会被忽略。账户文本可以是单个对象、数组、JSONL，或多个完整 JSON 对象连续放置，中间允许空行；不要求整个文件再包一层数组。位置参数会自动识别卡密或账户文本，并只处理拖入的这一种来源；使用任一 `--codes-file`、`--accounts-file` 时只读取明确指定的来源，两个选项一起传才会合并外部文件。`--dry-run` 只验证本地输入，不访问兑换站或导入服务。
+不传输入参数时读取 `input` 根目录和一层子目录：卡密文件固定为 `redeem-codes.txt`，账户文件使用 `accounts*.txt`、`accounts*.json` 或 `accounts*.jsonl`，示例文件会忽略，不递归读取更深目录。可以把账户分散保存到多个文件，每个账户只需保存一份凭据。目录名不再决定分组，目录 `config.json` 不再生效。
 
-首次使用可复制 `input\accounts.example.txt` 为 `input\accounts.txt`，再把真实账户对象替换进去；示例只使用占位令牌。
+卡密文件一行一个卡密，空行和 `#` 开头的行会忽略；卡密后可用空格附加注释。重复卡密只提交一次。账户文本可以是单个对象、数组、JSONL 或连续的完整 JSON 对象，中间允许空行。首次使用可把 `input\accounts.example.txt` 复制到 `input\accounts.txt`，再填写真实账户对象。
+
+位置参数会自动识别卡密或账户文本，并只处理拖入的这一种来源。使用 `--codes-file`、`--accounts-file` 时只读取明确指定的文件，两个选项一起传才会合并这两种来源。所有输入方式使用同一份账户配置。`--dry-run` 验证本地输入和配置，不访问兑换站或导入服务；远端分组、代理仍需在实际运行时校验。
+
+## 默认配置和邮箱覆盖
+
+账户凭据保存在输入文件，设置集中保存在 Sub2API 主配置中。连接地址、登录环境和来源类型为顶层字段，账户设置放在 `defaults`；旧配置的顶层账户字段仍可作为默认值使用。以下只展示账户设置部分，完整示例见 `sub2api/config.example.json`：
+
+```json
+{
+  "defaults": {
+    "group_names": ["西郊-gpt"],
+    "concurrency": 3,
+    "priority": 50,
+    "rate_multiplier": 0.1,
+    "extra": {
+      "codex_cli_only": true,
+      "codex_fingerprint_mode": "full",
+      "openai_long_context_billing_enabled": true,
+      "openai_passthrough": true
+    }
+  },
+  "accounts": {
+    "user@example.com": {
+      "group_names": ["西郊-gpt", "西郊-gpt-cursor"],
+      "extra": { "codex_cli_only": false }
+    }
+  }
+}
+```
+
+`accounts` 可省略；键为账户邮箱，去除首尾空格并忽略大小写。配置条目本身不会产生输入。
+
+覆盖优先级为 **默认值 → 邮箱**。普通字段覆盖，未写字段继承；`extra` 按键覆盖。`group_names` 缺省时继承，显式填写时就是最终完整列表，空数组清除分组；需要同时加入两个分组时直接列出两个名称。分组必须是已存在且启用的 OpenAI 分组。`codex_cli_only` 是账户级设置，对该账户所在的所有分组生效。
+
+删除邮箱覆盖条目会恢复默认值，不会删除账户；移除一个分组只需修改最终分组数组。账户从全部输入中移除后仍只记录待手动处理清单，不自动删除远端账户。
+
+全量和增量导入都按上述规则生成每账户设置。增量通过配置指纹识别变化，只改配置时调用 Admin API 更新设置，保留服务器凭据和未配置的 `extra` 键，也不会向 Cockpit 提交旧 Token。旧快照没有指纹或首次建立基线时，只同步已带工具归属标记的账户设置。Token 刷新使用相同输入，但仍只更新凭据。
+
+仅同步设置时，`proxy_name: ""`、`load_factor: null`、`expires_at: ""` 会清除远端对应的旧值。全量凭据导入也会落实名称、备注和完整分组列表；纯 Access Token 账户保留上游导入接口计算的到期和自动暂停策略。
 
 各模块也能单独运行：
 
@@ -48,11 +87,11 @@ Sub2API 更新请求只包含账户 ID 和变化账号的三个 token 字段，�
 
 ## 增量同步
 
-`incremental.bat` 固定读取与完整流程相同的输入。第一次运行建立安全基线，并只读查询当前带有本工具归属标记的 Sub2API 账号；普通已有账号不导入，但兑换结果明确提示“授权已更新”的已归属账号会在本轮导入。以后运行只导入新增账号和授权更新账号，未变化账号跳过。输入中减少的账号会输出日志并写入待手动处理清单，工具不会调用任何删除接口。两类待导入账号都按“Sub2API 后 Cockpit”的顺序导入。
+`incremental.bat` 固定读取与完整流程相同的输入。第一次运行建立安全基线，并查询当前带有本工具归属标记的 Sub2API 账号，同步这些账号的设置；兑换结果明确提示“授权已更新”的已归属账号仍重新导入凭据。以后导入新增账号、授权更新账号以及配置变化的账号，未变化账号跳过。输入中减少的账号会输出日志并写入待手动处理清单，工具不会调用任何删除接口。新增和授权更新账号按“Sub2API 后 Cockpit”的顺序导入；只有配置变化的账号仅同步 Sub2API 设置。
 
-Sub2API 导入成功的账号会在 `extra.account_pipeline_managed` 写入固定值 `account-pipeline-v1`。同邮箱但没有这个标记的中转账户默认视为手动账户，脚本会显示“跳过手动账户”，不会更新或写入增量快照。需要认领旧版导入账户时，可在本机 Sub2API 配置中临时设置 `claim_existing_accounts: true`；它只对本轮输入中精确匹配的账户生效，完成一次认领后应恢复为 `false`。兑换来源和 `accounts.txt` 来源都属于脚本主动导入范围；修改输入文件范围时会重新建立安全基线，不会据此删除旧账号。旧版没有归属标记的增量快照也只会触发安全基线。
+Sub2API 导入成功的账号会在 `extra.account_pipeline_managed` 写入固定值 `account-pipeline-v1`。同邮箱但没有这个标记的中转账户默认视为手动账户，脚本会显示“跳过手动账户”，不会更新或写入增量快照。需要认领旧版导入账户时，可在本机 Sub2API 配置的 `defaults` 中临时设置 `claim_existing_accounts: true`；它只对本轮输入中精确匹配的账户生效，完成一次认领后应恢复为 `false`。兑换来源和 `accounts.txt` 来源都属于脚本主动导入范围；修改输入文件范围时会重新建立安全基线，不会据此删除旧账号。旧版没有归属标记的增量快照也只会触发安全基线。
 
-把卡密行改成 `# PLUS-...` 后，它不再参与本轮输入；下一次增量运行会把对应的减少账号写入待手动处理清单。即使所有卡密都被注释，也会跳过兑换并继续记录输入变化；账户文本没有有效账号时，完全空白的卡密文件仍会报错。没有归属标记的账号也不会发送到 Cockpit 自动导入。
+把卡密行改成 `# PLUS-...` 后，它不再参与本轮输入；下一次增量运行会把对应的减少账号写入待手动处理清单。空白或全部被注释的卡密文件会跳过兑换；增量模式允许空输入，以便记录账户减少，全量模式要求至少一个有效账户或卡密。没有归属标记的账号也不会发送到 Cockpit 自动导入。
 
 Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。脚本会把输入中减少的邮箱累计写入 `cache\results\cockpit-pending-deletions.txt`，供你在 Cockpit Tools 中手动处理，不会直接修改其加密存储。为保证一个快照代表两个目标的同一状态，增量模式不接受 `--skip-sub2api` 或 `--skip-cockpit`。
 
@@ -82,7 +121,7 @@ Cockpit Tools 当前公开的外部链接只支持导入，没有删除命令。
 │  ├─ incremental/            本次新增、输入减少记录 JSON
 │  ├─ redeem-manifest.json    兑换元数据
 │  └─ manifest.json           阶段状态和退出码
-├─ state/incremental.json     增量快照（只保存账号标识和 Sub2API ID）
+├─ state/incremental.json     增量快照（账号标识、Sub2API ID 和配置指纹）
 ├─ state/token-snapshot.json  token 明文比较快照
 ├─ logs/pipeline-*.log        流水线日志
 └─ results/
@@ -109,7 +148,7 @@ manifest 保存路径、数量、任务号、阶段状态、授权更新账号�
 | Sub2API 待手动处理清单 | `tools\account-pipeline\cache\results\sub2api-pending-deletions.txt` |
 | 增量状态和日志 | `tools\account-pipeline\cache\state\`、`tools\account-pipeline\cache\logs\` |
 
-这些缓存不写入 Git 工作区。若需要换到其他目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input\redeem-codes.txt` 和 `input\accounts.txt` 是用户输入源，不是自动生成的缓存，仓库已将它们加入忽略规则。
+这些缓存不写入 Git 工作区。若需要换到其他目录，可以在命令行指定 `--runtime-dir D:\Sub2API-cache`，或在被忽略的 `config.json` 中设置 `runtime_dir`。`input` 中的卡密和账户文件是本机输入，已加入 Git 忽略规则；示例文件可以提交。账户配置保存在 ProgramData，不依赖 Git 工作区。
 
 ## Sub2API 配置
 
@@ -117,7 +156,7 @@ manifest 保存路径、数量、任务号、阶段状态、授权更新账号�
 
 ## 输入边界和生成文件
 
-主流程有两个独立外部输入：`input\redeem-codes.txt` 保存卡密，`input\accounts.txt` 保存已有账户 JSON 文本。账户文本中的每个对象必须是完整 JSON，但对象之间可以空行；支持单个对象、数组、JSONL 和连续对象。截图中常见的 `type: "oauth"` 且 `platform: "openai"` 会统一转换为 `type: "codex"`。
+主流程有两种独立外部输入：`redeem-codes.txt` 保存卡密，`accounts*` 文件保存已有账户 JSON 文本。账户文本中的每个对象必须是完整 JSON，但对象之间可以空行；支持单个对象、数组、JSONL 和连续对象。截图中常见的 `type: "oauth"` 且 `platform: "openai"` 会统一转换为 `type: "codex"`。
 
 两种来源独立处理：卡密文件为空、只有空白或注释时，只要账户文本包含有效账号，就会跳过兑换并继续导入；账户文本为空时仍可处理卡密。全量模式下，两种来源都没有可用内容会报错。格式错误的账户文本仍会停止流水线。
 

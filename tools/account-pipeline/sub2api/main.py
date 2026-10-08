@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import ipaddress
 import json
 import math
@@ -38,6 +39,11 @@ EMAIL_PATTERN = re.compile(r"(?i)[^@\s]+@[^@\s]+\.[^@\s]+")
 OWNERSHIP_EXTRA_KEY = "account_pipeline_managed"
 OWNERSHIP_EXTRA_VALUE = "account-pipeline-v1"
 TOKEN_CREDENTIAL_FIELDS = ("access_token", "refresh_token", "id_token")
+ACCOUNT_CONFIG_FIELDS = {
+    "name_prefix", "name_start", "name_width", "group_names", "proxy_name",
+    "concurrency", "priority", "rate_multiplier", "load_factor", "notes",
+    "expires_at", "auto_pause_on_expired", "claim_existing_accounts", "extra",
+}
 
 
 class Sub2ApiError(RuntimeError):
@@ -53,7 +59,8 @@ class Batch:
     source_type: str
     group_names: List[str]
     records: List[Dict[str, Any]]
-    group_ids: List[int] = field(default_factory=list)
+    account_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    settings_only_keys: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -74,7 +81,15 @@ def json_file(path: Path, label: str) -> Any:
     if len(raw) > MAX_INPUT_BYTES:
         raise Sub2ApiError(f"{label}超过 {MAX_INPUT_BYTES // (1024 * 1024)} MiB")
     try:
-        return json.loads(raw.decode("utf-8-sig"))
+        def unique_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise Sub2ApiError(f"{label}包含重复 JSON 键：{path}")
+                value[key] = item
+            return value
+
+        return json.loads(raw.decode("utf-8-sig"), object_pairs_hook=unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise Sub2ApiError(f"{label}不是有效的 UTF-8 JSON：{path}") from exc
 
@@ -156,7 +171,11 @@ def as_string_list(value: Any, label: str, *, required: bool = False) -> List[st
     return result
 
 
-def read_records(path: Path, source_type: str) -> List[Dict[str, Any]]:
+def read_records(
+    path: Path, source_type: str, *,
+    account_configs: Optional[Dict[str, Dict[str, Any]]] = None,
+    settings_only_keys: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
     source = json_file(path, "账号 JSON")
     if isinstance(source, dict) and "accounts" in source:
         raw = source["accounts"]
@@ -167,6 +186,24 @@ def read_records(path: Path, source_type: str) -> List[Dict[str, Any]]:
             if not isinstance(item, dict) or not isinstance(item.get("credentials"), dict):
                 continue
             records.append(item["credentials"])
+            settings_only = item.get("settings_only", False)
+            if not isinstance(settings_only, bool):
+                raise Sub2ApiError(f"settings_only 必须是 true 或 false：{path}")
+            if settings_only:
+                key = record_key(item["credentials"])
+                if key is None:
+                    raise Sub2ApiError(f"仅更新设置的账号缺少 email/account_id：{path}")
+                if settings_only_keys is not None:
+                    settings_only_keys.add(key)
+            if "config" in item:
+                settings = item["config"]
+                if not isinstance(settings, dict):
+                    raise Sub2ApiError(f"账号配置必须是 JSON 对象：{path}")
+                key = record_key(item["credentials"])
+                if key is None:
+                    raise Sub2ApiError(f"账号配置缺少 email/account_id：{path}")
+                if account_configs is not None:
+                    account_configs[key] = settings
     elif isinstance(source, list):
         records = source
     elif isinstance(source, dict):
@@ -224,11 +261,18 @@ def build_batches(
             batch_source = optional_string(
                 effective(raw_batch, config, "source_type", source_type)
             ) or ""
+            account_configs: Dict[str, Dict[str, Any]] = {}
+            settings_only_keys: set[str] = set()
+            records = read_records(path, batch_source, account_configs=account_configs,
+                                   settings_only_keys=settings_only_keys)
             batches.append(
-                Batch(number, raw_batch, path, str(path), batch_source, groups, read_records(path, batch_source))
+                Batch(number, raw_batch, path, str(path), batch_source, groups, records,
+                      account_configs=account_configs, settings_only_keys=settings_only_keys)
             )
         return batches
 
+    account_configs = {}
+    settings_only_keys = set()
     if cockpit_tools:
         try:
             records = load_cockpit_records()
@@ -246,10 +290,12 @@ def build_batches(
             path = resolve_path(configured_input, config_dir, "input_path")
         if not path.is_file():
             raise Sub2ApiError(f"找不到账号 JSON：{path}")
-        records = read_records(path, source_type)
+        records = read_records(path, source_type, account_configs=account_configs,
+                               settings_only_keys=settings_only_keys)
         label = str(path)
-    groups = as_string_list(config.get("group_names", []), "group_names")
-    return [Batch(1, None, path, label, source_type, groups, records)]
+    groups = as_string_list(config.get("defaults", {}).get("group_names", config.get("group_names", [])), "group_names")
+    return [Batch(1, None, path, label, source_type, groups, records,
+                  account_configs=account_configs, settings_only_keys=settings_only_keys)]
 
 
 def loopback_url(value: str, runtime: Dict[str, str]) -> str:
@@ -721,6 +767,119 @@ def expires_timestamp(value: Any) -> Optional[int]:
     return int(parsed.timestamp())
 
 
+def account_settings(config: Mapping[str, Any]) -> Dict[str, Any]:
+    """在写入前校验账户设置；不读取登录凭据。"""
+    settings = {
+        "name_prefix": str(config.get("name_prefix", "") or ""),
+        "name_start": integer_value(config.get("name_start", 1), "name_start"),
+        "name_width": integer_value(config.get("name_width", 3), "name_width"),
+        "group_names": sorted(set(as_string_list(config.get("group_names", []), "group_names"))),
+        "proxy_name": str(config.get("proxy_name", "") or "").strip(),
+        "concurrency": integer_value(config.get("concurrency", 3), "concurrency"),
+        "priority": integer_value(config.get("priority", 50), "priority"),
+        "rate_multiplier": number_value(config.get("rate_multiplier", 1), "rate_multiplier"),
+        "load_factor": config.get("load_factor"),
+        "notes": str(config.get("notes", "") or ""),
+        "expires_at": config.get("expires_at", ""),
+        "auto_pause_on_expired": config.get("auto_pause_on_expired", False),
+        "claim_existing_accounts": config.get("claim_existing_accounts", False),
+    }
+    if settings["name_start"] < 0:
+        raise Sub2ApiError("name_start 不能小于 0")
+    if not 1 <= settings["name_width"] <= 99:
+        raise Sub2ApiError("name_width 必须在 1 到 99 之间")
+    for name in ("concurrency", "priority"):
+        if settings[name] < 1:
+            raise Sub2ApiError(f"{name} 必须大于 0")
+    if settings["rate_multiplier"] < 0:
+        raise Sub2ApiError("rate_multiplier 不能小于 0")
+    if settings["load_factor"] is not None:
+        settings["load_factor"] = integer_value(settings["load_factor"], "load_factor")
+        if settings["load_factor"] < 1:
+            raise Sub2ApiError("load_factor 必须大于 0，或设为 null 使用默认值")
+    for name in ("auto_pause_on_expired", "claim_existing_accounts"):
+        if not isinstance(settings[name], bool):
+            raise Sub2ApiError(f"{name} 必须是 true 或 false")
+    expires_timestamp(settings["expires_at"])
+    configured_extra = config.get("extra") or {}
+    if not isinstance(configured_extra, dict):
+        raise Sub2ApiError("extra 必须是 JSON 对象")
+    extra = dict(configured_extra)
+    if extra.get(OWNERSHIP_EXTRA_KEY) not in (None, OWNERSHIP_EXTRA_VALUE):
+        raise Sub2ApiError(
+            f"extra.{OWNERSHIP_EXTRA_KEY} 是保留字段，必须使用 {OWNERSHIP_EXTRA_VALUE}"
+        )
+    extra[OWNERSHIP_EXTRA_KEY] = OWNERSHIP_EXTRA_VALUE
+    settings["extra"] = extra
+    return settings
+
+
+class AccountConfig:
+    """默认设置和邮箱覆盖的唯一解析入口。"""
+
+    def __init__(self, config: Mapping[str, Any]):
+        defaults = config.get("defaults", {})
+        self._validate_override(defaults, "defaults")
+        self.defaults = account_settings({
+            **{name: value for name, value in config.items() if name in ACCOUNT_CONFIG_FIELDS},
+            **defaults,
+        })
+        self.accounts: Dict[str, Dict[str, Any]] = {}
+        entries = config.get("accounts", {})
+        if not isinstance(entries, dict):
+            raise Sub2ApiError("accounts 必须是 JSON 对象")
+        for email, override in entries.items():
+            if not isinstance(email, str) or not EMAIL_PATTERN.fullmatch(email.strip()):
+                raise Sub2ApiError("accounts 的键必须是账户邮箱")
+            key = email.strip().casefold()
+            if key in self.accounts:
+                raise Sub2ApiError("accounts 包含重复标识")
+            self._validate_override(override, "accounts")
+            settings = account_settings({
+                **self.defaults, **override,
+                "extra": {**self.defaults["extra"], **override.get("extra", {})},
+            })
+            self.accounts[key] = {
+                name: copy.deepcopy(value if name == "extra" else settings[name])
+                for name, value in override.items()
+            }
+
+    @staticmethod
+    def _validate_override(value: Any, label: str) -> None:
+        if not isinstance(value, dict):
+            raise Sub2ApiError(f"{label} 必须是 JSON 对象")
+        if value.keys() - ACCOUNT_CONFIG_FIELDS:
+            raise Sub2ApiError(f"{label} 包含不支持的账户设置字段")
+        if "extra" in value and not isinstance(value["extra"], dict):
+            raise Sub2ApiError(f"{label}.extra 必须是 JSON 对象")
+
+    def resolve(self, email: str, overrides: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        overrides = overrides or {}
+        account = self.accounts.get(email.strip().casefold(), {})
+        return account_settings({
+            **self.defaults, **overrides, **account,
+            "extra": {**self.defaults["extra"], **(overrides.get("extra") or {}), **account.get("extra", {})},
+        })
+
+    def compile(
+        self, records: Sequence[Dict[str, Any]],
+    ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+        configs, fingerprints = {}, {}
+        for index, record in enumerate(records):
+            key = record_key(record)
+            if key is None:
+                raise Sub2ApiError("账户缺少 email/account_id，无法解析配置")
+            email = str(record.get("email", "")).strip()
+            settings = self.resolve(email)
+            prefix = settings["name_prefix"]
+            settings["name"] = (
+                prefix + f"{settings['name_start'] + index:0{settings['name_width']}d}" if prefix else email
+            )
+            configs[key] = settings
+            fingerprints[key] = hashlib.sha256(comparable(settings).encode("utf-8")).hexdigest()
+        return configs, fingerprints
+
+
 def admin_session(
     config_file: Optional[Path],
 ) -> tuple[Path, Dict[str, Any], ApiClient, str]:
@@ -760,6 +919,7 @@ def run_import(
     summary_file: Optional[Path] = None,
 ) -> int:
     config_path, config_value, client, token = admin_session(config_file)
+    account_config = AccountConfig(config_value)
     config_dir = config_path.parent
     batches = build_batches(config_value, config_dir, input_file, cockpit_tools)
 
@@ -767,66 +927,57 @@ def run_import(
     groups = groups_value if isinstance(groups_value, list) else []
     if not isinstance(groups_value, list):
         raise Sub2ApiError("Sub2API 分组列表格式无效")
-    group_summaries = []
+    prepared: Dict[tuple[int, int], Dict[str, Any]] = {}
+    proxies: Optional[List[Dict[str, Any]]] = None
     for batch in batches:
-        for group_name in batch.group_names:
-            group = resolve_unique(groups, group_name, "分组")
-            if group.get("platform") != "openai" or group.get("status") != "active":
-                raise Sub2ApiError(f"第 {batch.index} 个批次的分组 '{group_name}' 必须是启用状态的 OpenAI 分组")
-            try:
-                batch.group_ids.append(int(group["id"]))
-            except (KeyError, TypeError, ValueError) as exc:
-                raise Sub2ApiError(f"分组 '{group_name}' 的 ID 无效") from exc
-        group_summaries.append(", ".join(batch.group_names) if batch.group_names else "无")
-
-    proxy_id = None
-    proxy_name = str(config_value.get("proxy_name", "") or "").strip()
-    if proxy_name:
-        proxies_value = client.request("GET", "/admin/proxies/all", token=token)
-        if not isinstance(proxies_value, list):
-            raise Sub2ApiError("Sub2API 代理列表格式无效")
-        proxy = resolve_unique(proxies_value, proxy_name, "代理")
-        if proxy.get("status") != "active":
-            raise Sub2ApiError(f"代理 '{proxy_name}' 当前未启用")
-        try:
-            proxy_id = int(proxy["id"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise Sub2ApiError(f"代理 '{proxy_name}' 的 ID 无效") from exc
-
-    concurrency = integer_value(config_value.get("concurrency", 3), "concurrency")
-    priority = integer_value(config_value.get("priority", 50), "priority")
-    rate_multiplier = number_value(
-        config_value.get("rate_multiplier", 1), "rate_multiplier"
-    )
-    if concurrency < 1:
-        raise Sub2ApiError("concurrency 必须大于 0")
-    if priority < 1:
-        raise Sub2ApiError("priority 必须大于 0")
-    if rate_multiplier < 0:
-        raise Sub2ApiError("rate_multiplier 不能小于 0")
-    load_factor = config_value.get("load_factor")
-    if load_factor is not None:
-        if isinstance(load_factor, bool):
-            raise Sub2ApiError("load_factor 必须大于 0，或设为 null 使用默认值")
-        load_factor = integer_value(load_factor, "load_factor")
-        if load_factor < 1:
-            raise Sub2ApiError("load_factor 必须大于 0，或设为 null 使用默认值")
-    configured_extra = config_value.get("extra") or {}
-    if not isinstance(configured_extra, dict):
-        raise Sub2ApiError("extra 必须是 JSON 对象")
-    claim_existing_accounts = config_value.get("claim_existing_accounts", False)
-    if not isinstance(claim_existing_accounts, bool):
-        raise Sub2ApiError("claim_existing_accounts 必须是 true 或 false")
-    extra = dict(configured_extra)
-    ownership_value = extra.get(OWNERSHIP_EXTRA_KEY)
-    if ownership_value not in (None, OWNERSHIP_EXTRA_VALUE):
-        raise Sub2ApiError(
-            f"extra.{OWNERSHIP_EXTRA_KEY} 是保留字段，必须使用 {OWNERSHIP_EXTRA_VALUE}"
-        )
-    extra[OWNERSHIP_EXTRA_KEY] = OWNERSHIP_EXTRA_VALUE
+        for index, record in enumerate(batch.records):
+            key = record_key(record)
+            if key is None:
+                raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email/account_id")
+            overrides = batch.account_configs.get(key, {})
+            base = account_config.resolve(str(record.get("email", "")), {
+                "group_names": batch.group_names, **(batch.config or {}),
+            })
+            combined = {**base, **overrides}
+            combined["extra"] = {
+                **base["extra"],
+                **(overrides.get("extra") or {}),
+            }
+            settings = account_settings(combined)
+            settings["group_ids"] = []
+            for group_name in settings["group_names"]:
+                group = resolve_unique(groups, group_name, "分组")
+                if group.get("platform") != "openai" or group.get("status") != "active":
+                    raise Sub2ApiError(f"分组 '{group_name}' 必须是启用状态的 OpenAI 分组")
+                try:
+                    settings["group_ids"].append(int(group["id"]))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise Sub2ApiError(f"分组 '{group_name}' 的 ID 无效") from exc
+            settings["proxy_id"] = None
+            proxy_name = settings["proxy_name"]
+            if proxy_name:
+                if proxies is None:
+                    proxies = client.request("GET", "/admin/proxies/all", token=token)
+                    if not isinstance(proxies, list):
+                        raise Sub2ApiError("Sub2API 代理列表格式无效")
+                proxy = resolve_unique(proxies, proxy_name, "代理")
+                if proxy.get("status") != "active":
+                    raise Sub2ApiError(f"代理 '{proxy_name}' 当前未启用")
+                try:
+                    settings["proxy_id"] = int(proxy["id"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise Sub2ApiError(f"代理 '{proxy_name}' 的 ID 无效") from exc
+            prefix = settings["name_prefix"]
+            settings["name"] = overrides.get("name") or (
+                prefix + f"{settings['name_start'] + index:0{settings['name_width']}d}"
+                if prefix else str(record.get("email", "")).strip()
+            )
+            if not settings["name"]:
+                raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email，无法按邮箱命名")
+            prepared[(batch.index, index)] = settings
     managed_extra = sorted(
-        name for name in extra
-        if name not in ("imported_at", "access_token_sha256", OWNERSHIP_EXTRA_KEY)
+        {name for settings in prepared.values() for name in settings["extra"]}
+        - {"imported_at", "access_token_sha256", OWNERSHIP_EXTRA_KEY}
     )
     account_snapshots: Dict[str, Dict[str, Any]] = {}
     managed_ids: Dict[str, int] = {}
@@ -840,23 +991,10 @@ def run_import(
             account_snapshots[str(current["id"])] = current
 
     created = modified = unchanged = skipped = manual_skipped = 0
-    what_if_summaries = []
-    expires_at = expires_timestamp(config_value.get("expires_at", ""))
-    for batch, group_summary in zip(batches, group_summaries):
-        name_prefix = str(effective(batch.config, config_value, "name_prefix", "") or "")
-        name_start = integer_value(
-            effective(batch.config, config_value, "name_start", 1),
-            f"第 {batch.index} 个批次的 name_start",
-        )
-        name_width = integer_value(
-            effective(batch.config, config_value, "name_width", 3),
-            f"第 {batch.index} 个批次的 name_width",
-        )
-        if name_start < 0:
-            raise Sub2ApiError(f"第 {batch.index} 个批次的 name_start 不能小于 0")
-        if not 1 <= name_width <= 99:
-            raise Sub2ApiError(f"第 {batch.index} 个批次的 name_width 必须在 1 到 99 之间")
+    for batch in batches:
         for index, record in enumerate(batch.records):
+            settings = prepared[(batch.index, index)]
+            claim_existing_accounts = settings["claim_existing_accounts"]
             key = record_key(record)
             if key is None:
                 raise Sub2ApiError(
@@ -895,38 +1033,53 @@ def run_import(
                 )
             if existing_id > 0:
                 managed_ids[key] = existing_id
-            if name_prefix:
-                name = name_prefix + f"{name_start + index:0{name_width}d}"
-            else:
-                name = str(record.get("email", "")).strip()
-                if not name:
-                    raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号缺少 email，无法按邮箱命名")
-            payload = {
-                "content": json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+            if key in batch.settings_only_keys and existing_id <= 0 and not what_if:
+                raise Sub2ApiError("仅更新设置的账号在 Sub2API 中不存在；请先完成账户导入")
+            name = settings["name"]
+            expires_at = expires_timestamp(settings["expires_at"])
+            update_payload = {
                 "name": name,
-                "notes": str(config_value.get("notes", "") or ""),
-                "proxy_id": proxy_id,
-                "concurrency": concurrency,
-                "priority": priority,
-                "rate_multiplier": rate_multiplier,
-                "group_ids": batch.group_ids,
-                "auto_pause_on_expired": bool(config_value.get("auto_pause_on_expired", False)),
-                "extra": extra,
-                "update_existing": existing_id > 0,
+                "notes": settings["notes"],
+                "proxy_id": settings["proxy_id"] or 0,
+                "concurrency": settings["concurrency"],
+                "priority": settings["priority"],
+                "rate_multiplier": settings["rate_multiplier"],
+                "load_factor": settings["load_factor"] or 0,
+                "group_ids": settings["group_ids"],
+                # 更新接口用 0 清除可选值；省略或 null 会保留旧设置。
+                "expires_at": expires_at or 0,
+                "auto_pause_on_expired": settings["auto_pause_on_expired"],
+                "extra": settings["extra"],
             }
-            if load_factor is not None:
-                payload["load_factor"] = load_factor
-            if expires_at is not None:
-                payload["expires_at"] = expires_at
             if what_if:
+                print(
+                    f"校验通过：{name}；分组={', '.join(settings['group_names']) or '无'}；"
+                    f"代理={settings['proxy_name'] or '直连'}；并发={settings['concurrency']}；"
+                    f"优先级={settings['priority']}；倍率={settings['rate_multiplier']}"
+                )
                 continue
 
-            result = client.request(
-                "POST",
-                "/admin/accounts/import/codex-session",
-                token=token,
-                body=payload,
-            )
+            if key in batch.settings_only_keys:
+                update_payload["extra"] = {**account_extra(existing_account), **settings["extra"]}
+                account_snapshots[str(existing_id)] = snapshot(existing_account, managed_extra)
+                client.request("PUT", f"/admin/accounts/{existing_id}", token=token, body=update_payload)
+                result = {"failed": 0, "items": [{"action": "updated", "account_id": existing_id}]}
+            else:
+                payload = {
+                    **update_payload,
+                    "content": json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                    "proxy_id": settings["proxy_id"],
+                    "update_existing": existing_id > 0,
+                }
+                for field_name, value in (("load_factor", settings["load_factor"]), ("expires_at", expires_at)):
+                    if value is None:
+                        payload.pop(field_name)
+                result = client.request(
+                    "POST",
+                    "/admin/accounts/import/codex-session",
+                    token=token,
+                    body=payload,
+                )
             if not isinstance(result, dict):
                 raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号返回格式无效")
             failed = result_count(result, "failed")
@@ -978,6 +1131,15 @@ def run_import(
                     raise Sub2ApiError(
                         f"账户 ID {account_id} 与导入前确认的 ID {existing_id} 不一致；已停止写入增量映射"
                     )
+                if key not in batch.settings_only_keys and action in ("created", "updated"):
+                    # 凭据导入接口不会更新名称、备注或清空分组，再用设置接口统一行为。
+                    update_payload["extra"] = {**account_extra(after_value), **settings["extra"]}
+                    if not optional_string(record.get("refresh_token")):
+                        # 保留上游为 accessToken-only 账户计算的到期和自动暂停策略。
+                        update_payload.pop("expires_at")
+                        update_payload.pop("auto_pause_on_expired")
+                    client.request("PUT", f"/admin/accounts/{account_id}", token=token, body=update_payload)
+                    after_value = account_detail(client, token, account_id)
                 after = snapshot(after_value, managed_extra)
                 managed_ids[key] = account_id
                 account_snapshots[str(account_id)] = after
@@ -1008,17 +1170,7 @@ def run_import(
             else:
                 raise Sub2ApiError(f"第 {batch.index} 个批次第 {index + 1} 个账号返回了无法识别的导入结果")
 
-        if what_if:
-            mode = f"前缀 {name_prefix}" if name_prefix else "邮箱"
-            what_if_summaries.append(
-                f"批次 {batch.index}：{len(batch.records)} 个账号；来源={batch.input_label}；命名={mode}；分组={group_summary}"
-            )
-
-    if what_if:
-        proxy_summary = proxy_name or "直连"
-        for summary in what_if_summaries:
-            print(f"校验通过：{summary}；代理={proxy_summary}；并发={concurrency}；优先级={priority}；倍率={rate_multiplier}")
-    else:
+    if not what_if:
         skipped_total = skipped + manual_skipped
         suffix = f"，跳过 {skipped_total}" if skipped_total else ""
         print(f"导入完成：新增 {created}，修改 {modified}，无变化 {unchanged}{suffix}")
@@ -1082,14 +1234,6 @@ def resolve_config(config_file: Optional[Path]) -> Path:
         )
     if not path.is_file():
         raise Sub2ApiError(f"找不到 Sub2API 导入配置：{path}")
-    return path
-
-
-def validate_config(config_file: Optional[Path] = None) -> Path:
-    path = resolve_config(config_file)
-    value = json_file(path, "Sub2API 导入配置")
-    if not isinstance(value, dict):
-        raise Sub2ApiError("Sub2API 导入配置必须是 JSON 对象")
     return path
 
 

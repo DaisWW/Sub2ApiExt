@@ -404,30 +404,6 @@ def records_from_values(values: Iterable[Any]) -> List[Dict[str, Any]]:
     return records
 
 
-def validate_input_file(
-    path: Path, *, allow_empty: bool = False, conflict_file: Optional[Path] = None
-) -> bool:
-    """校验独立账户文本和凭据冲突；可写入不含凭据的冲突报告。"""
-    values = read_json(
-        path.expanduser().resolve(), "账户文本", allow_empty=allow_empty
-    )
-    raw_records = records_from_values(values)
-    if not raw_records and not allow_empty:
-        raise NormalizeError(f"账户文本中没有找到包含 access_token 的账号：{path}")
-    if len(raw_records) > MAX_ACCOUNTS:
-        raise NormalizeError(f"账户文本中的账号数量超过 {MAX_ACCOUNTS} 个")
-    records, _, conflicts = deduplicate_with_sources(
-        (canonical_record(record, index), "accounts-file")
-        for index, record in enumerate(raw_records, start=1)
-    )
-    if conflict_file is not None:
-        write_conflict_report(conflict_file, conflicts)
-    if conflicts:
-        details = f"，详见：{conflict_file}" if conflict_file is not None else ""
-        raise NormalizeError(f"发现 {len(conflicts)} 个同账号凭据冲突；已停止导入{details}")
-    return bool(records)
-
-
 def normalize(
     data_dir: Optional[Path],
     output_dir: Path,
@@ -435,15 +411,16 @@ def normalize(
     *,
     allow_empty: bool = False,
     conflict_file: Optional[Path] = None,
+    record_sources: Optional[Iterable[Tuple[Dict[str, Any], str]]] = None,
 ) -> Dict[str, Any]:
     files = (
-        source_files(data_dir, allow_empty=account_file is not None)
+        source_files(data_dir, allow_empty=account_file is not None or record_sources is not None)
         if data_dir is not None
         else []
     )
-    if not files and account_file is None and not allow_empty:
+    if not files and account_file is None and record_sources is None and not allow_empty:
         raise NormalizeError("没有提供兑换解压目录或独立账户文本")
-    source_records: List[Tuple[Dict[str, Any], str]] = []
+    source_records: List[Tuple[Dict[str, Any], str]] = list(record_sources or ())
     for path in files:
         source_records.extend(
             (record, "redeem")
@@ -460,7 +437,7 @@ def normalize(
         )
     if not source_records and not allow_empty:
         raise NormalizeError("输入中没有找到包含 access_token 的 Codex 账号")
-    if len(source_records) > MAX_ACCOUNTS:
+    if record_sources is None and len(source_records) > MAX_ACCOUNTS:
         raise NormalizeError(f"账号数量超过 {MAX_ACCOUNTS} 个")
 
     canonical_sources = (
@@ -468,6 +445,8 @@ def normalize(
         for index, (record, source) in enumerate(source_records, start=1)
     )
     records, sources, conflicts = deduplicate_with_sources(canonical_sources)
+    if len(records) > MAX_ACCOUNTS:
+        raise NormalizeError(f"账号数量超过 {MAX_ACCOUNTS} 个")
     conflict_path = conflict_file or (output_dir / "input-conflicts.txt")
     write_conflict_report(conflict_path, conflicts)
     if conflicts:
@@ -497,7 +476,8 @@ def normalize(
         "source_counts": {
             "redeem": sum("redeem" in values for values in sources.values()),
             "accounts-file": sum(
-                "accounts-file" in values for values in sources.values()
+                any(value.split(":", 1)[0] == "accounts-file" for value in values)
+                for values in sources.values()
             ),
             "overlap": sum(len(values) > 1 for values in sources.values()),
         },

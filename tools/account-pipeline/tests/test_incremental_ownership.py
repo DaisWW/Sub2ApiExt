@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import incremental
 import run as pipeline
+from inputs import InputFiles
 from normalize import main as normalize
 from redeem import main as redeem
 from sub2api import main as sub2api
@@ -37,12 +38,21 @@ class FakeClient:
     def __init__(self, accounts: list[dict]):
         self.accounts = {account["id"]: account for account in accounts}
         self.imports: list[dict] = []
+        self.updates: list[dict] = []
 
     def request(self, method: str, path: str, *, token=None, body=None):
         if (method, path) == ("GET", "/admin/groups/all?include_inactive=true"):
             return []
         if method == "GET" and path.startswith("/admin/accounts/"):
             return self.accounts[int(path.rsplit("/", 1)[1])]
+        if method == "PUT" and path.startswith("/admin/accounts/"):
+            self.updates.append(body)
+            account = self.accounts[int(path.rsplit("/", 1)[1])]
+            account.update(body)
+            for field_name in ("load_factor", "expires_at"):
+                if field_name in body and body[field_name] <= 0:
+                    account[field_name] = None
+            return account
         if (method, path) == ("POST", "/admin/accounts/import/codex-session"):
             self.imports.append(body)
             incoming = json.loads(body["content"])
@@ -80,6 +90,12 @@ def run_import(
 
 
 class IncrementalOwnershipTests(unittest.TestCase):
+    @staticmethod
+    def load_inputs(root, codes, accounts, *, incremental=False):
+        inputs = InputFiles([codes] if codes else [], [accounts] if accounts else [])
+        inputs.load(allow_empty=incremental, conflict_file=root / "input-conflicts.txt")
+        return bool(inputs.codes)
+
     @staticmethod
     def pipeline_args(root: Path, *, codes: Path | None = None, accounts: Path | None = None, incremental_mode: bool = True) -> argparse.Namespace:
         return argparse.Namespace(
@@ -166,9 +182,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 for incremental_mode in (False, True):
                     with self.subTest(content=repr(content), incremental=incremental_mode):
                         self.assertFalse(
-                            pipeline.validate_layout(
-                                codes, accounts, None, incremental=incremental_mode
-                            )
+                            self.load_inputs(root, codes, accounts, incremental=incremental_mode)
                         )
 
     def test_blank_accounts_do_not_block_enabled_codes(self):
@@ -180,7 +194,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
             for content in ("", "\n \t\n", "\ufeff", "[]"):
                 accounts.write_text(content, encoding="utf-8")
                 with self.subTest(content=repr(content)):
-                    self.assertTrue(pipeline.validate_layout(codes, accounts, None))
+                    self.assertTrue(self.load_inputs(root, codes, accounts))
 
     def test_full_run_rejects_inputs_without_codes_or_accounts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -192,8 +206,8 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 accounts.write_text(content, encoding="utf-8")
                 for codes_file in (None, codes):
                     with self.subTest(content=repr(content), codes=codes_file):
-                        with self.assertRaises((pipeline.PipelineError, redeem.RedeemError)):
-                            pipeline.validate_layout(codes_file, accounts, None)
+                        with self.assertRaises((normalize.NormalizeError, redeem.RedeemError)):
+                            self.load_inputs(root, codes_file, accounts)
 
     def test_blank_accounts_file_is_optional_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -478,9 +492,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 return 0
 
             with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
-                pipeline, "NEW_CODES_FILE", codes
-            ), patch.object(
-                pipeline, "NEW_ACCOUNTS_FILE", accounts
+                pipeline, "INPUT_DIR", accounts.parent
             ), patch.object(
                 pipeline.redeem_module, "execute", side_effect=AssertionError("redeem called")
             ), patch.object(
@@ -628,6 +640,11 @@ class IncrementalOwnershipTests(unittest.TestCase):
             codes.write_text("\n", encoding="utf-8")
             accounts = root / "accounts.txt"
             accounts.write_text(json.dumps(record("keep@example.com")), encoding="utf-8")
+            config_file = root / "config.json"
+            config_file.write_text("{}", encoding="utf-8")
+            _, fingerprints = sub2api.AccountConfig({}).compile(
+                [record("old@example.com"), record("keep@example.com")]
+            )
             state_path = root / "cache" / "state" / "incremental.json"
             incremental.write_state(
                 state_path,
@@ -635,11 +652,14 @@ class IncrementalOwnershipTests(unittest.TestCase):
                     [record("old@example.com"), record("keep@example.com")],
                     incremental.input_scope(codes, accounts),
                     {"email:old@example.com": 7, "email:keep@example.com": 7},
+                    config_fingerprints=fingerprints,
                 ),
             )
             account = remote(7, "keep@example.com", managed=True)
             account["name"] = "old@example.com"
             client = FakeClient([account])
+            args = self.pipeline_args(root, codes=codes, accounts=accounts)
+            args.sub2api_config = config_file
             with patch.object(pipeline, "load_pipeline_config", return_value={}), patch.object(
                 pipeline.redeem_module, "execute", side_effect=AssertionError("redeem called")
             ), patch.object(
@@ -648,7 +668,7 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 sub2api, "admin_session", side_effect=AssertionError("remote lookup called")
             ):
                 self.assertEqual(
-                    pipeline.run(self.pipeline_args(root, codes=codes, accounts=accounts)),
+                    pipeline.run(args),
                     0,
                 )
             self.assertIn(7, client.accounts)

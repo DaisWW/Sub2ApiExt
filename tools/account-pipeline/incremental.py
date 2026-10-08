@@ -22,6 +22,7 @@ class Delta:
     unchanged: int
     scope_changed: bool = False
     refreshed: List[Dict[str, Any]] = field(default_factory=list)
+    configured: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def text(value: Any) -> str:
@@ -99,6 +100,7 @@ def _state_accounts(value: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
                 for value in sources
                 if isinstance(value, str) and value.strip()
             ),
+            "config_fingerprint": text(item.get("config_fingerprint")),
         }
     return result
 
@@ -108,6 +110,7 @@ def compare(
     state: Mapping[str, Any],
     scope: Mapping[str, str],
     refresh_keys: Optional[Iterable[str]] = None,
+    config_fingerprints: Optional[Mapping[str, str]] = None,
 ) -> Delta:
     current: Dict[str, Dict[str, Any]] = {}
     for record in records:
@@ -131,25 +134,44 @@ def compare(
         for key, record in current.items()
         if key in previous and key in forced_refresh
     ]
+    configured = [
+        record for key, record in current.items()
+        if key in previous and key not in forced_refresh
+        and config_fingerprints is not None
+        and config_fingerprints.get(key) != previous[key].get("config_fingerprint")
+    ]
     removed = [record for key, record in previous.items() if key not in current]
-    unchanged = len(current.keys() & previous.keys()) - len(refreshed)
+    unchanged = len(current.keys() & previous.keys()) - len(refreshed) - len(configured)
     return Delta(
         current=current,
         previous=previous,
         added=added,
         refreshed=refreshed,
+        configured=configured,
         removed=removed,
         unchanged=unchanged,
         scope_changed=scope_changed,
     )
 
 
-def sub2api_payload(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def sub2api_payload(
+    records: Iterable[Dict[str, Any]],
+    account_configs: Optional[Mapping[str, Dict[str, Any]]] = None,
+    *, settings_only_keys: Iterable[str] = (),
+) -> Dict[str, Any]:
+    settings_only = set(settings_only_keys)
     return {
         "type": "sub2api-data",
         "version": 1,
         "accounts": [
-            {"name": text(record.get("email")), "credentials": record}
+            {
+                "name": (account_configs[account_key(record)].get("name", text(record.get("email")))
+                         if account_configs is not None else text(record.get("email"))),
+                "credentials": record,
+                **({"config": account_configs[account_key(record)]}
+                   if account_configs is not None else {}),
+                **({"settings_only": True} if account_key(record) in settings_only else {}),
+            }
             for record in records
         ],
     }
@@ -172,14 +194,20 @@ def write_json(path: Path, value: Any) -> None:
         raise IncrementalError(f"写入增量文件失败：{path}") from exc
 
 
-def write_delta(output_dir: Path, delta: Delta) -> Dict[str, str]:
+def write_delta(
+    output_dir: Path, delta: Delta, *,
+    account_configs: Optional[Mapping[str, Dict[str, Any]]] = None,
+) -> Dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     sub2api_path = output_dir / "incremental-sub2api.json"
     cockpit_path = output_dir / "incremental-cockpit.json"
     removed_path = output_dir / "removed.json"
-    import_records = [*delta.added, *delta.refreshed]
-    write_json(sub2api_path, sub2api_payload(import_records))
-    write_json(cockpit_path, import_records)
+    import_records = [*delta.added, *delta.refreshed, *delta.configured]
+    write_json(sub2api_path, sub2api_payload(
+        import_records, account_configs,
+        settings_only_keys={account_key(record) for record in delta.configured},
+    ))
+    write_json(cockpit_path, [*delta.added, *delta.refreshed])
     write_json(removed_path, delta.removed)
     return {
         "sub2api_input": str(sub2api_path.resolve()),
@@ -194,6 +222,7 @@ def build_state(
     sub2api_ids: Mapping[str, Any],
     managed_keys: Optional[Iterable[str]] = None,
     source_keys: Optional[Mapping[str, Iterable[str]]] = None,
+    config_fingerprints: Optional[Mapping[str, str]] = None,
 ) -> Dict[str, Any]:
     managed_key_set = set(managed_keys) if managed_keys is not None else None
     accounts: Dict[str, Dict[str, Any]] = {}
@@ -205,6 +234,8 @@ def build_state(
             "email": text(record.get("email")),
             "account_id": text(record.get("account_id")),
         }
+        if config_fingerprints is not None:
+            item["config_fingerprint"] = config_fingerprints[key]
         if source_keys is not None:
             values = source_keys.get(key, ())
             item["sources"] = sorted(
