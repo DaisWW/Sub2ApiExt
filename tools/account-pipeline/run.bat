@@ -1,16 +1,6 @@
 @echo off
 setlocal
-set "SCRIPT=%~dp0run.py"
-if /I "%~1"=="--script" (
-    if "%~2"=="" (
-        echo Python launcher requires a script path.
-        set "EXIT_CODE=2"
-        goto finish
-    )
-    set "SCRIPT=%~f2"
-    shift
-    shift
-)
+set "SCRIPT=%~dp0launch.py"
 if not exist "%SCRIPT%" (
     echo Python script was not found: %SCRIPT%
     set "EXIT_CODE=2"

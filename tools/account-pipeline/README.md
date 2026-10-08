@@ -36,7 +36,7 @@ incremental.bat [拖入卡密或账户文本]
 refresh-tokens.bat [拖入卡密或账户文本]
 ```
 
-根目录的 `run.bat` 是唯一的 Python 启动实现；模块 BAT 只传入目标脚本和参数，因此根目录不会再有第二个公共启动 BAT。
+根目录的 `run.bat` 统一查找 Python，由 `launch.py` 选择目标脚本并传递业务参数；全量、增量、Token 刷新都进入同一份 `run.py` 编排实现，模块 BAT 只传入目标脚本和参数。
 
 ## Token 刷新
 
