@@ -16,6 +16,7 @@ class InputFiles:
     accounts_files: List[Path]
     codes: List[str] = field(default_factory=list, repr=False)
     sources: List[Tuple[Dict[str, Any], str]] = field(default_factory=list, repr=False)
+    failures: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def discover(cls, input_dir: Path) -> InputFiles:
@@ -40,18 +41,23 @@ class InputFiles:
 
     def load(self, *, allow_empty: bool, conflict_file: Path) -> List[Dict[str, Any]]:
         self.sources = []
+        self.failures = {}
         for path in self.accounts_files:
-            raw = normalize.records_from_values(normalize.read_json(path, "账户文本", allow_empty=True))
-            self.sources.extend(
-                (normalize.canonical_record(record, index), f"accounts-file:{path}")
-                for index, record in enumerate(raw, 1)
-            )
+            try:
+                raw = normalize.records_from_values(normalize.read_json(path, "账户文本", allow_empty=True))
+            except normalize.NormalizeError as exc:
+                self.failures["source:" + str(path)] = str(exc)
+                print(f"[输入][失败] {path}：{exc}")
+                continue
+            self.sources.extend(normalize.canonical_sources(
+                ((record, f"accounts-file:{path}") for record in raw), self.failures,
+            ))
         records, _, conflicts = normalize.deduplicate_with_sources(self.sources)
         normalize.write_conflict_report(conflict_file, conflicts)
-        if conflicts:
-            raise normalize.NormalizeError(
-                f"发现 {len(conflicts)} 个同账号凭据冲突；已停止导入，详见：{conflict_file}"
-            )
+        for key in conflicts:
+            self.failures[key] = "同账号凭据冲突；已隔离，不选择任一来源的 token"
+            print(f"[输入][失败] {key}：{self.failures[key]}")
+        records = [record for record in records if normalize.record_key(record) not in self.failures]
         self.codes = list(dict.fromkeys(
             code for path in self.codes_files
             for code in redeem.read_codes(path, allow_blank=True)
@@ -60,6 +66,6 @@ class InputFiles:
             raise redeem.RedeemError("合并后的卡密数量或内容超过兑换站限制")
         if len(records) > normalize.MAX_ACCOUNTS:
             raise normalize.NormalizeError(f"账号数量超过 {normalize.MAX_ACCOUNTS} 个")
-        if not self.codes and not records and not allow_empty:
+        if not self.codes and not records and not allow_empty and not self.failures:
             raise normalize.NormalizeError("输入中没有可用卡密或账户；请填写卡密或账户文本")
         return records

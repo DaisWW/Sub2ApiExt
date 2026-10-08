@@ -100,11 +100,8 @@ class AccountConfigTests(unittest.TestCase):
         for config in (
             {"defaults": []}, {"accounts": []}, {"redeem_codes": []},
             {"accounts": {"bad": {}}},
-            {"accounts": {"one@example.com": {"sub2api_url": "http://elsewhere"}}},
-            {"accounts": {"one@example.com": {"concurrency": 0}}},
-            {"accounts": {"one@example.com": {"extra": []}}},
             {"accounts": {"one@example.com": {}, " ONE@EXAMPLE.COM ": {}}},
-            {"redeem_codes": {"SECRET-CARD": {"priority": 0}}},
+            {"accounts": {"one@example.com": {"priority": 0}, " ONE@EXAMPLE.COM ": {}}},
         ):
             with self.subTest(config=config):
                 with self.assertRaises(sub2api.Sub2ApiError) as error:
@@ -204,8 +201,10 @@ class AccountConfigTests(unittest.TestCase):
             root = Path(directory)
             self.input(root, [record("same@example.com")])
             self.input(root, [{**record("same@example.com"), "access_token": "secret-conflicting-token"}], name="accounts-other.txt")
-            with self.assertRaises(normalize.NormalizeError):
-                self.prepare(root, {})
+            metadata, configs, _ = self.prepare(root, {})
+            self.assertEqual(metadata["accounts"], 0)
+            self.assertEqual(set(metadata["failed_accounts"]), {"email:same@example.com"})
+            self.assertEqual(configs, {})
             report = (root / "cache" / "results" / "input-conflicts.txt").read_text(encoding="utf-8-sig")
             self.assertIn("access_token", report)
             self.assertNotIn("secret-conflicting-token", report)
@@ -262,8 +261,7 @@ class AccountConfigTests(unittest.TestCase):
             with patch.object(sub2api, "admin_session", return_value=(root / "main.json", {}, client, "token")), patch.object(
                 sub2api, "get_accounts", return_value=[]
             ):
-                with self.assertRaisesRegex(sub2api.Sub2ApiError, "仅更新设置"):
-                    sub2api.run_import(Path(paths["sub2api_input"]), None)
+                self.assertEqual(sub2api.run_import(Path(paths["sub2api_input"]), None), 1)
             self.assertEqual(client.imports, [])
             self.assertEqual(client.updates, [])
 
@@ -364,7 +362,7 @@ class AccountConfigTests(unittest.TestCase):
             self.assertEqual(client.accounts[7]["expires_at"], 2000000000)
             self.assertTrue(client.accounts[7]["auto_pause_on_expired"])
 
-    def test_all_groups_are_validated_before_first_import(self):
+    def test_invalid_account_group_does_not_block_valid_account(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.input(root, [record("first@example.com"), record("last@example.com")])
@@ -373,10 +371,11 @@ class AccountConfigTests(unittest.TestCase):
                 "accounts": {"last@example.com": {"group_names": ["不存在的分组"]}},
             })
             client = GroupClient([])
-            with patch.object(sub2api, "admin_session", return_value=(root / "main.json", {}, client, "token")):
-                with self.assertRaises(sub2api.Sub2ApiError):
-                    sub2api.run_import(Path(metadata["sub2api_input"]), None)
-            self.assertEqual(client.imports, [])
+            with patch.object(sub2api, "admin_session", return_value=(root / "main.json", {}, client, "token")), patch.object(
+                sub2api, "get_accounts", return_value=[]
+            ):
+                self.assertEqual(sub2api.run_import(Path(metadata["sub2api_input"]), None), 1)
+            self.assertEqual([json.loads(body["content"])["email"] for body in client.imports], ["first@example.com"])
 
     def test_incremental_updates_email_settings_group_removal_and_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
