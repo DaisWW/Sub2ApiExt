@@ -404,8 +404,10 @@ def records_from_values(values: Iterable[Any]) -> List[Dict[str, Any]]:
     return records
 
 
-def validate_input_file(path: Path, *, allow_empty: bool = False) -> bool:
-    """校验独立账户文本，不访问网络也不写输出。"""
+def validate_input_file(
+    path: Path, *, allow_empty: bool = False, conflict_file: Optional[Path] = None
+) -> bool:
+    """校验独立账户文本和凭据冲突；可写入不含凭据的冲突报告。"""
     values = read_json(
         path.expanduser().resolve(), "账户文本", allow_empty=allow_empty
     )
@@ -414,9 +416,16 @@ def validate_input_file(path: Path, *, allow_empty: bool = False) -> bool:
         raise NormalizeError(f"账户文本中没有找到包含 access_token 的账号：{path}")
     if len(raw_records) > MAX_ACCOUNTS:
         raise NormalizeError(f"账户文本中的账号数量超过 {MAX_ACCOUNTS} 个")
-    for index, record in enumerate(raw_records, start=1):
-        canonical_record(record, index)
-    return bool(raw_records)
+    records, _, conflicts = deduplicate_with_sources(
+        (canonical_record(record, index), "accounts-file")
+        for index, record in enumerate(raw_records, start=1)
+    )
+    if conflict_file is not None:
+        write_conflict_report(conflict_file, conflicts)
+    if conflicts:
+        details = f"，详见：{conflict_file}" if conflict_file is not None else ""
+        raise NormalizeError(f"发现 {len(conflicts)} 个同账号凭据冲突；已停止导入{details}")
+    return bool(records)
 
 
 def normalize(

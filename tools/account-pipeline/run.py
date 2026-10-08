@@ -35,6 +35,45 @@ class PipelineError(RuntimeError):
     """流水线输入或运行状态错误。"""
 
 
+PIPELINE_ERRORS = (
+    PipelineError, OSError, ValueError, TypeError, KeyError,
+    incremental_module.IncrementalError, normalize_module.NormalizeError,
+    redeem_module.RedeemError, sub2api_module.Sub2ApiError, cockpit_module.CockpitError,
+    token_state_module.TokenStateError,
+)
+
+
+@contextmanager
+def runtime_lock(runtime_dir: Path):
+    """对同一运行目录互斥；操作系统在进程结束后释放锁，不删除锁文件。"""
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    with (runtime_dir / "pipeline.lock").open("a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+        else:
+            import fcntl
+        try:
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise PipelineError(f"运行目录已有流水线正在执行，请等待完成后再运行：{runtime_dir}") from exc
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 class TeeStream:
     """同时保留控制台输出和本次运行日志。"""
 
@@ -180,13 +219,14 @@ def validate_layout(
     sub2api_config: Optional[Path],
     *,
     incremental: bool = False,
+    conflict_file: Optional[Path] = None,
 ) -> bool:
     if sys.version_info < (3, 8):
         raise PipelineError("需要 Python 3.8 或更高版本")
     has_accounts = False
     if accounts_file is not None:
         has_accounts = normalize_module.validate_input_file(
-            accounts_file, allow_empty=True
+            accounts_file, allow_empty=True, conflict_file=conflict_file
         )
     has_codes = False
     if codes_file is not None:
@@ -282,6 +322,15 @@ def stage_error(
 
 def run(args: argparse.Namespace) -> int:
     config = load_pipeline_config()
+    runtime_dir = (
+        resolved(args.runtime_dir) if args.runtime_dir is not None
+        else config_path(config.get("runtime_dir")) or resolved(DEFAULT_RUNTIME_DIR)
+    )
+    with runtime_lock(runtime_dir):
+        return run_pipeline(args, config, runtime_dir)
+
+
+def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: Path) -> int:
     refresh_tokens = bool(getattr(args, "refresh_tokens", False))
     if args.incremental and refresh_tokens:
         raise PipelineError("--incremental 不能与 --refresh-tokens 同时使用")
@@ -294,13 +343,6 @@ def run(args: argparse.Namespace) -> int:
     codes_file, accounts_file = choose_inputs(
         args.input_file, args.codes_file, args.accounts_file
     )
-
-    if args.runtime_dir is not None:
-        runtime_dir = resolved(args.runtime_dir)
-    else:
-        runtime_dir = config_path(config.get("runtime_dir")) or resolved(
-            DEFAULT_RUNTIME_DIR
-        )
 
     sub2api_config = (
         resolved(args.sub2api_config)
@@ -323,6 +365,7 @@ def run(args: argparse.Namespace) -> int:
         accounts_file,
         sub2api_config,
         incremental=args.incremental or refresh_tokens,
+        conflict_file=runtime_dir / "results" / "input-conflicts.txt",
     )
     if codes_file is not None:
         print(f"卡密输入：{codes_file}")
@@ -813,19 +856,7 @@ def run(args: argparse.Namespace) -> int:
         else:
             print(f"流水线完成。运行记录：{pipeline_manifest}")
         return final_code
-    except (
-        OSError,
-        ValueError,
-        TypeError,
-        KeyError,
-        incremental_module.IncrementalError,
-        normalize_module.NormalizeError,
-        redeem_module.RedeemError,
-        sub2api_module.Sub2ApiError,
-        cockpit_module.CockpitError,
-        token_state_module.TokenStateError,
-        PipelineError,
-    ) as exc:
+    except PIPELINE_ERRORS as exc:
         return stage_error(manifest, pipeline_manifest, stage, 1, str(exc))
 
 
@@ -876,19 +907,12 @@ def main() -> int:
         )
         with capture_log(log_file):
             print(f"[日志] 本次流水线日志：{log_file}")
-            return run(args)
-    except (
-        PipelineError,
-        OSError,
-        ValueError,
-        TypeError,
-        KeyError,
-        incremental_module.IncrementalError,
-        normalize_module.NormalizeError,
-        redeem_module.RedeemError,
-        sub2api_module.Sub2ApiError,
-        token_state_module.TokenStateError,
-    ) as exc:
+            try:
+                return run(args)
+            except PIPELINE_ERRORS as exc:
+                print(f"流水线失败：{exc}", file=sys.stderr)
+                return 1
+    except PIPELINE_ERRORS as exc:
         print(f"流水线失败：{exc}", file=sys.stderr)
         return 1
 
