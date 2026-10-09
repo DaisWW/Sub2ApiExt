@@ -1,6 +1,6 @@
 export const $ = (selector) => document.querySelector(selector);
 
-// Keep latency colors consistent across end-to-end and first-byte metrics.
+// First-byte delay threshold; total request duration is reference information.
 export const slowLatencyThresholdMs = 20000;
 
 export class LatestRequest {

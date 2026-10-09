@@ -2,7 +2,6 @@ package store
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
@@ -10,7 +9,7 @@ import (
 )
 
 func targetStats(
-	samples, successful, rateLimited, hardFailures int,
+	samples, successful, rateLimited, hardFailures, attempts int,
 	firstFastest sql.NullInt64,
 	firstMedian sql.NullFloat64,
 	firstP95 sql.NullFloat64,
@@ -18,13 +17,15 @@ func targetStats(
 	latencyMedian, latencyP95 sql.NullFloat64,
 ) model.TargetStats {
 	stats := model.TargetStats{
-		Samples: samples, Successful: successful, Errors: samples - successful,
+		Samples: samples, Successful: successful, Errors: samples - successful, Attempts: attempts,
 		RateLimited: rateLimited, HardFailures: hardFailures,
 	}
 	if samples > 0 {
 		stats.Availability = float64(successful) * 100 / float64(samples)
-		stats.RateLimitRate = float64(rateLimited) * 100 / float64(samples)
 		stats.HardFailureRate = float64(hardFailures) * 100 / float64(samples)
+	}
+	if attempts > 0 {
+		stats.RateLimitRate = float64(rateLimited) * 100 / float64(attempts)
 	}
 	stats.FirstByte = metricStats(firstFastest, firstMedian, firstP95)
 	stats.Latency = metricStats(latencyFastest, latencyMedian, latencyP95)
@@ -34,6 +35,7 @@ func targetStats(
 func evaluateCurrentHealth(
 	windowSeconds, samples, successful, rateLimited, hardFailures, attempts int,
 	latestAt sql.NullTime, fastest sql.NullInt64, median, p95 sql.NullFloat64,
+	firstSamples int, firstFastest sql.NullInt64, firstMedian, firstP95 sql.NullFloat64,
 	affectedAccounts, observedAccounts, memberAccounts int,
 ) model.HealthWindow {
 	window := model.HealthWindow{
@@ -41,7 +43,8 @@ func evaluateCurrentHealth(
 		Samples:       samples, Attempts: attempts, Successful: successful,
 		RateLimited: rateLimited, HardFailures: hardFailures,
 		AffectedAccounts: affectedAccounts, ObservedAccounts: observedAccounts, MemberAccounts: memberAccounts,
-		Latency: metricStats(fastest, median, p95),
+		Latency:          metricStats(fastest, median, p95),
+		FirstByteSamples: firstSamples, FirstByte: metricStats(firstFastest, firstMedian, firstP95),
 	}
 	if latestAt.Valid {
 		value := latestAt.Time.UTC()
@@ -57,33 +60,45 @@ func applyCurrentHealth(target *model.DashboardTarget) {
 	if target == nil {
 		return
 	}
-	health := target.CurrentHealth
-	if !currentHealthOverridesTarget(*target, health) {
+	// Aggregate checks determine member availability. Their quality metrics can
+	// include other groups, so only this target's requests may supply warnings.
+	if target.Kind == model.KindGroup && target.LatestSource == "aggregate" && target.Available {
+		target.Status = model.StatusOperational
+		target.HealthReason = ""
+		target.LatestMessage = ""
+	}
+	health := &target.CurrentHealth
+	if health.Samples == 0 {
+		health = &target.LastRequestHealth
+	}
+	if !currentHealthOverridesTarget(*target, *health) {
 		return
 	}
+	if target.Kind == model.KindGroup && !health.Available && target.Available {
+		// A failed request window does not disprove a working member route.
+		// Keep the warning until member aggregation confirms unavailability.
+		health.Status = model.StatusDegraded
+		health.Available = true
+	}
+	health.Applied = true
 	target.Status = health.Status
 	target.Available = health.Available
 	target.HealthReason = health.Reason
-	if health.Reason != model.HealthReasonRateLimited && isCurrentRateLimitMessage(target.LatestMessage) {
+	if isCurrentRateLimitMessage(target.LatestMessage) {
 		target.LatestMessage = ""
 	}
 	if health.LatestAt != nil {
 		target.LastCheckedAt = health.LatestAt
-		target.Stale = false
-	}
-	if health.Reason == model.HealthReasonRateLimited {
-		if target.Kind == model.KindGroup {
-			target.LatestMessage = fmt.Sprintf("当前仍可用；近 %d 分钟阶段性限速 %.1f%%，受影响账户 %d/%d",
-				health.WindowSeconds/60, health.RateLimitRate, health.AffectedAccounts, health.MemberAccounts)
-		} else {
-			target.LatestMessage = fmt.Sprintf("当前可用，但近 %d 分钟有 %.1f%% 上游尝试被限速",
-				health.WindowSeconds/60, health.RateLimitRate)
-		}
+		target.Stale = target.CurrentHealth.Samples == 0
 	}
 }
 
 func currentHealthOverridesTarget(target model.DashboardTarget, health model.HealthWindow) bool {
 	if health.Samples == 0 {
+		return false
+	}
+	if (!target.Available || target.LatestSource == "probe") && health.LatestAt != nil && target.LastCheckedAt != nil &&
+		health.LatestAt.Before(*target.LastCheckedAt) {
 		return false
 	}
 	if health.Confidence == model.HealthConfidenceLow &&
@@ -99,10 +114,7 @@ func currentHealthOverridesTarget(target model.DashboardTarget, health model.Hea
 		// based on a separate, explicit channel error.
 		return false
 	}
-	if target.Kind != model.KindGroup || health.Available || !target.Available {
-		return true
-	}
-	return health.MemberAccounts > 0 && health.ObservedAccounts >= health.MemberAccounts
+	return true
 }
 
 func isCurrentRateLimitMessage(message string) bool {

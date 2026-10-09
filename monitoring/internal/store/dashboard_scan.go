@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/stats"
 )
 
 func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration) (model.DashboardTarget, bool, error) {
@@ -17,7 +18,7 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	var routeMessage sql.NullString
 	var latestLatency, latestFirst sql.NullInt64
 	var latestAt sql.NullTime
-	var samples, successful, rateLimited, hardFailures int
+	var samples, successful, rateLimited, hardFailures, attempts int
 	var firstFastest, latencyFastest sql.NullInt64
 	var firstMedian, firstP95, latencyMedian, latencyP95 sql.NullFloat64
 	var recentJSON []byte
@@ -29,6 +30,10 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	var currentLatestAt sql.NullTime
 	var currentFastest sql.NullInt64
 	var currentMedian, currentP95 sql.NullFloat64
+	var currentFirstSamples int
+	var currentFirstFastest sql.NullInt64
+	var currentFirstMedian, currentFirstP95 sql.NullFloat64
+	var lastRequestJSON []byte
 	var affectedAccounts, observedAccounts, memberAccounts int
 	if err := rows.Scan(
 		&target.Key, &target.Kind, &target.EntityID, &target.Name, &target.Platform,
@@ -36,12 +41,14 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 		&currentRate, &priority, &routeConfigured, &routeMessage,
 		&latestStatus, &latestHealthReason, &latestLatency,
 		&latestFirst, &latestAt, &latestSource, &latestMessage, &samples, &successful,
-		&rateLimited, &hardFailures,
+		&rateLimited, &hardFailures, &attempts,
 		&firstFastest, &firstMedian, &firstP95, &latencyFastest,
 		&latencyMedian, &latencyP95,
 		&currentWindowSeconds, &currentSamples, &currentSuccessful,
 		&currentRateLimited, &currentHardFailures, &currentAttempts, &currentLatestAt,
-		&currentFastest, &currentMedian, &currentP95, &affectedAccounts, &observedAccounts, &memberAccounts,
+		&currentFastest, &currentMedian, &currentP95,
+		&currentFirstSamples, &currentFirstFastest, &currentFirstMedian, &currentFirstP95,
+		&affectedAccounts, &observedAccounts, &memberAccounts, &lastRequestJSON,
 		&recentJSON,
 	); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("scan dashboard: %w", err)
@@ -62,10 +69,16 @@ func scanDashboardTarget(rows *sql.Rows, now time.Time, staleAfter time.Duration
 	target.RouteMessage = strings.TrimSpace(routeMessage.String)
 	applyLatestTargetStateWithMessage(&target, latestStatus, latestSource, latestMessage, latestLatency, latestFirst, latestAt, now, staleAfter)
 	target.HealthReason = strings.TrimSpace(latestHealthReason.String)
-	target.Stats = targetStats(samples, successful, rateLimited, hardFailures, firstFastest, firstMedian, firstP95, latencyFastest, latencyMedian, latencyP95)
+	target.Stats = targetStats(samples, successful, rateLimited, hardFailures, attempts, firstFastest, firstMedian, firstP95, latencyFastest, latencyMedian, latencyP95)
 	target.CurrentHealth = evaluateCurrentHealth(currentWindowSeconds, currentSamples, currentSuccessful,
 		currentRateLimited, currentHardFailures, currentAttempts, currentLatestAt,
-		currentFastest, currentMedian, currentP95, affectedAccounts, observedAccounts, memberAccounts)
+		currentFastest, currentMedian, currentP95,
+		currentFirstSamples, currentFirstFastest, currentFirstMedian, currentFirstP95,
+		affectedAccounts, observedAccounts, memberAccounts)
+	if err := json.Unmarshal(lastRequestJSON, &target.LastRequestHealth); err != nil {
+		return model.DashboardTarget{}, false, fmt.Errorf("decode last request health: %w", err)
+	}
+	target.LastRequestHealth = stats.EvaluateHealth(target.LastRequestHealth, stats.DefaultHealthPolicy)
 	applyCurrentHealth(&target)
 	if err := json.Unmarshal(recentJSON, &target.RecentSamples); err != nil {
 		return model.DashboardTarget{}, false, fmt.Errorf("decode recent samples: %w", err)

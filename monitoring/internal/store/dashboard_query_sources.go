@@ -83,18 +83,18 @@ WITH bounds AS (
            ON routes.id = targets.entity_id AND targets.kind = 'group'
 ), period_usage AS MATERIALIZED (
 	SELECT ul.id, ul.account_id, ul.group_id, ul.duration_ms, ul.first_token_ms, ul.created_at,
-	       ul.request_id
+	       ul.request_id,
+	       CASE
+	           WHEN NULLIF(BTRIM(ul.request_id), '') IS NULL THEN 'usage:' || ul.id::text
+	           ELSE 'request:' || LOWER(REGEXP_REPLACE(BTRIM(ul.request_id), '^client:', '', 'i'))
+	       END AS request_key
 	FROM usage_logs ul
 	CROSS JOIN bounds
 	WHERE ul.created_at >= bounds.start_at AND ul.created_at < bounds.end_at AND ul.actual_cost > 0
 
 ), account_usage AS MATERIALIZED (
 	SELECT ul.id, ul.account_id, ul.group_id, ul.duration_ms, ul.first_token_ms, ul.created_at,
-	       ul.request_id,
-	       CASE
-	           WHEN NULLIF(BTRIM(ul.request_id), '') IS NULL THEN 'usage:' || ul.id::text
-	           ELSE 'request:' || LOWER(REGEXP_REPLACE(BTRIM(ul.request_id), '^client:', '', 'i'))
-	       END AS request_key
+	       ul.request_id, ul.request_key
 	FROM period_usage ul
 	JOIN active_accounts a ON a.id = ul.account_id
 ), latest_account_usage AS MATERIALIZED (

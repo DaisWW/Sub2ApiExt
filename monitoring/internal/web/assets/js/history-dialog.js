@@ -82,7 +82,6 @@ function renderHistoryRow(item, groupHistory) {
   const message = String(item.message || '请求失败');
   const account = historyAccountLabel(item, groupHistory);
   const firstByteTone = latencyMetricClass(item.first_byte_ms);
-  const latencyTone = latencyMetricClass(item.latency_ms);
   const errorDetail = status === 'failed'
     ? `<small class="history-error" title="${escapeHTML(message)}">${escapeHTML(message)}</small>`
     : '';
@@ -92,7 +91,7 @@ function renderHistoryRow(item, groupHistory) {
     <td>${formatTime(item.checked_at)}<small class="history-source">${sourceLabel(item.source)}</small>${reasonDetail}${errorDetail}</td>
     ${groupHistory ? `<td class="history-account">${escapeHTML(account)}</td>` : ''}
     <td class="latency-value${firstByteTone ? ` ${firstByteTone}` : ''}">${formatMs(item.first_byte_ms)}</td>
-    <td class="latency-value${latencyTone ? ` ${latencyTone}` : ''}">${formatMs(item.latency_ms)}</td>
+    <td class="latency-value">${formatMs(item.latency_ms)}</td>
   </tr>`;
 }
 
@@ -112,8 +111,7 @@ function displayHistoryStatus(item) {
   if (normalized === 'failed' || normalized === 'error' || normalized === 'disabled') return 'failed';
   if (normalized === 'unknown') return 'unknown';
   if (item?.health_reason === 'rate_limited') return 'degraded';
-  if (item?.kind === 'group') return normalized === 'degraded' ? 'degraded' : 'operational';
-  const latency = Number(item?.latency_ms);
+  const latency = Number(item?.first_byte_ms);
   if (Number.isFinite(latency) && latency > 0) {
     return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
   }
@@ -123,7 +121,7 @@ function displayHistoryStatus(item) {
 
 function historyReasonLabel(reason) {
   if (reason === 'rate_limited') return '阶段性限速';
-  if (reason === 'slow') return '延迟偏高';
+  if (reason === 'slow') return '首字延迟偏高';
   if (reason === 'upstream_error') return '上游错误';
   return '';
 }

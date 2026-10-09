@@ -37,7 +37,7 @@ const cases = [
   { name: 'failed account with an older green trajectory', kind: 'account', status: 'failed', last: 'operational', display: 'failed' },
   { name: 'recovered group with an older red trajectory', status: 'operational', last: 'failed', display: 'operational' },
   { name: 'recovered account with old slow latency', kind: 'account', status: 'operational', latency: 79000, currentSamples: 12, last: 'degraded', display: 'operational' },
-  { name: 'slow account without current request evidence', kind: 'account', status: 'operational', latency: 25000, last: 'operational', display: 'degraded' },
+  { name: 'long total duration never repaints an idle account', kind: 'account', status: 'operational', latency: 25000, last: 'operational', display: 'operational' },
   { name: 'rate limited route with an older green trajectory', status: 'operational', reason: 'rate_limited', last: 'operational', display: 'degraded' },
   { name: 'usable mixed group with slow diagnostic metrics', status: 'operational', latency: 79000, last: 'operational', display: 'operational' },
   { name: 'explicit failure despite sparse current evidence', kind: 'account', status: 'failed', currentSamples: 2, last: 'operational', display: 'failed' },
@@ -61,7 +61,17 @@ for (const scenario of cases) {
       health_reason: scenario.reason || '',
       latest_source: scenario.noSamples ? '' : scenario.kind === 'account' ? 'history' : 'aggregate',
       latest_latency_ms: scenario.latency || 1000,
-      current_health: { samples: scenario.currentSamples || 0 },
+      current_health: {
+        samples: scenario.currentSamples || 0,
+        first_byte_samples: scenario.currentSamples || 0,
+        first_byte: { median_ms: 2000 },
+        applied: Boolean(scenario.currentSamples)
+      },
+      last_request_health: scenario.noSamples ? {} : {
+        samples: 8, first_byte_samples: 8,
+        first_byte: { median_ms: scenario.reason === 'slow' ? 25000 : 2000 },
+        latest_at: '2026-10-09T01:00:00Z', applied: !scenario.currentSamples
+      },
       stale: Boolean(scenario.stale),
       stats: {
         samples: scenario.noSamples ? 0 : 50,
@@ -78,7 +88,9 @@ for (const scenario of cases) {
     const availability = html.match(/<strong class="availability-value ([^"]+)"[^>]*>([^<]+)<\/strong>/);
     assert.equal(availability[1], tone);
     assert.equal(availability[2], scenario.noSamples ? '—' : '100.00%');
-    assert.match(html, /metric-value warn">1m 06s/);
+    assert.doesNotMatch(html, /metric-value warn">1m 06s/);
+    assert.doesNotMatch(html, /metric-value warn">1m 19s/);
+    assert.match(html, /总耗时 P95/);
 
     const history = html.match(/<div class="status-history"[^>]*>([\s\S]*?)<\/div>/)[1];
     const cells = [...history.matchAll(/<i class="([^"]+)"[^>]*aria-label="([^"]*)"/g)];
@@ -98,3 +110,61 @@ for (const scenario of cases) {
     assert.deepEqual(target.recent_samples, originalSamples);
   });
 }
+
+test('current decision explains its exact first byte window', () => {
+  const html = renderTarget({
+    kind: 'group', key: 'group:10', name: 'Test', status: 'degraded', health_reason: 'slow',
+    current_health: {
+      samples: 8, first_byte_samples: 8, first_byte: { median_ms: 25000 }, applied: true
+    },
+    stats: { samples: 40, availability: 100, latency: { median_ms: 90000, p95_ms: 120000 } }
+  });
+  assert.match(html, /近 5 分钟首字中位数 25s · 8 次请求/);
+  assert.match(html, /metric-value warn">25s/);
+  assert.doesNotMatch(html, /metric-value warn">(?:1m 30s|2m 00s)/);
+});
+
+test('sparse first byte measurements stay neutral and explicit', () => {
+  const html = renderTarget({
+    kind: 'account', key: 'account:1', status: 'operational',
+    current_health: { samples: 10, first_byte_samples: 4, first_byte: { median_ms: 30000 }, applied: true }
+  });
+  assert.match(html, /样本不足（首字 4\/5）/);
+  assert.doesNotMatch(html, /metric-value warn/);
+  assert.match(html, /target-card target-operational/);
+});
+
+test('idle state shows the original evidence time', () => {
+  const html = renderTarget({
+    kind: 'group', key: 'group:1', status: 'operational',
+    current_health: { samples: 0 },
+    last_request_health: {
+      samples: 6, first_byte_samples: 6, first_byte: { median_ms: 2800 },
+      latest_at: '2026-10-09T01:02:03Z', applied: true
+    }
+  });
+  assert.match(html, /近 5 分钟无请求 · 沿用上次状态 · 证据/);
+  assert.match(html, /上次 5 分钟首字中位数 2\.8s · 6 次请求/);
+});
+
+test('upstream errors have their own warning label', () => {
+  const html = renderTarget({
+    kind: 'group', key: 'group:1', status: 'degraded', health_reason: 'upstream_error',
+    current_health: { samples: 10, hard_failures: 2, applied: true }
+  });
+  assert.match(html, /当前可用但部分请求报错/);
+  assert.match(html, /最终请求失败 2\/10/);
+  assert.doesNotMatch(html, /当前可用但延迟高/);
+});
+
+test('rate limits explain upstream attempts separately from final outcomes', () => {
+  const html = renderTarget({
+    kind: 'group', key: 'group:1', status: 'degraded', health_reason: 'rate_limited',
+    current_health: {
+      samples: 8, first_byte_samples: 8, first_byte: { median_ms: 2000 },
+      rate_limited: 2, attempts: 10, rate_limit_rate: 20, applied: true
+    }
+  });
+  assert.match(html, /当前可用但阶段性限速/);
+  assert.match(html, /429 尝试 2\/10（20\.00%）/);
+});

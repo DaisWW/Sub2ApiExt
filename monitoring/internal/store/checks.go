@@ -47,8 +47,8 @@ SELECT 'account:' || usage_logs.account_id::text, 'account', usage_logs.account_
            WHEN usage_logs.account_id IS NULL THEN '未知账户'
            ELSE '账户 #' || usage_logs.account_id::text
        END),
-       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
-       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'slow' ELSE '' END,
+       CASE WHEN usage_logs.first_token_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
+       CASE WHEN usage_logs.first_token_ms >= 20000 THEN 'slow' ELSE '' END,
        usage_logs.duration_ms, usage_logs.first_token_ms, NULL::integer, '', '真实请求历史', usage_logs.created_at, 'history'
 FROM usage_logs
 LEFT JOIN accounts a ON a.id = usage_logs.account_id
@@ -64,8 +64,8 @@ SELECT 'group:' || usage_logs.group_id::text, 'group', usage_logs.group_id, usag
            WHEN usage_logs.account_id IS NULL THEN '未知账户'
            ELSE '账户 #' || usage_logs.account_id::text
        END),
-       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
-       CASE WHEN usage_logs.duration_ms >= 20000 THEN 'slow' ELSE '' END,
+       CASE WHEN usage_logs.first_token_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
+       CASE WHEN usage_logs.first_token_ms >= 20000 THEN 'slow' ELSE '' END,
        usage_logs.duration_ms, usage_logs.first_token_ms, NULL::integer, '', '真实请求历史', usage_logs.created_at, 'history'
 FROM usage_logs
 LEFT JOIN accounts a ON a.id = usage_logs.account_id

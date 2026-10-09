@@ -9,6 +9,23 @@ import (
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
+func TestLatestAccountEvidenceUsesFirstByteInsteadOfTotalDuration(t *testing.T) {
+	at := time.Now().Add(-time.Minute)
+	first, total := 2000, 90000
+	account := model.Account{LastActivityAt: &at, LastActivityFirstByteMs: &first, LastActivityLatencyMs: &total}
+	if evidence := latestAccountEvidence(account); evidence.status != model.StatusOperational {
+		t.Fatalf("fast first byte with long output was marked slow: %+v", evidence)
+	}
+	first = 20000
+	if evidence := latestAccountEvidence(account); evidence.status != model.StatusDegraded || evidence.healthReason != model.HealthReasonSlow {
+		t.Fatalf("slow first byte evidence missing: %+v", evidence)
+	}
+	account.LastActivityFirstByteMs = nil
+	if evidence := latestAccountEvidence(account); evidence.status != model.StatusOperational {
+		t.Fatalf("missing first byte borrowed total duration: %+v", evidence)
+	}
+}
+
 func TestRunProbesUsesBoundedWorkersWithoutDeadlock(t *testing.T) {
 	accounts := make([]model.Account, 50)
 	for index := range accounts {

@@ -242,6 +242,7 @@ func TestApplyCurrentHealthKeepsPartialGroupFailureFromErasingAvailableHistory(t
 		MemberAccounts:   2,
 		ObservedAccounts: 1,
 		Reason:           model.HealthReasonUpstreamError,
+		Confidence:       model.HealthConfidenceLow,
 	}}
 
 	applyCurrentHealth(&target)
@@ -251,15 +252,15 @@ func TestApplyCurrentHealthKeepsPartialGroupFailureFromErasingAvailableHistory(t
 	}
 }
 
-func TestApplyCurrentHealthOverridesGroupWhenAllMembersObserved(t *testing.T) {
+func TestApplyCurrentHealthKeepsWorkingMemberAvailable(t *testing.T) {
 	target := model.DashboardTarget{Target: model.Target{
 		Kind:      model.KindGroup,
 		Status:    model.StatusOperational,
 		Available: true,
 	}, CurrentHealth: model.HealthWindow{
 		WindowSeconds:    300,
-		Samples:          2,
-		HardFailures:     2,
+		Samples:          20,
+		HardFailures:     20,
 		Status:           model.StatusFailed,
 		Available:        false,
 		MemberAccounts:   2,
@@ -269,16 +270,16 @@ func TestApplyCurrentHealthOverridesGroupWhenAllMembersObserved(t *testing.T) {
 
 	applyCurrentHealth(&target)
 
-	if target.Status != model.StatusFailed || target.Available {
-		t.Fatalf("fully observed group failure was not applied: %+v", target.Target)
+	if target.Status != model.StatusDegraded || !target.Available {
+		t.Fatalf("failed group requests erased a working member: %+v", target.Target)
 	}
 }
 
-func TestTargetStatsUsesSampleDenominatorForRateLimitRate(t *testing.T) {
-	got := targetStats(1, 1, 1, 0, sql.NullInt64{}, sql.NullFloat64{}, sql.NullFloat64{},
+func TestTargetStatsUsesAttemptDenominatorForRateLimitRate(t *testing.T) {
+	got := targetStats(1, 1, 1, 0, 2, sql.NullInt64{}, sql.NullFloat64{}, sql.NullFloat64{},
 		sql.NullInt64{}, sql.NullFloat64{}, sql.NullFloat64{})
-	if got.RateLimitRate != 100 {
-		t.Fatalf("rate-limit rate = %.1f, want 100%% of observed samples", got.RateLimitRate)
+	if got.RateLimitRate != 50 {
+		t.Fatalf("rate-limit rate = %.1f, want 50%% of upstream attempts", got.RateLimitRate)
 	}
 }
 
@@ -293,11 +294,11 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"JOIN visible_targets visible",
 		"schedulable = TRUE",
 		"LOWER(TRIM(status)) IN ('active', 'error')",
-		"LOWER(TRIM(accounts.status)) = 'active'",
+		"LOWER(TRIM(a.status)) = 'active'",
 		"percentile_cont(0.95)",
 		"samples.status IN ('operational','degraded') AND samples.first_byte_ms IS NOT NULL",
 		"samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL",
-		"CASE WHEN usage.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
+		"CASE WHEN usage.first_token_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
 		"period_usage AS MATERIALIZED",
 		"latest_account_usage AS MATERIALIZED",
 		"account_error_events AS MATERIALIZED",
@@ -310,7 +311,7 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"baseline_checks AS MATERIALIZED",
 		"baseline_samples AS",
 		"'carried_from', recent_ranked.carried_from",
-		"COALESCE(account_success_latency_ms, 0) >= 20000",
+		"current_health.first_median",
 		"generate_series(0, 23)",
 		"PARTITION BY target_key, bucket_index",
 		"'latency_ms', recent_ranked.latency_ms",
@@ -349,6 +350,8 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		"REGEXP_REPLACE",
 		"LOWER(REGEXP_REPLACE",
 		"success.created_at >= errors.error_at",
+		"'group:' || usage.group_id::text",
+		"'group:' || errors.group_id::text",
 	} {
 		if !strings.Contains(dashboardQuery, fragment) {
 			t.Fatalf("dashboard query missing %q", fragment)
@@ -368,8 +371,8 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		!strings.Contains(dashboardQuery, "THEN 'error:' || errors.id::text") {
 		t.Fatal("empty request IDs must use table-local keys and never match across tables")
 	}
-	if count := strings.Count(dashboardQuery, "ELSE 'request:' || LOWER(REGEXP_REPLACE"); count != 2 {
-		t.Fatalf("non-empty request IDs must use one cross-table key format, found %d sides", count)
+	if count := strings.Count(dashboardQuery, "ELSE 'request:' || LOWER(REGEXP_REPLACE"); count != 3 {
+		t.Fatalf("request IDs must use one key format including historical fallback, found %d sides", count)
 	}
 	if strings.Contains(dashboardQuery, "prior_samples AS MATERIALIZED") {
 		t.Fatal("dashboard query must not scan checks before the fixed 24-hour window")
@@ -393,8 +396,8 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 		t.Fatal("dashboard statistics must use account checks for accounts and aggregate checks for groups")
 	}
 	statsQuery := dashboardQuery[statsStart:recentSamplesStart]
-	if !strings.Contains(statsQuery, "FROM samples") {
-		t.Fatal("dashboard statistics must use the shared samples source")
+	if !strings.Contains(statsQuery, "FROM request_stats_samples samples") {
+		t.Fatal("dashboard statistics must use normalized real request outcomes")
 	}
 	recentSamples := dashboardQuery[recentSamplesStart:bucketsStart]
 	if !strings.Contains(recentSamples, "FROM samples") {
@@ -412,10 +415,6 @@ func TestDashboardQueryUsesWindowBucketsAndSuccessfulLatencySamples(t *testing.T
 	if !strings.Contains(dashboardQuery, "WHERE active = TRUE\n      AND (") ||
 		!strings.Contains(dashboardQuery, "WHERE t.active = TRUE\n  AND (") {
 		t.Fatal("dashboard target visibility filter is missing")
-	}
-	if strings.Contains(dashboardQuery, "group_request_rows AS MATERIALIZED") ||
-		strings.Contains(dashboardQuery, "FROM group_error_events") {
-		t.Fatal("dashboard group health must not use real group-request evidence")
 	}
 	selectStart := strings.LastIndex(dashboardQuery, "SELECT t.target_key")
 	if selectStart < 0 {
@@ -501,7 +500,7 @@ func TestDashboardQueryCountsUnresolvedAccountChannelErrors(t *testing.T) {
 	}
 }
 
-func TestDashboardQueryUsesOneGroupHealthSource(t *testing.T) {
+func TestDashboardQuerySeparatesGroupRequestsFromMemberTrajectory(t *testing.T) {
 	samplesStart := strings.Index(dashboardQuery, "), samples AS (")
 	statsStart := strings.Index(dashboardQuery, "), stats AS (")
 	recentStart := strings.Index(dashboardQuery, "), recent_samples AS (")
@@ -514,11 +513,50 @@ func TestDashboardQueryUsesOneGroupHealthSource(t *testing.T) {
 	if !strings.Contains(samples, "targets.kind = 'group' AND mc.source = 'aggregate'") {
 		t.Fatal("group health samples must be aggregate monitoring checks")
 	}
-	if !strings.Contains(stats, "FROM samples") || !strings.Contains(recent, "FROM samples") {
-		t.Fatal("group statistics and trajectory must both consume samples")
+	if !strings.Contains(stats, "FROM request_stats_samples samples") || !strings.Contains(recent, "FROM samples") {
+		t.Fatal("request statistics must stay separate from the member availability trajectory")
 	}
-	if strings.Contains(samples, "FROM group_error_events") || strings.Contains(samples, "usage.group_id") {
-		t.Fatal("group health samples must not fall back to real group-request data")
+	if strings.Contains(samples, "usage.group_id") {
+		t.Fatal("group request data must not replace member availability history")
+	}
+}
+
+func TestApplyCurrentHealthCarriesLastRequestWindow(t *testing.T) {
+	at := time.Now().Add(-2 * time.Hour)
+	target := model.DashboardTarget{Target: model.Target{
+		Kind: model.KindGroup, Status: model.StatusDegraded, Available: true,
+		LatestSource: "aggregate", HealthReason: model.HealthReasonSlow,
+	}, LastRequestHealth: model.HealthWindow{
+		Samples: 5, Successful: 5, Status: model.StatusOperational, Available: true, LatestAt: &at,
+	}}
+	applyCurrentHealth(&target)
+	if target.Status != model.StatusOperational || !target.Stale || !target.LastRequestHealth.Applied ||
+		target.LastCheckedAt == nil || !target.LastCheckedAt.Equal(at) {
+		t.Fatalf("idle group must carry its own request window: %+v", target)
+	}
+	failedAt := at.Add(time.Hour)
+	target.Status, target.Available = model.StatusFailed, false
+	target.LastCheckedAt = &failedAt
+	target.LastRequestHealth.Applied = false
+	applyCurrentHealth(&target)
+	if target.Status != model.StatusFailed || target.LastRequestHealth.Applied {
+		t.Fatalf("older successful window dismissed newer member failure: %+v", target)
+	}
+}
+
+func TestApplyCurrentHealthPreservesNewerRecoveryProbe(t *testing.T) {
+	requestAt := time.Now().Add(-time.Hour)
+	probeAt := requestAt.Add(30 * time.Minute)
+	target := model.DashboardTarget{Target: model.Target{
+		Kind: model.KindAccount, Status: model.StatusOperational, Available: true,
+		LatestSource: "probe", LastCheckedAt: &probeAt,
+	}, LastRequestHealth: model.HealthWindow{
+		Samples: 10, Successful: 10, Status: model.StatusDegraded, Available: true, LatestAt: &requestAt,
+		Reason: model.HealthReasonSlow,
+	}}
+	applyCurrentHealth(&target)
+	if target.Status != model.StatusOperational || target.LastRequestHealth.Applied || !target.LastCheckedAt.Equal(probeAt) {
+		t.Fatalf("old request latency erased recovery probe: %+v", target)
 	}
 }
 

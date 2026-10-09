@@ -273,11 +273,13 @@ func latestAccountEvidence(account model.Account) accountEvidence {
 	sourceUpdatedAt := accountEvidenceSourceUpdatedAt(account)
 	if evidenceTimeValid(account.LastActivityAt, sourceUpdatedAt) {
 		status := model.StatusOperational
-		if account.LastActivityLatencyMs != nil && *account.LastActivityLatencyMs >= degradedLatencyMs {
+		reason := ""
+		if account.LastActivityFirstByteMs != nil && *account.LastActivityFirstByteMs >= degradedLatencyMs {
 			status = model.StatusDegraded
+			reason = model.HealthReasonSlow
 		}
 		evidence = accountEvidence{
-			status: status, source: "history", checkedAt: account.LastActivityAt,
+			status: status, healthReason: reason, source: "history", checkedAt: account.LastActivityAt,
 			latencyMs: account.LastActivityLatencyMs, firstByteMs: account.LastActivityFirstByteMs,
 			valid: true,
 		}

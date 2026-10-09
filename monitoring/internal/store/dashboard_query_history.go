@@ -22,16 +22,28 @@ const dashboardQueryHistory = `
 	)
 	UNION ALL
 	SELECT targets.target_key,
-	       CASE WHEN usage.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
-	       CASE WHEN usage.duration_ms >= 20000 THEN 'slow' ELSE '' END,
+	       CASE WHEN usage.first_token_ms >= 20000 THEN 'degraded' ELSE 'operational' END,
+	       CASE WHEN usage.first_token_ms >= 20000 THEN 'slow' ELSE '' END,
 	       usage.duration_ms, usage.first_token_ms, usage.created_at, 'history'
 	FROM account_usage usage
 	JOIN active_targets targets ON targets.target_key = 'account:' || usage.account_id::text
+), request_stats_samples AS (
+	SELECT target_key,
+	       CASE WHEN successful THEN 'operational' ELSE 'failed' END AS status,
+	       CASE WHEN hard_failure THEN 'upstream_error' WHEN NOT successful THEN 'rate_limited' ELSE '' END AS health_reason,
+	       duration_ms AS latency_ms, first_token_ms AS first_byte_ms, checked_at
+	FROM request_outcomes
+), request_hour_errors AS (
+	SELECT target_key, COUNT(*)::integer AS attempts,
+	       COUNT(*) FILTER (WHERE rate_limited)::integer AS rate_limited
+	FROM request_error_rows WHERE created_at >= NOW() - INTERVAL '1 hour'
+	GROUP BY target_key
 ), stats AS (
     SELECT samples.target_key,
            COUNT(*) FILTER (WHERE samples.status NOT IN ('unknown','disabled')) AS samples,
            COUNT(*) FILTER (WHERE samples.status IN ('operational','degraded')) AS successful,
-	       COUNT(*) FILTER (WHERE samples.health_reason = 'rate_limited') AS rate_limited,
+	       COALESCE(errors.rate_limited, 0) AS rate_limited,
+	       (COUNT(*) FILTER (WHERE samples.status IN ('operational','degraded')) + COALESCE(errors.attempts, 0))::integer AS attempts,
 	       COUNT(*) FILTER (WHERE samples.status IN ('failed','error')
 	                        AND COALESCE(samples.health_reason, '') <> 'rate_limited') AS hard_failures,
 	       MIN(samples.first_byte_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.first_byte_ms IS NOT NULL) AS first_fastest,
@@ -40,13 +52,14 @@ const dashboardQueryHistory = `
 	       MIN(samples.latency_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL) AS latency_fastest,
 	       percentile_cont(0.5) WITHIN GROUP (ORDER BY samples.latency_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL) AS latency_median,
 	       percentile_cont(0.95) WITHIN GROUP (ORDER BY samples.latency_ms) FILTER (WHERE samples.status IN ('operational','degraded') AND samples.latency_ms IS NOT NULL) AS latency_p95
-    FROM samples
+    FROM request_stats_samples samples
 	JOIN active_targets targets ON targets.target_key = samples.target_key
+	LEFT JOIN request_hour_errors errors ON errors.target_key = samples.target_key
     CROSS JOIN bounds
     WHERE samples.checked_at >= bounds.end_at - bounds.bucket_seconds * INTERVAL '1 second'
 	  AND (targets.source_updated_at IS NULL
 	       OR samples.checked_at >= targets.source_updated_at - INTERVAL '2 minutes')
-    GROUP BY samples.target_key
+    GROUP BY samples.target_key, errors.rate_limited, errors.attempts
 ), baseline_checks AS MATERIALIZED (
 	SELECT DISTINCT ON (mc.target_key)
 	       mc.target_key, mc.status, mc.health_reason, mc.latency_ms, mc.checked_at, mc.source

@@ -249,9 +249,10 @@ h2 { margin-bottom: 0; font-size: 21px; letter-spacing: 0; }
 .target-platform-openai { color: var(--platform-openai); }
 .target-platform-anthropic { color: var(--platform-anthropic); }
 .target-platform-other { color: var(--platform-other); }
-.target-notes { display: flex; min-width: 0; align-items: center; gap: 8px; min-height: 16px; margin-top: 8px; flex: 0 0 auto; }
+.target-notes { display: flex; min-width: 0; align-items: stretch; flex-direction: column; gap: 4px; min-height: 16px; margin-top: 8px; flex: 0 0 auto; }
 .target-note, .route-note { min-width: 0; overflow: hidden; font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .target-note { color: var(--soft); }
+.health-basis { white-space: normal; }
 .route-note { color: var(--amber); }
 .target-live { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; flex: 0 0 auto; }
 .target-live-group { grid-template-columns: repeat(2, minmax(0, 1fr)); }

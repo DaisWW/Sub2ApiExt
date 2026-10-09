@@ -9,17 +9,16 @@ type HealthPolicy struct {
 	// MinimumSamples controls when the window is considered statistically
 	// mature. Smaller windows remain usable but carry low confidence.
 	MinimumSamples int
-	// MinimumSignalSamples lets a short burst expose a repeatable 429 pattern
-	// before the normal confidence threshold is reached.
+	// MinimumSignalSamples controls quality classification and the minimum
+	// number of successful first-byte measurements used for latency.
 	MinimumSignalSamples  int
 	RateLimitDegradePct   float64
 	HardFailureDegradePct float64
 	SlowLatencyMs         int
 }
 
-// DefaultHealthPolicy is deliberately conservative: a few sparse requests
-// can expose a warning, but do not change the public state until the window
-// has enough evidence.
+// DefaultHealthPolicy requires enough first-byte samples for latency and
+// enough final failures for unavailability. Observed rate limits remain visible.
 var DefaultHealthPolicy = HealthPolicy{
 	MinimumSamples:        10,
 	MinimumSignalSamples:  5,
@@ -55,7 +54,7 @@ func EvaluateHealth(window model.HealthWindow, policy HealthPolicy) model.Health
 		// unavailable. This is especially important for idle accounts whose
 		// five-minute window may contain only a handful of retries.
 		window.Status = model.StatusOperational
-		window.Reason = warningReason(window, policy)
+		window.Reason = warningReason(window)
 		window.Available = true
 	case window.Successful == 0:
 		window.Status = model.StatusFailed
@@ -63,11 +62,14 @@ func EvaluateHealth(window model.HealthWindow, policy HealthPolicy) model.Health
 		window.Available = false
 	case window.Samples < signalSamples:
 		window.Status = model.StatusOperational
-		window.Reason = warningReason(window, policy)
+		window.Reason = warningReason(window)
 		window.Available = true
 	default:
 		window.Status, window.Reason = qualityStatus(window, policy)
 		window.Available = true
+	}
+	if window.Status == model.StatusOperational && window.Successful > 0 && window.Reason == model.HealthReasonRateLimited {
+		window.Status = model.StatusDegraded
 	}
 	return window
 }
@@ -109,21 +111,18 @@ func qualityStatus(window model.HealthWindow, policy HealthPolicy) (string, stri
 	if window.RateLimitRate >= policy.RateLimitDegradePct {
 		return model.StatusDegraded, model.HealthReasonRateLimited
 	}
-	if slowLatency(window.Latency, policy.SlowLatencyMs) {
+	if slowFirstByte(window, policy) {
 		return model.StatusDegraded, model.HealthReasonSlow
 	}
 	return model.StatusOperational, ""
 }
 
-func warningReason(window model.HealthWindow, policy HealthPolicy) string {
+func warningReason(window model.HealthWindow) string {
 	if window.RateLimited > 0 {
 		return model.HealthReasonRateLimited
 	}
 	if window.HardFailures > 0 {
 		return model.HealthReasonUpstreamError
-	}
-	if slowLatency(window.Latency, policy.SlowLatencyMs) {
-		return model.HealthReasonSlow
 	}
 	return ""
 }
@@ -142,8 +141,16 @@ func confidenceFor(samples, minimum int) string {
 	return model.HealthConfidenceNormal
 }
 
-func slowLatency(metrics model.MetricStats, threshold int) bool {
-	return threshold > 0 && metrics.P95Ms != nil && *metrics.P95Ms >= float64(threshold)
+func slowFirstByte(window model.HealthWindow, policy HealthPolicy) bool {
+	minimum := policy.MinimumSignalSamples
+	if minimum <= 0 {
+		minimum = policy.MinimumSamples
+	}
+	if minimum <= 0 {
+		minimum = 1
+	}
+	return window.FirstByteSamples >= minimum && policy.SlowLatencyMs > 0 &&
+		window.FirstByte.MedianMs != nil && *window.FirstByte.MedianMs >= float64(policy.SlowLatencyMs)
 }
 
 func percentage(value, total int) float64 {

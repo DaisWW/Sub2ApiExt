@@ -166,6 +166,7 @@ type MetricStats struct {
 
 type TargetStats struct {
 	Samples         int         `json:"samples"`
+	Attempts        int         `json:"attempts"`
 	Successful      int         `json:"successful"`
 	Errors          int         `json:"errors"`
 	Availability    float64     `json:"availability"`
@@ -203,21 +204,25 @@ type HealthWindow struct {
 	AffectedAccounts int         `json:"affected_accounts,omitempty"`
 	ObservedAccounts int         `json:"observed_accounts,omitempty"`
 	MemberAccounts   int         `json:"member_accounts,omitempty"`
+	FirstByteSamples int         `json:"first_byte_samples"`
+	FirstByte        MetricStats `json:"first_byte"`
 	Latency          MetricStats `json:"latency"`
+	Applied          bool        `json:"applied"`
 }
 
 type DashboardTarget struct {
 	Target
 	// RateMultiplier is the currently effective billing cost multiplier stored
 	// on the account or group, not an upstream sync candidate.
-	RateMultiplier *float64       `json:"rate_multiplier,omitempty"`
-	Stats          TargetStats    `json:"stats"`
-	CurrentHealth  HealthWindow   `json:"current_health"`
-	RecentSamples  []StatusSample `json:"recent_samples"`
+	RateMultiplier    *float64       `json:"rate_multiplier,omitempty"`
+	Stats             TargetStats    `json:"stats"`
+	CurrentHealth     HealthWindow   `json:"current_health"`
+	LastRequestHealth HealthWindow   `json:"last_request_health"`
+	RecentSamples     []StatusSample `json:"recent_samples"`
 }
 
 // StatusSample 是目标最近一次观测的紧凑状态，用于绘制状态轨迹。
-// LatencyMs 让每个时间桶按自己的响应耗时着色，而不是套用整卡中位数。
+// 每个时间桶保留自身观测状态；LatencyMs 仅提供耗时证据。
 type StatusSample struct {
 	Status       string     `json:"status"`
 	HealthReason string     `json:"health_reason,omitempty"`

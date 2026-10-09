@@ -70,13 +70,12 @@ const dashboardQueryEvidence = `
            CASE WHEN kind = 'group' THEN status
                 WHEN channel_error_wins THEN 'failed'
                 WHEN history_wins AND kind = 'account'
-                THEN CASE WHEN COALESCE(account_success_latency_ms, 0) >= 20000
-                          THEN 'degraded' ELSE 'operational' END
+                THEN 'operational'
                 WHEN history_wins THEN 'operational'
                 ELSE status END AS status,
            CASE WHEN kind = 'group' THEN health_reason
                 WHEN channel_error_wins THEN 'upstream_error'
-                WHEN history_wins AND kind = 'account' AND COALESCE(account_success_latency_ms, 0) >= 20000 THEN 'slow'
+                WHEN history_wins THEN ''
                 ELSE health_reason END AS health_reason,
            CASE WHEN kind = 'group' THEN latency_ms
                 WHEN kind = 'account' AND history_wins THEN account_success_latency_ms
@@ -110,6 +109,7 @@ SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t
        e.status, e.health_reason, e.latency_ms, e.first_byte_ms, e.checked_at, e.source, e.message,
        COALESCE(s.samples,0), COALESCE(s.successful,0),
        COALESCE(s.rate_limited,0), COALESCE(s.hard_failures,0),
+       COALESCE(s.attempts,0),
        s.first_fastest, s.first_median, s.first_p95,
        s.latency_fastest, s.latency_median, s.latency_p95,
        COALESCE(current_health.window_seconds, 300),
@@ -117,8 +117,11 @@ SELECT t.target_key, t.kind, t.entity_id, t.name, t.platform, t.source_status, t
        COALESCE(current_health.rate_limited, 0), COALESCE(current_health.hard_failures, 0),
        COALESCE(current_health.attempts, 0), current_health.latest_at,
        current_health.latency_fastest, current_health.latency_median, current_health.latency_p95,
+	       COALESCE(current_health.first_samples, 0),
+	       current_health.first_fastest, current_health.first_median, current_health.first_p95,
 	       COALESCE(current_health.affected_accounts, 0), COALESCE(current_health.observed_accounts, 0),
 	       COALESCE(current_health.member_accounts, 0),
+       COALESCE(last_request_health.health, '{}'::jsonb),
        COALESCE(r.samples, '[]'::jsonb)
 FROM monitoring_targets t
 JOIN visible_targets visible
@@ -130,6 +133,7 @@ LEFT JOIN route_state route ON route.target_key = t.target_key
 LEFT JOIN latest_evidence e ON e.target_key = t.target_key
 LEFT JOIN stats s ON s.target_key = t.target_key
 LEFT JOIN current_health ON current_health.target_key = t.target_key
+LEFT JOIN last_request_health ON last_request_health.target_key = t.target_key
 LEFT JOIN recent r ON r.target_key = t.target_key
 WHERE t.active = TRUE
   AND (

@@ -17,7 +17,6 @@ import {
   platformTone,
   priorityValue,
   renderPlatformFilters,
-  slowLatencyThresholdMs,
   sourceLabel,
   statusClass,
   toast
@@ -264,11 +263,12 @@ export class DashboardPanel {
 
   #renderTarget(item) {
     const stats = item.stats || {};
-    const firstByte = stats.first_byte || {};
+    const requestHealth = displayedRequestHealth(item);
+    const firstByte = requestHealth.first_byte || {};
     const latency = stats.latency || {};
     const platform = normalizePlatform(item.platform);
     const status = normalizeStatus(item.status);
-    const displayStatus = displayHealthStatus(item, status, null, null, item.health_reason);
+    const displayStatus = displayHealthStatus(item, status, null, item.health_reason);
     const samples = Number(stats.samples || 0);
     const hasSamples = samples > 0;
     const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
@@ -307,6 +307,7 @@ export class DashboardPanel {
       ? `<div class="target-note" title="${escapeHTML(targetNote)}">${escapeHTML(targetNote)}</div>`
       : '';
     const routeNote = renderRouteState(item);
+    const basis = healthBasis(item);
     const evidenceAgeLabel = item.stale && item.latest_source
       ? `沿用最近${staleLabel(item, status)}`
       : '';
@@ -331,7 +332,7 @@ export class DashboardPanel {
             <span class="status-badge ${statusClass(displayStatus)}" title="${escapeHTML(statusTitle)}">${targetStatusLabel(displayStatus, item.health_reason)}</span>
           </div>
         </div>
-        <div class="target-notes">${note}${routeNote}</div>
+        <div class="target-notes"><div class="target-note health-basis" title="${escapeHTML(basis)}">${escapeHTML(basis)}</div>${note}${routeNote}</div>
         <div class="availability">
           <span class="availability-label">${availabilityLabel}</span>
           <strong class="availability-value ${availabilityTone}">${availabilityValue}</strong>
@@ -348,10 +349,10 @@ export class DashboardPanel {
           ${currentConcurrencyMetric}
         </div>
         <div class="metrics">
-          ${renderMetric('首字最快', formatMs(firstByte.fastest_ms), '最近 1 小时成功样本的首字/首字节最快到达时间', latencyMetricClass(firstByte.fastest_ms))}
-          ${renderMetric('首字中位数', formatMedianMs(firstByte), '最近 1 小时成功样本的首字/首字节中位数', latencyMetricClass(firstByte.median_ms))}
-          ${renderMetric('总耗时中位数', formatMedianMs(latency), '最近 1 小时成功样本的完整请求总耗时中位数', latencyMetricClass(latency.median_ms))}
-          ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值', latencyMetricClass(latency.p95_ms))}
+          ${renderMetric('首字最快', formatMs(firstByte.fastest_ms), '当前 5 分钟成功请求窗口；空闲时沿用上次请求窗口')}
+          ${renderMetric('首字中位数', formatMedianMs(firstByte), '至少 5 条有效首字样本，达到 20 秒提示延迟高', Number(requestHealth.first_byte_samples) >= 5 ? latencyMetricClass(firstByte.median_ms) : '')}
+          ${renderMetric('总耗时中位数', formatMedianMs(latency), '最近 1 小时成功请求总耗时，仅供参考')}
+          ${renderMetric('总耗时 P95', formatMs(latency.p95_ms), '最近 1 小时 95% 的成功请求总耗时不超过该值，仅供参考')}
         </div>
         <div class="card-foot">
           ${renderStatusHistory(item.recent_samples || [], item, displayStatus)}
@@ -394,10 +395,10 @@ function compareDashboardTargets(left, right, metric, direction) {
   }
   const leftValue = metric === 'priority'
     ? priorityValue(left?.priority)
-    : nullableNonNegativeNumber(left?.stats?.first_byte?.median_ms);
+    : nullableNonNegativeNumber(displayedRequestHealth(left).first_byte?.median_ms);
   const rightValue = metric === 'priority'
     ? priorityValue(right?.priority)
-    : nullableNonNegativeNumber(right?.stats?.first_byte?.median_ms);
+    : nullableNonNegativeNumber(displayedRequestHealth(right).first_byte?.median_ms);
   if (leftValue === null || rightValue === null) {
     if (leftValue !== rightValue) return leftValue === null ? 1 : -1;
   } else if (leftValue !== rightValue) {
@@ -421,7 +422,7 @@ function formatCurrentRate(value) {
   return Number.isFinite(rate) ? rate.toFixed(4) : '';
 }
 
-function displayHealthStatus(item, status, sampleLatencyMs = null, sampleCheckedAt = null, reason = '') {
+function displayHealthStatus(item, status, sampleCheckedAt = null, reason = '') {
   if (status === 'failed' || status === 'error') return 'failed';
   if (status === 'disabled') return 'failed';
   if (status === 'unknown') {
@@ -435,49 +436,45 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
     return 'failed';
   }
   if (reason === 'rate_limited' && (status === 'operational' || status === 'degraded')) return 'degraded';
-  // Group status is already the account aggregate. Its latency is diagnostic;
-  // deriving the color again could turn an operational mixed group yellow.
-  if (item?.kind === 'group') return status === 'degraded' ? 'degraded' : 'operational';
-  // The server has already applied the current request window. Older latency
-  // must not repaint an account that has recovered in that window.
-  if (!sampleCheckedAt && Number(item?.current_health?.samples) > 0) return status;
-  const latency = Number(sampleLatencyMs);
-  if (Number.isFinite(latency) && latency > 0) {
-    return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
-  }
-  // A card can use its latest/median latency as a fallback. A historical
-  // segment without its own latency must keep its recorded status instead of
-  // repainting the whole timeline with the card's current median.
-  if (!sampleCheckedAt && item?.kind !== 'group' && isSlowTarget(item, status)) return 'degraded';
+  // The backend applies the request window and recovery evidence. Historical
+  // segments retain their own recorded state; total duration never repaints it.
   if (status === 'degraded') return 'degraded';
   return 'operational';
 }
 
-function isSlowTarget(item, status = normalizeStatus(item?.status)) {
-  const latestLatency = Number(item?.latest_latency_ms);
-  if (isSuccessfulStatus(status) && Number.isFinite(latestLatency) && latestLatency > 0) {
-    return latestLatency >= slowLatencyThresholdMs;
-  }
-  const samples = Array.isArray(item?.recent_samples) ? item.recent_samples : [];
-  for (let index = samples.length - 1; index >= 0; index -= 1) {
-    if (!isSuccessfulStatus(samples[index]?.status)) continue;
-    const sampleLatency = Number(samples[index]?.latency_ms);
-    if (Number.isFinite(sampleLatency) && sampleLatency > 0) {
-      return sampleLatency >= slowLatencyThresholdMs;
-    }
-  }
-  const statsLatency = Number(item?.stats?.latency?.median_ms);
-  return Number.isFinite(statsLatency) && statsLatency > 0 && statsLatency >= slowLatencyThresholdMs;
+function displayedRequestHealth(item) {
+  return Number(item?.current_health?.samples) > 0 ? item.current_health : (item?.last_request_health || {});
 }
 
-function isSuccessfulStatus(status) {
-  const normalized = normalizeStatus(status);
-  return normalized === 'operational' || normalized === 'degraded';
+function healthBasis(item) {
+  const health = displayedRequestHealth(item);
+  const current = Number(item?.current_health?.samples) > 0;
+  const samples = Number(health.samples || 0);
+  const firstSamples = Number(health.first_byte_samples || 0);
+  const evidenceAt = health.applied ? health.latest_at : item?.last_checked_at;
+  const parts = [];
+  if (!current) {
+    parts.push('近 5 分钟无请求');
+    if (evidenceAt) parts.push(`沿用上次状态 · 证据 ${formatTime(evidenceAt)}`);
+  }
+  if (samples > 0) {
+    parts.push(`${current ? '近' : '上次'} 5 分钟首字中位数 ${formatMs(health.first_byte?.median_ms)} · ${samples} 次请求`);
+  }
+  if (firstSamples < 5) parts.push(`样本不足（首字 ${firstSamples}/5）`);
+  if (Number(health.rate_limited) > 0) {
+    parts.push(`阶段性限速 · 429 尝试 ${health.rate_limited}/${health.attempts}（${formatPct(health.rate_limit_rate)}）`);
+  }
+  if (Number(health.hard_failures) > 0) parts.push(`最终请求失败 ${health.hard_failures}/${samples}`);
+  if (!health.applied && item?.latest_source) {
+    parts.push(`状态依据：${sourceLabel(item.latest_source)}${current && evidenceAt ? ` · ${formatTime(evidenceAt)}` : ''}`);
+  }
+  return parts.join(' · ');
 }
 
 function healthLabel(status, reason = '') {
   if (status === 'failed' || status === 'error') return '错误/不可用';
   if (reason === 'rate_limited') return '可用但阶段性限速';
+  if (status === 'degraded' && reason === 'upstream_error') return '可用但部分请求报错';
   if (status === 'degraded') return '可用但延迟高';
   if (status === 'unknown') return '可用（数据不足）';
   return '可用';
@@ -501,7 +498,7 @@ function renderStatusHistory(samples, item, displayStatus) {
   const recent = Array.isArray(samples) ? samples.slice(-24) : [];
   const hasUnknownSamples = recent.some((sample) => {
     const sampleStatus = normalizeStatus(sample?.status);
-    return displayHealthStatus(item, sampleStatus, sample?.latency_ms, sample?.checked_at, sample?.health_reason) === 'unknown';
+    return displayHealthStatus(item, sampleStatus, sample?.checked_at, sample?.health_reason) === 'unknown';
   });
   const gatewayError = String(item?.source_status || '').trim().toLowerCase() === 'error';
   const recoveryPending = hasRecoveryTrigger(item);
@@ -518,8 +515,8 @@ function renderStatusHistory(samples, item, displayStatus) {
     const successful = sampleStatus === 'operational' || sampleStatus === 'degraded';
     const failed = sampleStatus === 'failed' || sampleStatus === 'error';
     const displaySampleStatus = sample?.source === 'source_change' && sampleStatus === 'unknown'
-      ? displayHealthStatus(item, normalizeStatus(item?.status), sample?.latency_ms, sample?.checked_at, sample?.health_reason)
-      : displayHealthStatus(item, sampleStatus, sample?.latency_ms, sample?.checked_at, sample?.health_reason);
+      ? displayHealthStatus(item, normalizeStatus(item?.status), sample?.checked_at, sample?.health_reason)
+      : displayHealthStatus(item, sampleStatus, sample?.checked_at, sample?.health_reason);
     const carried = Boolean(sample?.carried_from) && (failed || successful);
     const label = carried
       ? `截至 ${formatTime(sample?.checked_at)} · 无新请求，沿用 ${formatTime(sample?.carried_from)} 的${healthLabel(displaySampleStatus, sample?.health_reason)}状态 · ${sourceLabel(sample?.source)}`
@@ -603,6 +600,7 @@ function displayEvidenceMessage(item, value) {
 function targetStatusLabel(displayStatus, reason = '') {
   if (displayStatus === 'failed') return '当前错误/不可用';
   if (reason === 'rate_limited') return '当前可用但阶段性限速';
+  if (displayStatus === 'degraded' && reason === 'upstream_error') return '当前可用但部分请求报错';
   if (displayStatus === 'degraded') return '当前可用但延迟高';
   if (displayStatus === 'unknown') return '当前可用（数据不足）';
   return '当前可用';

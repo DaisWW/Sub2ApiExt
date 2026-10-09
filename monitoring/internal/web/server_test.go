@@ -456,7 +456,9 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 		"renderMetric('首字最快', formatMs(firstByte.fastest_ms)",
 		"renderMetric('首字中位数', formatMedianMs(firstByte)",
 		"renderMetric('总耗时中位数', formatMedianMs(latency)",
-		"renderMetric('P95', formatMs(latency.p95_ms)",
+		"renderMetric('总耗时 P95', formatMs(latency.p95_ms)",
+		"样本不足（首字",
+		"沿用上次状态 · 证据",
 		"function availabilityToneForStatus(status)",
 	} {
 		if !strings.Contains(body, marker) {

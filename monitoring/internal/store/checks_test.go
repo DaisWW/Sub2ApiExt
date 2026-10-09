@@ -13,7 +13,7 @@ func TestHistoryQueryUsesAccountEvidenceAndGroupRequests(t *testing.T) {
 		"FROM monitoring_targets",
 		"target_key = $1 AND active = TRUE",
 		"account_error_events AS",
-		"CASE WHEN usage_logs.duration_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
+		"CASE WHEN usage_logs.first_token_ms >= 20000 THEN 'degraded' ELSE 'operational' END",
 		"auth.kind = 'account'",
 		"auth.last_channel_error_at > auth.last_channel_error_resolved_at",
 		"errors.target_key, 'account', errors.account_id, NULL::bigint,",

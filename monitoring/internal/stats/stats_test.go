@@ -242,15 +242,15 @@ func TestWindowFromOutcomesMarksIntermittentRateLimitAsDegraded(t *testing.T) {
 	}
 }
 
-func TestWindowFromOutcomesKeepsSparseRateLimitOperationalWithLowConfidence(t *testing.T) {
+func TestWindowFromOutcomesShowsSparseRateLimitWarningWithLowConfidence(t *testing.T) {
 	got := WindowFromOutcomes(4, 1, 0, []int{900, 1100, 1200, 1300}, HealthPolicy{
 		MinimumSamples:        10,
 		RateLimitDegradePct:   10,
 		HardFailureDegradePct: 10,
 		SlowLatencyMs:         20_000,
 	})
-	if got.Status != model.StatusOperational || !got.Available {
-		t.Fatalf("sparse window = %+v, want available operational", got)
+	if got.Status != model.StatusDegraded || !got.Available {
+		t.Fatalf("sparse rate limit = %+v, want available degraded", got)
 	}
 	if got.Confidence != model.HealthConfidenceLow || got.RateLimitRate != 20 {
 		t.Fatalf("sparse window confidence/ratio = %+v", got)
@@ -288,6 +288,34 @@ func TestWindowFromOutcomesPrefersHardFailureReason(t *testing.T) {
 	got := WindowFromOutcomes(8, 2, 2, []int{100, 200}, DefaultHealthPolicy)
 	if got.Status != model.StatusDegraded || got.Reason != model.HealthReasonUpstreamError {
 		t.Fatalf("mixed failure window = %+v, want upstream_error degradation", got)
+	}
+}
+
+func TestCurrentLatencyUsesSuccessfulFirstByteMedian(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		firstBytes []int
+		want       string
+	}{
+		{"fast first byte with a slow tail", []int{2000, 2000, 2000, 2000, 90000}, model.StatusOperational},
+		{"at threshold", []int{19000, 20000, 20000, 21000, 22000}, model.StatusDegraded},
+		{"below threshold", []int{19000, 19000, 19999, 21000, 22000}, model.StatusOperational},
+		{"insufficient first byte samples", []int{30000, 30000, 30000, 30000}, model.StatusOperational},
+		{"missing first byte", nil, model.StatusOperational},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := EvaluateHealth(model.HealthWindow{
+				Samples: 10, Successful: 10, Attempts: 10,
+				FirstByteSamples: len(test.firstBytes), FirstByte: Summarize(test.firstBytes),
+				Latency: Summarize([]int{90000, 90000, 90000, 90000, 90000}),
+			}, DefaultHealthPolicy)
+			if got.Status != test.want || !got.Available {
+				t.Fatalf("first byte policy = %+v, want %s", got, test.want)
+			}
+			if got.Status == model.StatusDegraded && got.Reason != model.HealthReasonSlow {
+				t.Fatalf("slow window reason = %q", got.Reason)
+			}
+		})
 	}
 }
 
