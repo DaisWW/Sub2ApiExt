@@ -344,7 +344,7 @@ func prepareCostAlertRecovery(state costAlertState, now time.Time, policy config
 		!costAlertCooldownElapsed(state.lastAlertedAt, now, policy.Cooldown) {
 		return state, model.CostAlertEvent{}, false, changed
 	}
-	recovery := buildCostAlertRecovery(state, now, policy.Window)
+	recovery := buildCostAlertRecovery(state, now)
 	state.pendingRecovery = true
 	state.lastAlertedAt = sql.NullTime{Time: now, Valid: true}
 	state.lastEvent = recovery
@@ -355,7 +355,7 @@ func costAlertCooldownElapsed(last sql.NullTime, now time.Time, cooldown time.Du
 	return !last.Valid || now.Sub(last.Time) >= cooldown
 }
 
-func buildCostAlertRecovery(state costAlertState, now time.Time, window time.Duration) model.CostAlertEvent {
+func buildCostAlertRecovery(state costAlertState, now time.Time) model.CostAlertEvent {
 	event := state.lastEvent
 	event.AlertKey = state.alertKey
 	userLabel := model.FormatIdentity(event.UserName, event.UserEmail, event.UserKey, "用户")
@@ -371,8 +371,6 @@ func buildCostAlertRecovery(state costAlertState, now time.Time, window time.Dur
 		"用户 %s 的 %s 费用异常已连续两个分析窗口未再触发，监控标记为恢复。",
 		userLabel, scope,
 	)
-	event.WindowStart = now.Add(-window)
-	event.WindowEnd = now
 	event.CreatedAt = now
 	event.IncidentStartedAt = timeValue(state.firstSeenAt, now)
 	return event

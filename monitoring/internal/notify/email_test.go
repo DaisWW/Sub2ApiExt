@@ -139,3 +139,39 @@ func TestBuildCostAlertMessageLabelsLifecycleNotification(t *testing.T) {
 		t.Fatalf("recovery notification label is missing: %s", text)
 	}
 }
+
+func TestCostAlertEmailExplainsWindowCostAndRecoveryTiming(t *testing.T) {
+	start := time.Date(2026, 10, 8, 8, 55, 0, 0, time.UTC)
+	event := model.CostAlertEvent{
+		NotificationType:  model.CostAlertNotificationRecovery,
+		UserKey:           "42",
+		Requests:          4,
+		TotalTokens:       120_000,
+		CurrentCost:       6.25,
+		DailyCost:         9.5,
+		IncidentStartedAt: start,
+		WindowStart:       start.Add(-15 * time.Minute),
+		WindowEnd:         start,
+		CreatedAt:         start.Add(45 * time.Minute),
+	}
+	text := costAlertBody([]model.CostAlertEvent{event})
+	for _, fragment := range []string{
+		"最近异常窗口: " + event.WindowStart.In(time.Local).Format(time.RFC3339) + " 至 " + event.WindowEnd.In(time.Local).Format(time.RFC3339),
+		"恢复确认: " + event.CreatedAt.In(time.Local).Format(time.RFC3339),
+		"告警开始（首次发现）: " + start.In(time.Local).Format(time.RFC3339),
+		"持续时间: 45m0s",
+		"最近异常窗口总费用: 6.2500",
+		"最近异常时的当日费用: 9.5000",
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Fatalf("recovery email is missing %q: %s", fragment, text)
+		}
+	}
+
+	event.NotificationType = model.CostAlertNotificationStart
+	event.CreatedAt = start
+	text = costAlertBody([]model.CostAlertEvent{event})
+	if !strings.Contains(text, "持续时间: 0s") || !strings.Contains(text, "窗口总费用: 6.2500") {
+		t.Fatalf("start email is missing duration or window total: %s", text)
+	}
+}

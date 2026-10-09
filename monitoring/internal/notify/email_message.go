@@ -97,20 +97,31 @@ func writeCostAlertHeader(body *strings.Builder, event model.CostAlertEvent) {
 
 func writeCostAlertWindow(body *strings.Builder, event model.CostAlertEvent) {
 	if !event.WindowStart.IsZero() && !event.WindowEnd.IsZero() {
-		body.WriteString(fmt.Sprintf("分析窗口: %s 至 %s\n",
+		label := "分析窗口"
+		if event.NotificationType == model.CostAlertNotificationRecovery {
+			label = "最近异常窗口"
+		}
+		body.WriteString(fmt.Sprintf("%s: %s 至 %s\n", label,
 			event.WindowStart.In(time.Local).Format(time.RFC3339), event.WindowEnd.In(time.Local).Format(time.RFC3339)))
+	}
+	if event.NotificationType == model.CostAlertNotificationRecovery && !event.CreatedAt.IsZero() {
+		body.WriteString(fmt.Sprintf("恢复确认: %s\n", event.CreatedAt.In(time.Local).Format(time.RFC3339)))
 	}
 	if event.IncidentStartedAt.IsZero() {
 		return
 	}
-	body.WriteString(fmt.Sprintf("首次发现: %s\n", event.IncidentStartedAt.In(time.Local).Format(time.RFC3339)))
-	if !event.CreatedAt.IsZero() && event.CreatedAt.After(event.IncidentStartedAt) {
+	body.WriteString(fmt.Sprintf("告警开始（首次发现）: %s\n", event.IncidentStartedAt.In(time.Local).Format(time.RFC3339)))
+	if !event.CreatedAt.IsZero() && !event.CreatedAt.Before(event.IncidentStartedAt) {
 		body.WriteString(fmt.Sprintf("持续时间: %s\n", event.CreatedAt.Sub(event.IncidentStartedAt).Round(time.Second)))
 	}
 }
 
 func writeCostAlertMetrics(body *strings.Builder, event model.CostAlertEvent) {
-	body.WriteString(fmt.Sprintf("请求数: %d\nTokens: %d\n当前成本: %.4f\n", event.Requests, event.TotalTokens, event.CurrentCost))
+	costLabel := "窗口总费用"
+	if event.NotificationType == model.CostAlertNotificationRecovery {
+		costLabel = "最近异常窗口总费用"
+	}
+	body.WriteString(fmt.Sprintf("请求数: %d\nTokens: %d\n%s: %.4f\n", event.Requests, event.TotalTokens, costLabel, event.CurrentCost))
 	if event.MaxRequestCost > 0 {
 		body.WriteString(fmt.Sprintf("最高单条成本: %.4f\n", event.MaxRequestCost))
 	}
@@ -130,7 +141,11 @@ func writeCostAlertMetrics(body *strings.Builder, event model.CostAlertEvent) {
 		body.WriteString(fmt.Sprintf("实际倍率: %.2fx（历史 %.2fx）\n", event.CurrentMultiplier, event.BaselineMultiplier))
 	}
 	if event.DailyCost > 0 || event.ProjectedCost > 0 {
-		body.WriteString(fmt.Sprintf("今日成本: %.4f，预计今日成本: %.4f\n", event.DailyCost, event.ProjectedCost))
+		if event.NotificationType == model.CostAlertNotificationRecovery {
+			body.WriteString(fmt.Sprintf("最近异常时的当日费用: %.4f，当时预计当日费用: %.4f\n", event.DailyCost, event.ProjectedCost))
+		} else {
+			body.WriteString(fmt.Sprintf("今日费用: %.4f，预计今日费用: %.4f\n", event.DailyCost, event.ProjectedCost))
+		}
 	}
 }
 

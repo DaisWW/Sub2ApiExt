@@ -254,14 +254,17 @@ func TestObserveCostAlertStoresIncidentStartAndAlertKey(t *testing.T) {
 	}
 }
 
-func TestPrepareCostAlertRecoveryHonorsCooldownAndConfiguredWindow(t *testing.T) {
+func TestPrepareCostAlertRecoveryHonorsCooldownAndPreservesLastAbnormalWindow(t *testing.T) {
 	policy := testCostAlertPolicy()
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	state := costAlertState{
 		alertKey: "total_cost_high|target", active: true,
 		firstSeenAt: timePointer(now.Add(-time.Hour)), normalSinceAt: timePointer(now.Add(-31 * time.Minute)),
 		lastAlertedAt: sql.NullTime{Time: now.Add(-10 * time.Minute), Valid: true},
-		lastEvent:     model.CostAlertEvent{AlertKey: "", UserKey: "42"},
+		lastEvent: model.CostAlertEvent{
+			AlertKey: "", UserKey: "42", CurrentCost: 6,
+			WindowStart: now.Add(-30 * time.Minute), WindowEnd: now.Add(-15 * time.Minute),
+		},
 	}
 	unchanged, _, notify, changed := prepareCostAlertRecovery(state, now, policy)
 	if notify || changed || unchanged.pendingRecovery {
@@ -275,7 +278,10 @@ func TestPrepareCostAlertRecoveryHonorsCooldownAndConfiguredWindow(t *testing.T)
 	if recovery.AlertKey != state.alertKey {
 		t.Fatalf("recovery alert key = %q, want %q", recovery.AlertKey, state.alertKey)
 	}
-	if want := now.Add(20 * time.Minute).Add(-policy.Window); !recovery.WindowStart.Equal(want) {
-		t.Fatalf("recovery window start = %v, want %v", recovery.WindowStart, want)
+	if !recovery.WindowStart.Equal(state.lastEvent.WindowStart) || !recovery.WindowEnd.Equal(state.lastEvent.WindowEnd) || recovery.CurrentCost != 6 {
+		t.Fatalf("recovery lost the last abnormal window: %+v", recovery)
+	}
+	if want := now.Add(20 * time.Minute); !recovery.CreatedAt.Equal(want) {
+		t.Fatalf("recovery confirmation time = %v, want %v", recovery.CreatedAt, want)
 	}
 }
