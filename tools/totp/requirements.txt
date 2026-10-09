@@ -1,0 +1,3 @@
+# Requires Python 3.8 or newer.
+# Runtime and tests use only the Python standard library.
+# No third-party packages or pip installation are required.
