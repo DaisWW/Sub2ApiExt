@@ -40,7 +40,8 @@ scripts\
 ## 自动流程
 
 - 只检查 Docker CLI、Docker Compose 和 Docker 引擎状态
-- 不安装、启动或升级 Docker，不启用 WSL，不修改 Windows 服务和计划任务
+- 不安装、启动或升级 Docker，不启用 WSL，不修改 Windows 服务或新建计划任务
+- 自动停用旧安装器遗留的 `Sub2API Auto Start` 任务；只处理调用 `C:\ProgramData\Sub2API\manager\AutoStart.ps1` 的任务，正在运行时先停止它再继续部署
 - 第一次运行直接部署 GitHub 最新正式版，不显示升级询问
 - 已部署时显示 Docker 版本、Sub2API 当前版本和目标版本
 - 检测到新版本时询问 `y/N`；确认后先创建完整备份，再升级 Sub2API 应用容器
@@ -118,4 +119,6 @@ C:\ProgramData\Sub2API\
 
 每次运行的完整输出保存在 `C:\ProgramData\Sub2API\logs\manager-时间.log`。提权或管理器启动失败时，另见同目录下的 `bootstrap.log` 和兼容日志 `manager.log`。
 
-容器使用 `restart: unless-stopped`。需要开机自动运行时，请在 Docker Desktop 中自行启用登录后启动。
+容器使用 `restart: unless-stopped`。需要开机自动运行时，请在 Docker Desktop 中自行启用登录后启动。登录后由 Docker 恢复已部署的容器，不再重复执行旧安装器的 Compose 命令；手动停止的容器需要重新运行一键部署才能恢复自动启动。
+
+门禁开关修改后运行一键部署：开启时只由门禁占用 `18080`，关闭时先移除门禁容器，再由 Sub2API 直接使用 `18080`。重启沿用 ProgramData 中已部署的配置，不依赖 Git 工程，也不会在开机时升级、构建镜像或同步配置。

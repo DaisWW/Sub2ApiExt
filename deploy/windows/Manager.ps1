@@ -32,6 +32,7 @@ try {
     Write-Host ''
 
     Assert-Sub2ApiDockerEnvironment
+    Disable-Sub2ApiLegacyAutoStart -Context $context
     Import-Sub2ApiLegacyDeployment -Context $context
 
     $deploymentExists = Test-Sub2ApiDeploymentExists -Context $context

@@ -22,3 +22,29 @@ function Assert-Sub2ApiDockerEnvironment {
     $composeVersion = Invoke-Sub2ApiNative -FilePath 'docker' -ArgumentList @('compose', 'version', '--short') -CaptureOutput -Quiet
     Write-Sub2ApiMessage -Level Success -Message "Docker Engine $engineVersion; Docker Compose $composeVersion."
 }
+
+function Disable-Sub2ApiLegacyAutoStart {
+    param([Parameter(Mandatory = $true)]$Context)
+
+    $taskName = 'Sub2API Auto Start'
+    $task = Get-ScheduledTask -TaskPath '\' -ErrorAction Stop |
+        Where-Object { $_.TaskName -eq $taskName } | Select-Object -First 1
+    if ($null -eq $task) {
+        return
+    }
+
+    $legacyScript = Join-Path $Context.AppRoot 'manager\AutoStart.ps1'
+    $fileArgument = '(?i)(?:^|\s)-File\s+(?:"{0}"|{0})(?=\s|$)' -f [regex]::Escape($legacyScript)
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1 -or
+            @('powershell.exe', 'pwsh.exe') -notcontains (Split-Path -Leaf ([string]$actions[0].Execute)) -or
+            [string]$actions[0].Arguments -notmatch $fileArgument) {
+        Write-Sub2ApiMessage -Level Warning -Message 'Sub2API Auto Start does not belong to the legacy installer; the task was left unchanged.'
+        return
+    }
+
+    Disable-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop | Out-Null
+    # Disabling a trigger does not stop an instance started after the task query.
+    Stop-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+    Write-Sub2ApiMessage -Level Success -Message 'Disabled the legacy Sub2API Auto Start task. Enable Docker Desktop login startup to restore containers automatically.'
+}
