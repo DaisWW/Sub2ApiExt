@@ -82,6 +82,21 @@ func TestRecommendationTableShowsPricedRequestAndTokenEvidence(t *testing.T) {
 	}
 }
 
+func TestRecommendationTableDistinguishesEstimatedAndObservedCost(t *testing.T) {
+	var output strings.Builder
+	if err := writeRecommendationTable(&output, "2026-09-09T00:00:00Z", []Recommendation{{
+		ID: 1, CostEstimateSource: "model-group-cache", CostEvidenceWeight: 0.25,
+		CostPerMillionTokens: 0.1, ObservedCostPerMillion: 0.9,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"预计成本/M", "观察成本/M", "0.1000", "0.9000", "25%"} {
+		if !strings.Contains(output.String(), marker) {
+			t.Fatalf("estimated cost report omitted %q: %s", marker, output.String())
+		}
+	}
+}
+
 func TestTableActionLabelAndLatency(t *testing.T) {
 	if got := tableActionLabel("deferred-exploration"); got != "等待当前探索完成" {
 		t.Fatalf("action label = %q", got)

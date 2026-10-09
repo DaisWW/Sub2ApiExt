@@ -877,18 +877,18 @@ func TestRunnerAllowsDowngradeDuringPromotionFreeze(t *testing.T) {
 
 func TestPrepareExplorationStartsMultiplierRecoveryWhenOrdinaryExplorationDisabled(t *testing.T) {
 	now := nowForTest()
-	accounts := recoveryAccounts(nil)
+	accounts := comparableRecoveryAccounts()
 	recommendations := scoreAccounts(accounts, now, 5)
 	before := testRecommendationByID(t, recommendations, 1)
-	if before.CostPerMillionTokens != 0 || before.RecommendedPriority != priorityUnavailable {
-		t.Fatalf("multiplier anchor leaked into formal scoring: %+v", before)
+	if before.CostPerMillionTokens != 1 || before.ObservedCostPerMillion != 0 || before.RecommendedPriority != priorityUnavailable {
+		t.Fatalf("estimate was confused with observed cost or bypassed recovery: %+v", before)
 	}
 	config := testRunnerConfig(t, "http://127.0.0.1:1", true)
 	config.ExplorationEnabled = false
 	runner := NewRunner(config, &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runner.prepareExploration(accounts, recommendations, now)
 	candidate := testRecommendationByID(t, recommendations, 1)
-	if !candidate.Recovery || !candidate.explorationStart || candidate.RecommendedPriority != priorityExplore {
+	if !candidate.Recovery || !candidate.explorationStart || candidate.RecommendedPriority != 670 {
 		t.Fatalf("recovery trial was not prepared: %+v", candidate)
 	}
 	if candidate.RecoveryPeerCount != 2 || math.Abs(candidate.RecoveryAnchorCostPerMillion-1) > 1e-9 || candidate.AnchorPriority != priorityBest {
@@ -896,22 +896,24 @@ func TestPrepareExplorationStartsMultiplierRecoveryWhenOrdinaryExplorationDisabl
 	}
 }
 
-func TestMultiplierRecoveryRequiresTwoSamePlatformPeersAndHonorsRetryAt(t *testing.T) {
+func TestMultiplierRecoveryRequiresComparablePeersAndHonorsRetryAt(t *testing.T) {
 	now := nowForTest()
-	accounts := recoveryAccounts(nil)
+	accounts := comparableRecoveryAccounts()
+	accounts[1].Platform = "anthropic"
 	accounts[2].Platform = "anthropic"
 	runner := NewRunner(testRunnerConfig(t, "http://127.0.0.1:1", true), &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if _, ok := runner.selectRecoveryCandidate(accounts, now); ok {
+	if _, ok := runner.selectRecoveryCandidate(accounts, scoreAccounts(accounts, now, 5), now); ok {
 		t.Fatal("recovery used a peer from another platform")
 	}
 
+	accounts[1].Platform = "openai"
 	accounts[2].Platform = "openai"
 	retryAt := now.Add(time.Minute)
 	runner.state.Accounts[1] = accountState{RecoveryRetryAt: &retryAt}
-	if _, ok := runner.selectRecoveryCandidate(accounts, now); ok {
+	if _, ok := runner.selectRecoveryCandidate(accounts, scoreAccounts(accounts, now, 5), now); ok {
 		t.Fatal("recovery ignored its persisted retry deadline")
 	}
-	if candidate, ok := runner.selectRecoveryCandidate(accounts, retryAt); !ok || candidate.Account.ID != 1 {
+	if candidate, ok := runner.selectRecoveryCandidate(accounts, scoreAccounts(accounts, retryAt, 5), retryAt); !ok || candidate.Account.ID != 1 {
 		t.Fatalf("recovery was not reconsidered at retry deadline: %+v, ok=%v", candidate, ok)
 	}
 }
@@ -1098,7 +1100,7 @@ func TestRecoveryStartAdminFailureDoesNotCountAsTrialFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	now := nowForTest()
-	accounts := recoveryAccounts(nil)
+	accounts := comparableRecoveryAccounts()
 	recommendations := scoreAccounts(accounts, now, 5)
 	runner := NewRunner(testRunnerConfig(t, server.URL, false), &fakeMetricsSource{}, server.Client(), nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runner.config.ExplorationEnabled = false

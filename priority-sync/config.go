@@ -33,9 +33,9 @@ const (
 	costWeight             = 1.00
 	speedWeight            = 0.00
 	evaluationWeights      = "成本=100%,速度=0%,可用性=0%,失败/429=0%"
-	strategyVersion        = "direct-cost-v2"
-	decisionWindowPolicy   = "30m:计费请求>=20,计费Tokens>=1000000;2h:计费请求>=5,计费Tokens>=500000;24h/7d=仅观察"
-	recoveryAnchorPolicy   = "同平台成本/倍率中位数×当前倍率;同平台有效样本>=2;试跑10m;失败退避2h/6h/24h"
+	strategyVersion        = "evidence-cost-v3"
+	decisionWindowPolicy   = "同池倍率先验+30m/2h缓存证据;权重=min(请求/40,Tokens/2000000,连续程度);24h/7d仅证明模型与分组匹配"
+	recoveryAnchorPolicy   = "同模型/分组/档位的基础成本中位数×当前倍率;渐进恢复保留进度;新故障退避2h/6h/24h"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
 	minimumCostAdvantage   = 0.05
@@ -63,7 +63,7 @@ const (
 
 	explorationDuration     = 30 * time.Minute
 	recoveryDuration        = 10 * time.Minute
-	recoveryMinimumPeers    = 2
+	recoveryMinimumPeers    = 1
 	recoveryNoResultBackoff = 2 * time.Hour
 )
 

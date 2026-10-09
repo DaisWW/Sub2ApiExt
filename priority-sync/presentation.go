@@ -206,7 +206,7 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 	if writer == nil {
 		return nil
 	}
-	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "综合成本/M", "缓存", "延迟P90", "状态"}}
+	rows := [][]string{{"账号", "分数", "优先级", "本轮", "当前", "样本", "可用", "预计成本/M", "观察成本/M", "缓存证据", "缓存", "延迟P90", "状态"}}
 	for _, recommendation := range recommendations {
 		samples := recommendation.SuccessfulRequests + recommendation.TerminalFailures
 		availability := recommendation.Availability
@@ -225,6 +225,13 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 		cost := "-"
 		if recommendation.CostPerMillionTokens > 0 {
 			cost = fmt.Sprintf("%.4f", recommendation.CostPerMillionTokens)
+		}
+		observedCost, costWeight := "-", "-"
+		if recommendation.ObservedCostPerMillion > 0 {
+			observedCost = fmt.Sprintf("%.4f", recommendation.ObservedCostPerMillion)
+		}
+		if recommendation.CostEstimateSource != "" {
+			costWeight = fmt.Sprintf("%.0f%%", recommendation.CostEvidenceWeight*100)
 		}
 		p90 := "-"
 		if recommendation.LatencyP90Ms > 0 {
@@ -250,6 +257,8 @@ func writeRecommendationTable(writer io.Writer, generatedAt string, recommendati
 			sampleLabel,
 			fmt.Sprintf("%.1f%%", availability*100),
 			cost,
+			observedCost,
+			costWeight,
 			cache,
 			p90,
 			action,

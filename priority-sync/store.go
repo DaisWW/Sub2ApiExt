@@ -63,6 +63,7 @@ WITH usage_candidates AS (
     GROUP BY account_id
 ), usage AS (
     SELECT ul.account_id,
+           MAX(ul.created_at) FILTER (WHERE ul.unit_cost > 0) AS last_priced_success_at,
            COUNT(*)::bigint AS successful_requests,
            COUNT(*) FILTER (WHERE ul.unit_cost IS NOT NULL AND ul.unit_cost > 0)::bigint AS priced_requests,
            COALESCE(SUM(
@@ -170,6 +171,7 @@ WITH usage_candidates AS (
              ))
 ), errors AS (
     SELECT e.account_id,
+           MAX(e.error_at) FILTER (WHERE s.success_at IS NULL) AS last_terminal_failure_at,
            COUNT(*)::bigint AS error_requests,
            COUNT(*) FILTER (WHERE e.rate_limited)::bigint AS rate_limited_requests,
            COUNT(*) FILTER (WHERE e.rate_limited AND s.success_at IS NOT NULL)::bigint AS recovered_rate_limited,
@@ -221,7 +223,9 @@ SELECT a.id,
        COALESCE(e.recovered_rate_limited, 0),
        COALESCE(e.recovered_rate_limit_weight, 0),
        COALESCE(e.terminal_failures, 0),
-       COALESCE(e.trailing_terminal_failures, 0)
+       COALESCE(e.trailing_terminal_failures, 0),
+       u.last_priced_success_at,
+       e.last_terminal_failure_at
 FROM accounts a
 LEFT JOIN usage u ON u.account_id = a.id
 LEFT JOIN errors e ON e.account_id = a.id
@@ -255,6 +259,7 @@ WITH usage_candidates AS (
     GROUP BY account_id
 ), usage AS (
     SELECT ul.account_id,
+           MAX(ul.created_at) FILTER (WHERE ul.unit_cost > 0) AS last_priced_success_at,
            COUNT(*)::bigint AS successful_requests,
            COUNT(*) FILTER (WHERE ul.unit_cost IS NOT NULL AND ul.unit_cost > 0)::bigint AS priced_requests,
            COALESCE(SUM(
@@ -303,6 +308,7 @@ WITH usage_candidates AS (
     __ERROR_REQUESTS_BODY__
 ), errors AS (
     SELECT e.account_id,
+           MAX(e.error_at) FILTER (WHERE s.success_at IS NULL) AS last_terminal_failure_at,
            COUNT(*)::bigint AS error_requests,
            COUNT(*) FILTER (WHERE e.rate_limited)::bigint AS rate_limited_requests,
            COUNT(*) FILTER (WHERE e.rate_limited AND s.success_at IS NOT NULL)::bigint AS recovered_rate_limited,
@@ -354,7 +360,9 @@ SELECT a.id,
        COALESCE(e.recovered_rate_limited, 0),
        COALESCE(e.recovered_rate_limit_weight, 0),
        COALESCE(e.terminal_failures, 0),
-       COALESCE(e.trailing_terminal_failures, 0)
+       COALESCE(e.trailing_terminal_failures, 0),
+       u.last_priced_success_at,
+       e.last_terminal_failure_at
 FROM accounts a
 LEFT JOIN usage u ON u.account_id = a.id
 LEFT JOIN errors e ON e.account_id = a.id
@@ -370,8 +378,10 @@ type MetricsStore struct {
 const priorityAccountGroupsQuery = `
 SELECT ag.account_id, ag.group_id, COALESCE(ag.priority, 0)
 FROM account_groups ag
+JOIN groups g ON g.id = ag.group_id
 JOIN accounts a ON a.id = ag.account_id
 WHERE a.deleted_at IS NULL
+  AND g.deleted_at IS NULL
   AND a.schedulable = TRUE
   AND LOWER(TRIM(a.status)) IN ('active', 'error')
 ORDER BY ag.account_id, ag.group_id`
@@ -438,6 +448,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		var item AccountMetrics
 		var priority sql.NullInt64
 		var rateLimitReset, tempUnschedulable, overload sql.NullTime
+		var lastSuccess, lastFailure sql.NullTime
 		var costP75, latencyP90, firstTokenP90 sql.NullFloat64
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Platform, &item.Type, &item.Status, &priority,
@@ -449,6 +460,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 			&costP75, &latencyP90, &firstTokenP90, &item.ErrorRequests,
 			&item.RateLimitedRequests, &item.RecoveredRateLimited, &item.RecoveredRateLimitWeight, &item.TerminalFailures,
 			&item.TrailingTerminalFailures,
+			&lastSuccess, &lastFailure,
 		); err != nil {
 			return nil, fmt.Errorf("scan priority metrics: %w", err)
 		}
@@ -460,6 +472,8 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		item.RateLimitResetAt = nullTimePtr(rateLimitReset)
 		item.TempUnschedulableTill = nullTimePtr(tempUnschedulable)
 		item.OverloadUntil = nullTimePtr(overload)
+		item.LastPricedSuccessAt = nullTimePtr(lastSuccess)
+		item.LastTerminalFailureAt = nullTimePtr(lastFailure)
 		if latencyP90.Valid {
 			item.LatencyP90Ms = latencyP90.Float64
 		}
@@ -480,6 +494,12 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		return nil, fmt.Errorf("close priority metrics rows: %w", err)
 	}
 	if err := s.loadAccountGroupMemberships(ctx, metrics); err != nil {
+		return nil, err
+	}
+	if err := s.loadGroupPriorities(ctx, metrics); err != nil {
+		return nil, err
+	}
+	if err := s.loadPoolMetrics(ctx, start, end, metrics, usageColumns); err != nil {
 		return nil, err
 	}
 	return metrics, nil
@@ -634,7 +654,12 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 			if !ok {
 				continue
 			}
-			if window == snapshotWindow7d {
+			switch window {
+			case snapshotWindow30m:
+				primary[index].Pools[poolIndex].Window30m = poolMetricSnapshot(pool)
+			case snapshotWindow2h:
+				primary[index].Pools[poolIndex].Window2h = poolMetricSnapshot(pool)
+			case snapshotWindow7d:
 				primary[index].Pools[poolIndex].Window7d = poolMetricSnapshot(pool)
 			}
 		}
@@ -686,25 +711,33 @@ func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 		CacheReadCost:            account.CacheReadCost,
 		HasCacheReadCost:         account.HasCacheReadCost,
 		TrailingTerminalFailures: account.TrailingTerminalFailures,
+		LastPricedSuccessAt:      account.LastPricedSuccessAt,
+		LastTerminalFailureAt:    account.LastTerminalFailureAt,
 	}
 }
 
 func poolMetricSnapshot(pool PoolMetrics) *MetricSnapshot {
 	return &MetricSnapshot{
-		SuccessfulRequests:  pool.SuccessfulRequests,
-		TotalTokens:         pool.TotalTokens,
-		InputTokens:         pool.InputTokens,
-		OutputTokens:        pool.OutputTokens,
-		CacheCreationTokens: pool.CacheCreationTokens,
-		CacheReadTokens:     pool.CacheReadTokens,
-		AccountCost:         pool.AccountCost,
-		ActualCost:          pool.ActualCost,
-		CostP75PerMillion:   pool.CostP75PerMillion,
-		InputCost:           pool.InputCost,
-		OutputCost:          pool.OutputCost,
-		CacheCreationCost:   pool.CacheCreationCost,
-		CacheReadCost:       pool.CacheReadCost,
-		HasCacheReadCost:    pool.HasCacheReadCost,
+		SuccessfulRequests:       pool.SuccessfulRequests,
+		PricedRequests:           pool.PricedRequests,
+		PricedTokens:             pool.TotalTokens,
+		ContinuousPricedRequests: pool.ContinuousPricedRequests,
+		BaseCost:                 pool.BaseCost,
+		BaseOutputCost:           pool.BaseOutputCost,
+		HasOutputCost:            pool.HasOutputCost,
+		TotalTokens:              pool.TotalTokens,
+		InputTokens:              pool.InputTokens,
+		OutputTokens:             pool.OutputTokens,
+		CacheCreationTokens:      pool.CacheCreationTokens,
+		CacheReadTokens:          pool.CacheReadTokens,
+		AccountCost:              pool.AccountCost,
+		ActualCost:               pool.ActualCost,
+		CostP75PerMillion:        pool.CostP75PerMillion,
+		InputCost:                pool.InputCost,
+		OutputCost:               pool.OutputCost,
+		CacheCreationCost:        pool.CacheCreationCost,
+		CacheReadCost:            pool.CacheReadCost,
+		HasCacheReadCost:         pool.HasCacheReadCost,
 	}
 }
 
@@ -910,6 +943,16 @@ WITH usage_candidates AS (
     SELECT DISTINCT ON (account_id, request_key) *
     FROM usage_candidates
     ORDER BY account_id, request_key, created_at DESC, id DESC
+), priced_rows AS (
+    SELECT ul.*,
+           LAG(ul.created_at) OVER (
+               PARTITION BY ul.account_id, __REQUESTED_MODEL__, __UPSTREAM_MODEL__,
+                            __UPSTREAM_ENDPOINT__, __GROUP_ID__, __LONG_CONTEXT__
+               ORDER BY ul.created_at, ul.id
+           ) AS previous_priced_at
+    FROM usage_rows ul
+    WHERE ul.unit_cost > 0
+      AND (__ACCOUNT_STATS_COST__ > 0 OR __TOTAL_COST__ > 0)
 )
 SELECT ul.account_id,
        LOWER(BTRIM(COALESCE(NULLIF(a.platform, ''), 'unknown'))),
@@ -920,6 +963,7 @@ SELECT ul.account_id,
        __GROUP_PRIORITY__,
        __LONG_CONTEXT__,
        COUNT(*)::bigint,
+       COUNT(*) FILTER (WHERE ul.created_at - ul.previous_priced_at <= INTERVAL '2 minutes')::bigint,
        COALESCE(SUM(__INPUT_TOKENS__::bigint +
                     __OUTPUT_TOKENS__::bigint +
                     __CACHE_CREATION_TOKENS__::bigint +
@@ -950,6 +994,12 @@ SELECT ul.account_id,
        COALESCE(SUM(CASE WHEN __OUTPUT_TOKENS__ > 0 THEN __OUTPUT_COST__ * __ACCOUNT_RATE__ ELSE 0 END), 0)::double precision,
        COALESCE(SUM(CASE WHEN __CACHE_CREATION_TOKENS__ > 0 THEN __CACHE_CREATION_COST__ * __ACCOUNT_RATE__ ELSE 0 END), 0)::double precision,
        COALESCE(SUM(CASE WHEN __CACHE_READ_TOKENS__ > 0 THEN __CACHE_READ_COST__ * __ACCOUNT_RATE__ ELSE 0 END), 0)::double precision,
+       COALESCE(SUM(ul.unit_cost / 1000000.0 *
+           (__INPUT_TOKENS__::bigint + __OUTPUT_TOKENS__::bigint +
+            __CACHE_CREATION_TOKENS__::bigint + __CACHE_READ_TOKENS__::bigint) /
+           __ACCOUNT_RATE__), 0)::double precision,
+       COALESCE(SUM(__OUTPUT_COST__), 0)::double precision,
+       __OUTPUT_COST_KNOWN__,
        percentile_cont(0.75) WITHIN GROUP (ORDER BY ul.unit_cost)
          FILTER (WHERE ul.unit_cost IS NOT NULL AND ul.unit_cost > 0),
        COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY __ACCOUNT_RATE__), 1)::double precision,
@@ -957,7 +1007,7 @@ SELECT ul.account_id,
          FILTER (WHERE __DURATION__ IS NOT NULL AND __DURATION__ > 0),
        percentile_cont(0.90) WITHIN GROUP (ORDER BY __FIRST_TOKEN__)
          FILTER (WHERE __FIRST_TOKEN__ IS NOT NULL AND __FIRST_TOKEN__ > 0)
-FROM usage_rows ul
+FROM priced_rows ul
 JOIN accounts a ON a.id = ul.account_id
 __ACCOUNT_GROUP_JOIN__
 WHERE a.deleted_at IS NULL
@@ -1010,6 +1060,10 @@ func priorityPoolColumns(names ...string) map[string]bool {
 }
 
 func priorityPoolMetricsQueryForColumns(columns map[string]bool) string {
+	outputCostKnown := "FALSE"
+	if columns["output_cost"] {
+		outputCostKnown = "BOOL_AND(" + priorityPoolValueExpr(columns, "output_tokens") + " = 0 OR (ul.output_cost IS NOT NULL AND ul.output_cost >= 0))"
+	}
 	return strings.NewReplacer(
 		"__USAGE_REQUEST_KEY__", priorityRequestKeyExpr("ul", columns, "usage"),
 		"__UNIT_COST__", priorityPoolUnitCostExpr(columns),
@@ -1026,6 +1080,7 @@ func priorityPoolMetricsQueryForColumns(columns map[string]bool) string {
 		"__CACHE_READ_TOKENS__", priorityPoolValueExpr(columns, "cache_read_tokens"),
 		"__INPUT_COST__", priorityPoolCostExpr(columns, "input_cost"),
 		"__OUTPUT_COST__", priorityPoolCostExpr(columns, "output_cost"),
+		"__OUTPUT_COST_KNOWN__", outputCostKnown,
 		"__CACHE_CREATION_COST__", priorityPoolCostExpr(columns, "cache_creation_cost"),
 		"__CACHE_READ_COST__", priorityPoolCostExpr(columns, "cache_read_cost"),
 		"__ACCOUNT_STATS_COST__", priorityPoolValueExpr(columns, "account_stats_cost"),
@@ -1048,7 +1103,7 @@ func priorityPoolGroupPriorityExpr(columns map[string]bool) string {
 	if columns["group_id"] {
 		return "COALESCE(ag.priority, 0)"
 	}
-	return "0"
+	return "0::integer"
 }
 
 func priorityPoolLongContextExpr(columns map[string]bool) string {
@@ -1137,10 +1192,12 @@ func (s *MetricsStore) loadPoolMetrics(ctx context.Context, start, end time.Time
 		if err := rows.Scan(
 			&accountID, &pool.Platform, &pool.RequestedModel, &pool.UpstreamModel,
 			&pool.UpstreamEndpoint, &pool.GroupID, &pool.GroupPriority, &pool.LongContext,
-			&pool.SuccessfulRequests, &pool.TotalTokens,
+			&pool.SuccessfulRequests, &pool.ContinuousPricedRequests, &pool.TotalTokens,
 			&pool.InputTokens, &pool.OutputTokens, &pool.CacheCreationTokens, &pool.CacheReadTokens,
 			&pool.AccountCost, &pool.ActualCost,
 			&pool.InputCost, &pool.OutputCost, &pool.CacheCreationCost, &pool.CacheReadCost,
+			&pool.BaseCost, &pool.BaseOutputCost,
+			&pool.HasOutputCost,
 			&costP75, &pool.RateMultiplier,
 			&latencyP90, &firstTokenP90,
 		); err != nil {
@@ -1156,6 +1213,7 @@ func (s *MetricsStore) loadPoolMetrics(ctx context.Context, start, end time.Time
 			pool.CostP75PerMillion = costP75.Float64
 		}
 		pool.HasCacheReadCost = columns["cache_read_cost"]
+		pool.PricedRequests = pool.SuccessfulRequests
 		pool.GroupDataAvailable = columns["group_id"]
 		pool.Model = pool.UpstreamModel
 		pool.Key = poolIdentity(pool)

@@ -8,14 +8,16 @@ import (
 	"time"
 )
 
-// scoreAccounts ranks schedulable accounts only by their direct cost per
-// million tokens. Other metrics remain in the report for observation.
+// scoreAccounts uses comparable cost estimates when model/group evidence is
+// available, retaining qualified direct costs for older schemas.
 func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []Recommendation {
 	if minSamples < 1 {
 		minSamples = defaultMinSamples
 	}
 	costValues := make([]float64, len(accounts))
 	costEvidence := make([]directCostEvidence, len(accounts))
+	estimates := estimateAccountCosts(accounts, now)
+	rankingValues := make([]float64, len(accounts))
 	rankingValid := make([]bool, len(accounts))
 	multiplierValues := make([]float64, len(accounts))
 	speedValues := make([]float64, len(accounts))
@@ -26,12 +28,18 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		costEvidence[index] = directAccountCost(account)
 		costValues[index] = costEvidence[index].CostPerMillion
 		rankingValid[index] = costEvidence[index].Valid && !hardExcluded
+		rankingValues[index] = costValues[index]
+		if estimates[index].Valid && !hardExcluded {
+			costValues[index] = estimates[index].Cost
+			rankingValues[index] = estimates[index].RankingValue
+			rankingValid[index] = true
+		}
 		multiplierValues[index] = account.RateMultiplier
 		multiplierValid[index] = multiplierValues[index] > 0 && validScore(multiplierValues[index]) && !hardExcluded
 		speedValues[index] = speedMetric(account.LatencyP90Ms, account.FirstTokenP90Ms)
 		speedValid[index] = speedValues[index] > 0 && validScore(speedValues[index]) && !hardExcluded
 	}
-	costScores := rankLowerBetter(costValues, rankingValid)
+	costScores := rankEstimatedCosts(rankingValues, rankingValid, accounts, estimates)
 	multiplierScores := normalizeLowerBetter(multiplierValues, multiplierValid)
 	speedScores := normalizeLowerBetter(speedValues, speedValid)
 
@@ -45,6 +53,11 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		if costEvidence[index].Valid {
 			scoringWindow = costEvidence[index].Window
 			scoringSnapshot = &costEvidence[index].Snapshot
+		} else if estimates[index].Valid {
+			scoringWindow, scoringSnapshot = "2h", account.Window2h
+			if scoringSnapshot == nil {
+				scoringWindow, scoringSnapshot = "30m", account.Window30m
+			}
 		}
 		scoringSuccesses := maxInt64(account.SuccessfulRequests, 0)
 		scoringFailures := maxInt64(account.TerminalFailures, 0)
@@ -58,7 +71,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			scoringPricedRequests = maxInt64(scoringSnapshot.PricedRequests, 0)
 			scoringTokens = maxInt64(scoringSnapshot.PricedTokens, 0)
 		}
-		if usesDecisionWindows(account) && !costEvidence[index].Valid {
+		if usesDecisionWindows(account) && !costEvidence[index].Valid && !estimates[index].Valid {
 			scoringSuccesses = 0
 			scoringFailures = 0
 			scoringRecovered = 0
@@ -86,6 +99,19 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		} else if costEvidence[index].Valid {
 			recommended = priorityForScore(score)
 			reason = fmt.Sprintf("综合成本 %.4f/M（%s），按成本 100%% 排序", costValues[index], costEvidence[index].Window)
+		}
+		anchorPriority := 0
+		recoveryNeeded := false
+		if estimates[index].Valid && !hardExcluded {
+			anchorPriority = priorityForScore(score)
+			recommended = anchorPriority
+			reason = fmt.Sprintf("预计成本 %.4f/M（同模型/分组档位 %d 个参考账户，缓存证据权重 %.0f%%）", costValues[index], estimates[index].PeerCount, estimates[index].Weight*100)
+			recoveryNeeded = recommended < currentPriority && (estimates[index].Weight < 0.75 || currentPriority >= priorityUnavailable)
+			if recoveryNeeded {
+				recommended = currentPriority
+				reason += "；等待渐进恢复机会"
+			}
+			confidence = estimates[index].Weight
 		}
 
 		recommendation := Recommendation{
@@ -120,12 +146,28 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			CostWindows:               costWindowObservations(account),
 			Reason:                    reason,
 			applyImmediately:          applyImmediately,
+			AnchorPriority:            anchorPriority,
+			recoveryNeeded:            recoveryNeeded,
 		}
 		if costEvidence[index].Valid {
 			recommendation.CostPerMillionTokens = costValues[index]
-			recommendation.ObservedCostPerMillion = costValues[index]
+			recommendation.ObservedCostPerMillion = costEvidence[index].CostPerMillion
 			recommendation.CacheHitRate = costEvidence[index].CacheHitRate
 			recommendation.CacheHitRateKnown = costEvidence[index].CacheHitRateKnown
+		}
+		if estimates[index].Valid {
+			recommendation.CostPerMillionTokens = costValues[index]
+			recommendation.CostEstimateSource = "model-group-cache"
+			recommendation.CostEvidenceWeight = estimates[index].Weight
+			recommendation.RecoveryAnchorCostPerMillion = estimates[index].Reference
+			recommendation.RecoveryPeerCount = estimates[index].PeerCount
+			recommendation.PoolCount = estimates[index].PoolCount
+			if !costEvidence[index].Valid {
+				observed := directCostFromSnapshot(scoringWindow, scoringSnapshot)
+				recommendation.ObservedCostPerMillion = observed.CostPerMillion
+				recommendation.CacheHitRate = observed.CacheHitRate
+				recommendation.CacheHitRateKnown = observed.CacheHitRateKnown
+			}
 		}
 		result = append(result, recommendation)
 	}

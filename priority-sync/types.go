@@ -39,6 +39,8 @@ type AccountMetrics struct {
 	ErrorRequests            int64
 	TerminalFailures         int64
 	TrailingTerminalFailures int64
+	LastPricedSuccessAt      *time.Time
+	LastTerminalFailureAt    *time.Time
 	RateLimitedRequests      int64
 	RecoveredRateLimited     int64
 	RecoveredRateLimitWeight float64
@@ -81,40 +83,53 @@ type MetricSnapshot struct {
 	CacheReadCost            float64
 	HasCacheReadCost         bool
 	TrailingTerminalFailures int64
+	LastPricedSuccessAt      *time.Time
+	LastTerminalFailureAt    *time.Time
+	ContinuousPricedRequests int64
+	BaseCost                 float64
+	BaseOutputCost           float64
+	HasOutputCost            bool
 }
 
 // PoolMetrics 是同一分组档位、平台、模型、端点和上下文类型内的账户观测。
 type PoolMetrics struct {
-	Key                 string
-	Platform            string
-	RequestedModel      string
-	UpstreamModel       string
-	UpstreamEndpoint    string
-	GroupID             int64
-	GroupPriority       int
-	GroupDataAvailable  bool
-	LongContext         bool
-	Model               string
-	SuccessfulRequests  int64
-	TotalTokens         int64
-	InputTokens         int64
-	OutputTokens        int64
-	CacheCreationTokens int64
-	CacheReadTokens     int64
-	AccountCost         float64
-	ActualCost          float64
-	CostP75PerMillion   float64
-	InputCost           float64
-	OutputCost          float64
-	CacheCreationCost   float64
-	CacheReadCost       float64
-	HasCacheReadCost    bool
-	LatencyP90Ms        float64
-	FirstTokenP90Ms     float64
-	RateMultiplier      float64
-	Window24h           *MetricSnapshot
-	Window6h            *MetricSnapshot
-	Window7d            *MetricSnapshot
+	Key                      string
+	Platform                 string
+	RequestedModel           string
+	UpstreamModel            string
+	UpstreamEndpoint         string
+	GroupID                  int64
+	GroupPriority            int
+	GroupDataAvailable       bool
+	LongContext              bool
+	Model                    string
+	SuccessfulRequests       int64
+	PricedRequests           int64
+	ContinuousPricedRequests int64
+	TotalTokens              int64
+	InputTokens              int64
+	OutputTokens             int64
+	CacheCreationTokens      int64
+	CacheReadTokens          int64
+	AccountCost              float64
+	ActualCost               float64
+	CostP75PerMillion        float64
+	InputCost                float64
+	OutputCost               float64
+	CacheCreationCost        float64
+	CacheReadCost            float64
+	HasCacheReadCost         bool
+	LatencyP90Ms             float64
+	FirstTokenP90Ms          float64
+	RateMultiplier           float64
+	BaseCost                 float64
+	BaseOutputCost           float64
+	HasOutputCost            bool
+	Window30m                *MetricSnapshot
+	Window2h                 *MetricSnapshot
+	Window24h                *MetricSnapshot
+	Window6h                 *MetricSnapshot
+	Window7d                 *MetricSnapshot
 }
 
 type Recommendation struct {
@@ -126,6 +141,8 @@ type Recommendation struct {
 	RecommendedPriority          int                     `json:"recommended_priority"`
 	CostPerMillionTokens         float64                 `json:"cost_per_million_tokens,omitempty"`
 	ObservedCostPerMillion       float64                 `json:"observed_cost_per_million_tokens,omitempty"`
+	CostEvidenceWeight           float64                 `json:"cost_evidence_weight"`
+	CostEstimateSource           string                  `json:"cost_estimate_source,omitempty"`
 	FallbackMissCostPerMillion   float64                 `json:"fallback_miss_cost_per_million_tokens,omitempty"`
 	CostAdvantage                float64                 `json:"cost_advantage,omitempty"`
 	CacheHitRate                 float64                 `json:"cache_hit_rate,omitempty"`
@@ -170,6 +187,10 @@ type Recommendation struct {
 	recoveryOutcome              string
 	recoveryBaselineFailures     int64
 	recoveryMissing              bool
+	recoveryLastSuccessAt        *time.Time
+	recoveryLastFailureAt        *time.Time
+	recoveryProgressive          bool
+	recoveryNeeded               bool
 }
 
 type CostWindowObservation struct {

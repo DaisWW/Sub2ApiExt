@@ -24,22 +24,27 @@ type explorationState struct {
 	RecoveryPeerCount            int        `json:"recovery_peer_count,omitempty"`
 	RecoveryTargetPriority       int        `json:"recovery_target_priority,omitempty"`
 	RecoveryBaselineFailures     int64      `json:"recovery_baseline_failures,omitempty"`
+	RecoveryProgressive          bool       `json:"recovery_progressive,omitempty"`
+	RecoveryPriority             int        `json:"recovery_priority,omitempty"`
+	RecoveryLastSuccessAt        *time.Time `json:"recovery_last_success_at,omitempty"`
+	RecoveryLastFailureAt        *time.Time `json:"recovery_last_failure_at,omitempty"`
 }
 
 type accountState struct {
-	CandidatePriority     int        `json:"candidate_priority,omitempty"`
-	CandidateCount        int        `json:"candidate_count,omitempty"`
-	LastSeenAt            *time.Time `json:"last_seen_at,omitempty"`
-	LastAppliedAt         *time.Time `json:"last_applied_at,omitempty"`
-	LastApplied           int        `json:"last_applied_priority,omitempty"`
-	LastExploredAt        *time.Time `json:"last_explored_at,omitempty"`
-	RecoveryFailures      int        `json:"recovery_failures,omitempty"`
-	RecoveryRetryAt       *time.Time `json:"recovery_retry_at,omitempty"`
-	LastCostPerMillion    float64    `json:"last_cost_per_million,omitempty"`
-	LastCacheHitRate      float64    `json:"last_cache_hit_rate,omitempty"`
-	HasCostBaseline       bool       `json:"has_cost_baseline,omitempty"`
-	HasCacheBaseline      bool       `json:"has_cache_baseline,omitempty"`
-	PromotionFrozenCycles int        `json:"promotion_frozen_cycles,omitempty"`
+	CandidatePriority        int        `json:"candidate_priority,omitempty"`
+	CandidateCount           int        `json:"candidate_count,omitempty"`
+	LastSeenAt               *time.Time `json:"last_seen_at,omitempty"`
+	LastAppliedAt            *time.Time `json:"last_applied_at,omitempty"`
+	LastApplied              int        `json:"last_applied_priority,omitempty"`
+	LastExploredAt           *time.Time `json:"last_explored_at,omitempty"`
+	RecoveryFailures         int        `json:"recovery_failures,omitempty"`
+	RecoveryOriginalPriority int        `json:"recovery_original_priority,omitempty"`
+	RecoveryRetryAt          *time.Time `json:"recovery_retry_at,omitempty"`
+	LastCostPerMillion       float64    `json:"last_cost_per_million,omitempty"`
+	LastCacheHitRate         float64    `json:"last_cache_hit_rate,omitempty"`
+	HasCostBaseline          bool       `json:"has_cost_baseline,omitempty"`
+	HasCacheBaseline         bool       `json:"has_cache_baseline,omitempty"`
+	PromotionFrozenCycles    int        `json:"promotion_frozen_cycles,omitempty"`
 }
 
 // cloneSyncState returns an independent copy for read-only runs. The state
@@ -56,19 +61,20 @@ func cloneSyncState(source *syncState) *syncState {
 	}
 	for id, account := range source.Accounts {
 		clone.Accounts[id] = accountState{
-			CandidatePriority:     account.CandidatePriority,
-			CandidateCount:        account.CandidateCount,
-			LastSeenAt:            cloneTimePtr(account.LastSeenAt),
-			LastAppliedAt:         cloneTimePtr(account.LastAppliedAt),
-			LastApplied:           account.LastApplied,
-			LastExploredAt:        cloneTimePtr(account.LastExploredAt),
-			RecoveryFailures:      account.RecoveryFailures,
-			RecoveryRetryAt:       cloneTimePtr(account.RecoveryRetryAt),
-			LastCostPerMillion:    account.LastCostPerMillion,
-			LastCacheHitRate:      account.LastCacheHitRate,
-			HasCostBaseline:       account.HasCostBaseline,
-			HasCacheBaseline:      account.HasCacheBaseline,
-			PromotionFrozenCycles: account.PromotionFrozenCycles,
+			CandidatePriority:        account.CandidatePriority,
+			CandidateCount:           account.CandidateCount,
+			LastSeenAt:               cloneTimePtr(account.LastSeenAt),
+			LastAppliedAt:            cloneTimePtr(account.LastAppliedAt),
+			LastApplied:              account.LastApplied,
+			LastExploredAt:           cloneTimePtr(account.LastExploredAt),
+			RecoveryFailures:         account.RecoveryFailures,
+			RecoveryOriginalPriority: account.RecoveryOriginalPriority,
+			RecoveryRetryAt:          cloneTimePtr(account.RecoveryRetryAt),
+			LastCostPerMillion:       account.LastCostPerMillion,
+			LastCacheHitRate:         account.LastCacheHitRate,
+			HasCostBaseline:          account.HasCostBaseline,
+			HasCacheBaseline:         account.HasCacheBaseline,
+			PromotionFrozenCycles:    account.PromotionFrozenCycles,
 		}
 	}
 	if source.Exploration != nil {
@@ -81,6 +87,10 @@ func cloneSyncState(source *syncState) *syncState {
 			RecoveryPeerCount:            source.Exploration.RecoveryPeerCount,
 			RecoveryTargetPriority:       source.Exploration.RecoveryTargetPriority,
 			RecoveryBaselineFailures:     source.Exploration.RecoveryBaselineFailures,
+			RecoveryProgressive:          source.Exploration.RecoveryProgressive,
+			RecoveryPriority:             source.Exploration.RecoveryPriority,
+			RecoveryLastSuccessAt:        cloneTimePtr(source.Exploration.RecoveryLastSuccessAt),
+			RecoveryLastFailureAt:        cloneTimePtr(source.Exploration.RecoveryLastFailureAt),
 		}
 	}
 	return clone
