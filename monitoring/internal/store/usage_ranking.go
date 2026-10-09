@@ -29,7 +29,10 @@ WITH aggregated AS (
            COALESCE(SUM(COALESCE(ul.output_cost, 0)), 0)::double precision AS output_cost,
            COALESCE(SUM(COALESCE(ul.cache_creation_cost, 0)), 0)::double precision AS cache_creation_cost,
            COALESCE(SUM(COALESCE(ul.cache_read_cost, 0)), 0)::double precision AS cache_read_cost,
-           COALESCE(SUM(COALESCE(ul.actual_cost, ul.total_cost, 0)), 0)::double precision AS actual_cost
+           COALESCE(SUM(
+               COALESCE(ul.account_stats_cost, ul.total_cost, 0) *
+               COALESCE(ul.account_rate_multiplier, 1)
+           ), 0)::double precision AS actual_cost
       FROM usage_logs ul
       LEFT JOIN accounts a ON a.id = ul.account_id
      WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0
@@ -63,8 +66,8 @@ SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'account:unknown' END AS enti
  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank, priority_rank),
           token_rank, cost_rank, unit_cost_rank, cache_context_rank, priority_rank`
 
-func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
-	return s.loadDimensionRanks(ctx, accountUsageRankQuery, model.KindAccount, bounds, limit, totalTokens, totalCost)
+func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+	return s.loadDimensionRanks(ctx, accountUsageRankQuery, model.KindAccount, bounds, limit, totalTokens)
 }
 
 const groupUsageRankQuery = `
@@ -120,8 +123,8 @@ SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'group:unassigned' END AS ent
  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
           token_rank, cost_rank, unit_cost_rank, cache_context_rank`
 
-func (s *Store) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
-	return s.loadDimensionRanks(ctx, groupUsageRankQuery, model.KindGroup, bounds, limit, totalTokens, totalCost)
+func (s *Store) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+	return s.loadDimensionRanks(ctx, groupUsageRankQuery, model.KindGroup, bounds, limit, totalTokens)
 }
 
 const modelUsageRankQuery = `
@@ -172,11 +175,11 @@ SELECT entity_id, entity_key, name, context, platform, priority,
  WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3
   ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank), token_rank, cost_rank, unit_cost_rank`
 
-func (s *Store) loadModelUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
-	return s.loadDimensionRanks(ctx, modelUsageRankQuery, model.KindModel, bounds, limit, totalTokens, totalCost)
+func (s *Store) loadModelUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+	return s.loadDimensionRanks(ctx, modelUsageRankQuery, model.KindModel, bounds, limit, totalTokens)
 }
 
-func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, bounds usageBounds, limit int, totalTokens int64, totalCost float64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end, limit)
 	if err != nil {
 		return nil, model.UsageDimensionMeta{}, err
@@ -184,6 +187,7 @@ func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, boun
 	defer rows.Close()
 	items := make([]model.UsageRankItem, 0)
 	meta := model.UsageDimensionMeta{}
+	var totalCost float64
 	for rows.Next() {
 		var id sql.NullInt64
 		var entityKey sql.NullString
@@ -224,6 +228,7 @@ func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, boun
 			meta.OmittedRequests = totalRequests
 			meta.OmittedTokens = allTokens
 			meta.OmittedCost = allActualCost
+			totalCost = allActualCost
 		}
 		items = append(items, item)
 	}

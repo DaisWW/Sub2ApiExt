@@ -157,7 +157,7 @@ export class UsagePanel {
   #renderEntityCards() {
     const group = this.entityKind === 'group';
     $('#usageEntityEyebrow').textContent = group ? 'GROUP USAGE' : 'ACCOUNT USAGE';
-    $('#usageEntityTitle').textContent = group ? '分组缓存与成本' : '账户缓存与成本';
+    $('#usageEntityTitle').textContent = group ? '分组缓存与收费' : '账户缓存与成本';
     if (!this.usage) return;
     renderUsageCards(
       this.usage[group ? 'groups' : 'accounts'],
@@ -220,9 +220,9 @@ function usageKPIs(summary) {
   return [
     ['总 Tokens', formatTokens(summary.total_tokens), '', ''],
     ['请求数', formatCount(summary.requests), '', ''],
-    ['费用', formatUSD(summary.total_cost), '', ''],
-    ['有效倍率', formatMultiplier(summary.effective_rate_multiplier), '实际成本 / 原始成本', ''],
-    ['每百万 Tokens 成本', formatUnitCost(summary.cost_per_million_tokens), '实际成本 / 1M Tokens', '']
+    ['用户扣费', formatUSD(summary.total_cost), '', ''],
+    ['收费有效倍率', formatMultiplier(summary.effective_rate_multiplier), '用户扣费 / 原始成本', ''],
+    ['每百万 Tokens 收费', formatUnitCost(summary.cost_per_million_tokens), '用户扣费 / 1M Tokens', '']
   ];
 }
 
@@ -242,7 +242,7 @@ function usageDetailStrip(summary) {
   return `<div class="usage-detail-heading">窗口构成</div>
     <div class="usage-detail-grid">${details.map(([label, value]) =>
       `<div><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>
-    <div class="usage-detail-note">每百万 Tokens 成本按实际成本加权计算；输入/输出 Tokens 已包含图片 Tokens，不重复相加；非 Token 成本包含按次、按图等未拆分费用。</div>`;
+    <div class="usage-detail-note">总览、模型、分组和趋势按用户扣费统计；账户卡片按请求发生时的账户成本统计。有效倍率为窗口实际金额 / 标准原始成本，可能与当前配置倍率不同。输入/输出 Tokens 已包含图片 Tokens，不重复相加；非 Token 成本包含按次、按图等未拆分费用。</div>`;
 }
 
 function renderUsageKPI([label, value, note, color]) {
@@ -341,6 +341,9 @@ function renderUsageCard(item, kind) {
   const nonTokenCost = nonNegativeNumber(item?.non_token_cost);
   const kindLabel = kind === 'group' ? '分组' : '账户';
   const kindClass = kind === 'group' ? ' group-usage-card' : '';
+  const costLabel = kind === 'group' ? '分组收费' : '账户成本';
+  const multiplierLabel = kind === 'group' ? '分组有效倍率' : '账户有效倍率';
+  const multiplierTitle = `${costLabel} / 标准原始成本，按所选窗口的历史请求加权计算`;
   const context = item?.context || '';
   const priority = kind === 'account' ? priorityValue(item?.priority) : null;
   return `<article class="usage-entity-card${kindClass}">
@@ -357,7 +360,7 @@ function renderUsageCard(item, kind) {
     </div>
     <div class="usage-card-primary">
       <div class="usage-card-primary-metric cache-metric"><span>缓存命中率</span><strong>${hitRate.toFixed(2)}%</strong></div>
-      <div class="usage-card-primary-metric unit-cost-metric"><span>每百万 Tokens</span><strong>${formatUnitCost(unitCost)}</strong></div>
+      <div class="usage-card-primary-metric unit-cost-metric" title="${costLabel} / 1M Tokens"><span>每百万 Tokens</span><strong>${formatUnitCost(unitCost)}</strong></div>
     </div>
     <div class="usage-card-details">
       <div><span>输入 Tokens</span><strong>${formatTokens(inputTokens)}</strong></div>
@@ -365,10 +368,10 @@ function renderUsageCard(item, kind) {
       <div><span>Cache Create</span><strong>${formatTokens(cacheCreationTokens)}</strong></div>
       <div><span>Cache Read</span><strong>${formatTokens(cacheReadTokens)}</strong></div>
       <div><span>总 Tokens</span><strong>${formatTokens(totalTokens)}</strong></div>
-      <div><span>原始成本</span><strong>${formatUSD(baseCost)}</strong></div>
-      <div><span>实际成本</span><strong>${formatUSD(totalCost)}</strong></div>
-      <div><span>非 Token 成本</span><strong>${formatUSD(nonTokenCost)}</strong></div>
-      <div><span>有效倍率</span><strong>${formatMultiplier(item?.effective_rate_multiplier)}</strong></div>
+      <div><span>标准原始成本</span><strong>${formatUSD(baseCost)}</strong></div>
+      <div><span>${costLabel}</span><strong>${formatUSD(totalCost)}</strong></div>
+      <div><span>原始非 Token 成本</span><strong>${formatUSD(nonTokenCost)}</strong></div>
+      <div title="${multiplierTitle}"><span>${multiplierLabel}</span><strong>${formatMultiplier(item?.effective_rate_multiplier)}</strong></div>
     </div>
     <div class="usage-card-foot">
       <span>${formatCount(requests)} 次请求</span>
