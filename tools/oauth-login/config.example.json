@@ -1,9 +1,0 @@
-{
-  "client_id": "",
-  "authorization_endpoint": "",
-  "token_endpoint": "",
-  "issuer": "",
-  "jwks_uri": "",
-  "redirect_uri": "http://127.0.0.1:1455/auth/callback",
-  "scope": "openid profile email offline_access"
-}

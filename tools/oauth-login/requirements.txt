@@ -1,3 +1,0 @@
-playwright==1.59.0
-PyJWT==2.12.1
-cryptography==49.0.0
