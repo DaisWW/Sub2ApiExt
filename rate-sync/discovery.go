@@ -2,7 +2,37 @@ package main
 
 const adminAPIKeySQL = `SELECT value FROM settings WHERE key = 'admin_api_key' AND btrim(value) <> '' LIMIT 1`
 
-const discoverChannelsSQL = `
+// 分组只保留上游地址用于旧状态迁移，不读取 API Key 或代理。
+const discoverGroupChannelsSQL = `
+SELECT
+    a.id,
+    btrim(a.name),
+    a.rate_multiplier::double precision,
+    COALESCE(a.credentials->>'base_url', ''),
+    g.id,
+    btrim(g.name),
+    g.rate_multiplier::double precision,
+    g.daily_limit_usd::double precision,
+    g.weekly_limit_usd::double precision,
+    g.monthly_limit_usd::double precision
+FROM accounts a
+JOIN account_groups ag ON ag.account_id = a.id
+JOIN groups g ON g.id = ag.group_id
+WHERE a.deleted_at IS NULL
+  AND g.deleted_at IS NULL
+  AND a.status = 'active'
+  AND a.schedulable = true
+  AND g.status = 'active'
+  AND EXISTS (
+      SELECT 1
+      FROM channel_groups cg
+      JOIN channels c ON c.id = cg.channel_id
+      WHERE cg.group_id = g.id
+        AND c.status = 'active'
+  )
+ORDER BY g.id, a.id`
+
+const discoverAccountChannelsSQL = `
 SELECT
     a.id,
     btrim(a.name),

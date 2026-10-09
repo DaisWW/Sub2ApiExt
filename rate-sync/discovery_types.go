@@ -65,7 +65,8 @@ type adminAPIKeySource interface {
 }
 
 type PostgresChannelSource struct {
-	db *sql.DB
+	db          *sql.DB
+	accountMode bool
 }
 
 type Channel struct {
@@ -87,6 +88,6 @@ type sub2APIGroup struct {
 	MonthlyLimitUSD *float64
 }
 
-func NewPostgresChannelSource(db *sql.DB) *PostgresChannelSource {
-	return &PostgresChannelSource{db: db}
+func NewPostgresChannelSource(db *sql.DB, syncTarget string) *PostgresChannelSource {
+	return &PostgresChannelSource{db: db, accountMode: syncTarget == "account"}
 }

@@ -20,7 +20,11 @@ func (s *PostgresChannelSource) AdminAPIKey(ctx context.Context) (string, error)
 }
 
 func (s *PostgresChannelSource) List(ctx context.Context) ([]Channel, error) {
-	rows, err := s.db.QueryContext(ctx, discoverChannelsSQL)
+	query := discoverGroupChannelsSQL
+	if s.accountMode {
+		query = discoverAccountChannelsSQL
+	}
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("查询可用渠道: %w", err)
 	}
@@ -28,7 +32,7 @@ func (s *PostgresChannelSource) List(ctx context.Context) ([]Channel, error) {
 
 	var channels []Channel
 	for rows.Next() {
-		channel, err := scanChannel(rows)
+		channel, err := scanChannel(rows, s.accountMode)
 		if err != nil {
 			return nil, err
 		}
@@ -40,36 +44,41 @@ func (s *PostgresChannelSource) List(ctx context.Context) ([]Channel, error) {
 	return channels, nil
 }
 
-func scanChannel(rows *sql.Rows) (Channel, error) {
+func scanChannel(rows *sql.Rows, accountMode bool) (Channel, error) {
 	var channel Channel
 	var daily, weekly, monthly sql.NullFloat64
 	var proxyProtocol, proxyHost, proxyUsername, proxyPassword sql.NullString
 	var proxyPort sql.NullInt64
-	if err := rows.Scan(
+	dest := []any{
 		&channel.AccountID,
 		&channel.AccountName,
 		&channel.AccountRateMultiplier,
 		&channel.BaseURL,
-		&channel.APIKey,
+	}
+	if accountMode {
+		dest = append(dest, &channel.APIKey)
+	}
+	dest = append(dest,
 		&channel.Group.ID,
 		&channel.Group.Name,
 		&channel.Group.RateMultiplier,
 		&daily,
 		&weekly,
 		&monthly,
-		&proxyProtocol,
-		&proxyHost,
-		&proxyPort,
-		&proxyUsername,
-		&proxyPassword,
-	); err != nil {
+	)
+	if accountMode {
+		dest = append(dest, &proxyProtocol, &proxyHost, &proxyPort, &proxyUsername, &proxyPassword)
+	}
+	if err := rows.Scan(dest...); err != nil {
 		return Channel{}, fmt.Errorf("读取可用渠道: %w", err)
 	}
-	proxyURL, err := buildProxyURL(proxyProtocol, proxyHost, proxyPort, proxyUsername, proxyPassword)
-	if err != nil {
-		return Channel{}, fmt.Errorf("读取账号 %d 代理: %w", channel.AccountID, err)
+	if accountMode {
+		proxyURL, err := buildProxyURL(proxyProtocol, proxyHost, proxyPort, proxyUsername, proxyPassword)
+		if err != nil {
+			return Channel{}, fmt.Errorf("读取账号 %d 代理: %w", channel.AccountID, err)
+		}
+		channel.ProxyURL = proxyURL
 	}
-	channel.ProxyURL = proxyURL
 	channel.Group.DailyLimitUSD = nullableFloat(daily)
 	channel.Group.WeeklyLimitUSD = nullableFloat(weekly)
 	channel.Group.MonthlyLimitUSD = nullableFloat(monthly)

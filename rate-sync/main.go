@@ -53,7 +53,7 @@ func main() {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	source := NewPostgresChannelSource(db)
+	source := NewPostgresChannelSource(db, config.SyncTarget)
 	syncer := NewSyncer(config, source, client, store, state, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
