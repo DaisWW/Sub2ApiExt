@@ -7,7 +7,8 @@
     "name_start": 1,
     "name_width": 3,
     "group_names": [
-      "西郊-gpt"
+      "西郊-gpt",
+      "西郊-gpt-6"
     ],
     "proxy_name": "Verge",
     "concurrency": 3,
@@ -29,7 +30,7 @@
     "user@example.com": {
       "group_names": [
         "西郊-gpt",
-        "西郊-gpt-cursor"
+        "西郊-gpt-6"
       ],
       "extra": {
         "codex_cli_only": false
@@ -40,7 +41,7 @@
     "PLUS-EXAMPLE": {
       "group_names": [
         "西郊-gpt",
-        "西郊-gpt-cursor"
+        "西郊-gpt-6"
       ],
       "extra": {
         "codex_cli_only": false

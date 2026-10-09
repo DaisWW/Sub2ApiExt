@@ -29,7 +29,7 @@ class GroupClient(FakeClient):
         if (method, path) == ("GET", "/admin/groups/all?include_inactive=true"):
             return [
                 {"id": index, "name": name, "platform": "openai", "status": "active"}
-                for index, name in enumerate(("西郊-gpt", "西郊-gpt-cursor", "附加分组"), 1)
+                for index, name in enumerate(("西郊-gpt", "西郊-gpt-6", "附加分组"), 1)
             ]
         if (method, path) == ("GET", "/admin/proxies/all"):
             return [{"id": 7, "name": "Verge", "status": "active"}]
@@ -70,12 +70,12 @@ class AccountConfigTests(unittest.TestCase):
             "defaults": {"group_names": ["西郊-gpt"], "concurrency": 3,
                          "extra": {"openai_passthrough": True, "codex_cli_only": True}},
             "accounts": {" SAME@Example.com ": {
-                "group_names": ["西郊-gpt-cursor", "西郊-gpt", "西郊-gpt"],
+                "group_names": ["西郊-gpt-6", "西郊-gpt", "西郊-gpt"],
                 "concurrency": 1, "extra": {"codex_cli_only": False},
             }},
         })
         settings = config.resolve("same@example.com")
-        self.assertEqual(settings["group_names"], ["西郊-gpt", "西郊-gpt-cursor"])
+        self.assertEqual(settings["group_names"], ["西郊-gpt", "西郊-gpt-6"])
         self.assertEqual(settings["concurrency"], 1)
         self.assertFalse(settings["extra"]["codex_cli_only"])
         self.assertTrue(settings["extra"]["openai_passthrough"])
@@ -85,10 +85,10 @@ class AccountConfigTests(unittest.TestCase):
     def test_group_array_replaces_defaults_and_can_be_cleared(self):
         config = sub2api.AccountConfig({
             "defaults": {"group_names": ["西郊-gpt"]},
-            "accounts": {"one@example.com": {"group_names": ["西郊-gpt-cursor"]},
+            "accounts": {"one@example.com": {"group_names": ["西郊-gpt-6"]},
                          "none@example.com": {"group_names": []}},
         })
-        self.assertEqual(config.resolve("one@example.com")["group_names"], ["西郊-gpt-cursor"])
+        self.assertEqual(config.resolve("one@example.com")["group_names"], ["西郊-gpt-6"])
         self.assertEqual(config.resolve("none@example.com")["group_names"], [])
         self.assertEqual(config.resolve("other@example.com")["group_names"], ["西郊-gpt"])
 
@@ -121,7 +121,7 @@ class AccountConfigTests(unittest.TestCase):
             "defaults": {"group_names": ["西郊-gpt"], "priority": 50,
                          "extra": {"codex_cli_only": True, "openai_passthrough": True}},
             "redeem_codes": {"UNKNOWN-CARD": {
-                "group_names": ["西郊-gpt", "西郊-gpt-cursor"],
+                "group_names": ["西郊-gpt", "西郊-gpt-6"],
                 "priority": 60, "extra": {"codex_cli_only": False},
             }},
             "accounts": {"found@example.com": {"priority": 80}},
@@ -135,7 +135,7 @@ class AccountConfigTests(unittest.TestCase):
         )
         settings = configs["email:found@example.com"]
         self.assertEqual(settings["priority"], 80)
-        self.assertEqual(settings["group_names"], ["西郊-gpt", "西郊-gpt-cursor"])
+        self.assertEqual(settings["group_names"], ["西郊-gpt", "西郊-gpt-6"])
         self.assertFalse(settings["extra"]["codex_cli_only"])
         self.assertTrue(settings["extra"]["openai_passthrough"])
         self.assertEqual(configs["email:default@example.com"]["priority"], 50)
@@ -144,7 +144,7 @@ class AccountConfigTests(unittest.TestCase):
     def test_card_groups_merge_and_scalar_conflicts_require_email_override(self):
         codes = {
             "SECRET-FIRST": {"group_names": ["西郊-gpt"], "concurrency": 1},
-            "SECRET-SECOND": {"group_names": ["西郊-gpt-cursor"], "concurrency": 2},
+            "SECRET-SECOND": {"group_names": ["西郊-gpt-6"], "concurrency": 2},
         }
         bindings = redeem.code_account_bindings([
             {"code": code, "account": "same@example.com", "ok": True} for code in codes
@@ -158,7 +158,7 @@ class AccountConfigTests(unittest.TestCase):
                                       "accounts": {"same@example.com": {"concurrency": 3}}})
         configs, _ = policy.compile([record("same@example.com")], active_codes=codes, code_accounts=bindings)
         self.assertEqual(configs["email:same@example.com"]["concurrency"], 3)
-        self.assertEqual(configs["email:same@example.com"]["group_names"], ["西郊-gpt", "西郊-gpt-cursor"])
+        self.assertEqual(configs["email:same@example.com"]["group_names"], ["西郊-gpt", "西郊-gpt-6"])
 
     def test_card_extra_conflicts_are_reported_without_values(self):
         codes = {"FIRST": {"extra": {"codex_cli_only": True}},
@@ -189,9 +189,9 @@ class AccountConfigTests(unittest.TestCase):
             root = Path(directory)
             same = record("same@example.com")
             self.input(root, [same, record("root@example.com")])
-            self.input(root, [same], name="西郊-gpt-cursor/accounts-other.jsonl")
+            self.input(root, [same], name="西郊-gpt-6/accounts-other.jsonl")
             self.input(root, [], name="accounts.example.txt")
-            self.input(root, [], name="西郊-gpt-cursor/nested/accounts.txt")
+            self.input(root, [], name="西郊-gpt-6/nested/accounts.txt")
             (root / "input" / "accounts.example.txt").write_text("invalid", encoding="utf-8")
             metadata, configs, _ = self.prepare(root, {"defaults": {"group_names": ["西郊-gpt"]}})
             self.assertEqual(metadata["accounts"], 2)
@@ -313,7 +313,7 @@ class AccountConfigTests(unittest.TestCase):
             path = root / "accounts.json"
             path.write_text(json.dumps([record("same@example.com"), record("other@example.com")]), encoding="utf-8")
             config = {"defaults": {"group_names": ["西郊-gpt"], "proxy_name": "Verge"},
-                      "accounts": {"same@example.com": {"group_names": ["西郊-gpt", "西郊-gpt-cursor"], "concurrency": 1}}}
+                      "accounts": {"same@example.com": {"group_names": ["西郊-gpt", "西郊-gpt-6"], "concurrency": 1}}}
             client = GroupClient([])
             with patch.object(sub2api, "admin_session", return_value=(root / "main.json", config, client, "token")), patch.object(
                 sub2api, "get_accounts", side_effect=lambda *_: list(client.accounts.values())
@@ -383,7 +383,7 @@ class AccountConfigTests(unittest.TestCase):
             root = Path(directory)
             self.input(root, [record("same@example.com"), record("other@example.com")])
             config = {"defaults": {"group_names": ["西郊-gpt"]},
-                      "accounts": {"same@example.com": {"group_names": ["西郊-gpt", "西郊-gpt-cursor"]}}}
+                      "accounts": {"same@example.com": {"group_names": ["西郊-gpt", "西郊-gpt-6"]}}}
             config_file = root / "main.json"
             config_file.write_text(json.dumps(config), encoding="utf-8")
             client = GroupClient([remote(7, "same@example.com", managed=True), remote(8, "other@example.com", managed=True)])
@@ -452,7 +452,7 @@ class AccountConfigTests(unittest.TestCase):
             self.input(root, [], codes="CARD-ONE\nCARD-TWO\n")
             self.input(root, [], name="other/accounts.txt", codes="CARD-ONE\n")
             config = {"defaults": {"group_names": ["西郊-gpt"]},
-                      "redeem_codes": {"CARD-ONE": {"group_names": ["西郊-gpt", "西郊-gpt-cursor"], "extra": {"codex_cli_only": False}}}}
+                      "redeem_codes": {"CARD-ONE": {"group_names": ["西郊-gpt", "西郊-gpt-6"], "extra": {"codex_cli_only": False}}}}
             config_file = root / "main.json"
             config_file.write_text(json.dumps(config), encoding="utf-8")
             submitted = []

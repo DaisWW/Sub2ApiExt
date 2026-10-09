@@ -39,7 +39,7 @@ class DirectoryConfigTests(unittest.TestCase):
             self.input(root, [record("ordinary@example.com")], name="普通/accounts.txt")
             self.input(root, [record("cursor@example.com")], name="cursor/accounts.json")
             self.configuration(root, "cursor", {
-                "group_names": ["西郊-gpt", "西郊-gpt-cursor"], "extra": {"codex_cli_only": False},
+                "group_names": ["西郊-gpt", "西郊-gpt-6"], "extra": {"codex_cli_only": False},
             })
             _, configs, _ = self.prepare(root, {
                 "defaults": {"group_names": ["西郊-gpt"], "concurrency": 3, "rate_multiplier": 0.1,
@@ -48,7 +48,7 @@ class DirectoryConfigTests(unittest.TestCase):
             ordinary, cursor = configs["email:ordinary@example.com"], configs["email:cursor@example.com"]
             self.assertEqual(ordinary["group_names"], ["西郊-gpt"])
             self.assertTrue(ordinary["extra"]["codex_cli_only"])
-            self.assertEqual(cursor["group_names"], ["西郊-gpt", "西郊-gpt-cursor"])
+            self.assertEqual(cursor["group_names"], ["西郊-gpt", "西郊-gpt-6"])
             self.assertFalse(cursor["extra"]["codex_cli_only"])
             self.assertTrue(cursor["extra"]["openai_passthrough"])
             self.assertEqual(cursor["concurrency"], 3)
@@ -136,7 +136,7 @@ class DirectoryConfigTests(unittest.TestCase):
             root = Path(directory)
             self.input(root, [], name="cursor/accounts.txt", codes="CARD\nFAILED\n")
             self.configuration(root, "cursor", {
-                "group_names": ["西郊-gpt", "西郊-gpt-cursor"], "extra": {"codex_cli_only": False},
+                "group_names": ["西郊-gpt", "西郊-gpt-6"], "extra": {"codex_cli_only": False},
                 "redeem_codes": {"CARD": {"priority": 70}},
                 "accounts": {"received@example.com": {"priority": 80}},
             })
@@ -185,7 +185,7 @@ class DirectoryConfigTests(unittest.TestCase):
                 self.input(root, [record("other@example.com")], name="ordinary/accounts.txt")
                 self.input(root, [record("one@example.com")], name="cursor/accounts.txt")
                 folder_config = self.configuration(root, "cursor", {
-                    "group_names": ["西郊-gpt", "西郊-gpt-cursor"], "extra": {"codex_cli_only": False},
+                    "group_names": ["西郊-gpt", "西郊-gpt-6"], "extra": {"codex_cli_only": False},
                 })
                 self.assertEqual(pipeline.run(args), 0)
                 self.assertEqual(len(client.updates), 3)

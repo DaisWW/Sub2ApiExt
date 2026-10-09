@@ -45,13 +45,13 @@ refresh-tokens.bat
   },
   "accounts": {
     "user@example.com": {
-      "group_names": ["西郊-gpt", "西郊-gpt-6", "西郊-gpt-cursor"],
+      "group_names": ["西郊-gpt", "西郊-gpt-6"],
       "extra": { "codex_cli_only": false }
     }
   },
   "redeem_codes": {
     "PLUS-EXAMPLE": {
-      "group_names": ["西郊-gpt", "西郊-gpt-6", "西郊-gpt-cursor"],
+      "group_names": ["西郊-gpt", "西郊-gpt-6"],
       "extra": { "codex_cli_only": false }
     }
   }
@@ -60,29 +60,26 @@ refresh-tokens.bat
 
 `accounts` 和 `redeem_codes` 均可省略。已知邮箱时写 `accounts`；兑换前不知道邮箱时写 `redeem_codes`，同时将该卡密填入 `redeem-codes*.txt`。覆盖项只需要邮箱或兑换码，以及需要修改的设置，不需要完整账户 JSON。配置条目本身不会产生输入，也不会触发兑换。邮箱去除首尾空格并忽略大小写；兑换码去除首尾空格后精确匹配。
 
-通常直接按目录批量归类即可：
+账户和卡密统一放在 `西郊-gpt` 目录：
 
 ```text
 input/
-├─ 西郊-gpt/
-│  ├─ accounts.json
-│  └─ redeem-codes.txt
-└─ 西郊-gpt-cursor/
+└─ 西郊-gpt/
    ├─ accounts.json
    ├─ redeem-codes.txt
    └─ config.json
 ```
 
-普通目录不需要配置，全部继承主配置。cursor 目录的 `config.json` 只写差异：
+该目录的 `config.json` 只写差异，账户统一加入 `西郊-gpt` 和 `西郊-gpt-6`：
 
 ```json
 {
-  "group_names": ["西郊-gpt", "西郊-gpt-6", "西郊-gpt-cursor"],
+  "group_names": ["西郊-gpt", "西郊-gpt-6"],
   "extra": { "codex_cli_only": false }
 }
 ```
 
-把账户或卡密移动到 cursor 目录，就会使用这套设置，一个账户可以同时属于数组中的多个分组。目录配置也可包含 `accounts` 和 `redeem_codes`，写法与主配置一致，只对该目录输入的账户生效。同一邮箱或卡密的条目沿主配置、根目录配置、所在目录配置继承，子级只覆盖明确填写的字段。需要调整全部输入时，可选用 `input/config.json`；目录配置只能包含账户设置、`defaults`、`accounts` 和 `redeem_codes`，连接参数仍放在主配置。示例见 `input/config.example.json` 和 `input/西郊-gpt-cursor/config.example.json`。
+该目录内的账户或卡密使用这套设置，一个账户同时属于上述两个分组。目录配置也可包含 `accounts` 和 `redeem_codes`，写法与主配置一致，只对该目录输入的账户生效。同一邮箱或卡密的条目沿主配置、根目录配置、所在目录配置继承，子级只覆盖明确填写的字段。需要调整全部输入时，可选用 `input/config.json`；目录配置只能包含账户设置、`defaults`、`accounts` 和 `redeem_codes`，连接参数仍放在主配置。示例见 `input/config.example.json` 和 `input/西郊-gpt/config.example.json`。
 
 公共设置依次继承 **主配置默认值 → input 根目录配置 → 所在目录配置**，然后应用 **兑换码覆盖 → 邮箱覆盖**。普通字段覆盖，未写字段继承；`extra` 按键覆盖。`group_names` 缺省时继承，显式填写时就是最终完整列表，空数组清除分组；需要同时加入两个分组时直接列出两个名称。分组必须是已存在且启用的 OpenAI 分组。`codex_cli_only` 是账户级设置，对该账户所在的所有分组生效。
 
