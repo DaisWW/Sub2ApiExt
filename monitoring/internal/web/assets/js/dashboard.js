@@ -350,7 +350,7 @@ export class DashboardPanel {
         </div>
         <div class="metrics">
           ${renderMetric('首字最快', formatMs(firstByte.fastest_ms), '当前 5 分钟成功请求窗口；空闲时沿用上次请求窗口')}
-          ${renderMetric('首字中位数', formatMedianMs(firstByte), '至少 5 条有效首字样本，达到 20 秒提示延迟高', Number(requestHealth.first_byte_samples) >= 5 ? latencyMetricClass(firstByte.median_ms) : '')}
+          ${renderMetric('首字中位数', formatMedianMs(firstByte), '至少 5 条有效首字样本，达到 20 秒提示延迟高；未用于当前判定的请求窗口仅供参考', requestHealth.applied && Number(requestHealth.first_byte_samples) >= 5 ? latencyMetricClass(firstByte.median_ms) : '')}
           ${renderMetric('总耗时中位数', formatMedianMs(latency), '最近 1 小时成功请求总耗时，仅供参考')}
           ${renderMetric('总耗时 P95', formatMs(latency.p95_ms), '最近 1 小时 95% 的成功请求总耗时不超过该值，仅供参考')}
         </div>
@@ -459,6 +459,9 @@ function healthBasis(item) {
   }
   if (samples > 0) {
     parts.push(`${current ? '近' : '上次'} 5 分钟首字中位数 ${formatMs(health.first_byte?.median_ms)} · ${samples} 次请求`);
+    if (!health.applied) {
+      parts.push(`请求窗口仅供参考${health.latest_at ? ` · 请求证据 ${formatTime(health.latest_at)}` : ''}`);
+    }
   }
   if (firstSamples < 5) parts.push(`样本不足（首字 ${firstSamples}/5）`);
   if (Number(health.rate_limited) > 0) {
@@ -466,7 +469,7 @@ function healthBasis(item) {
   }
   if (Number(health.hard_failures) > 0) parts.push(`最终请求失败 ${health.hard_failures}/${samples}`);
   if (!health.applied && item?.latest_source) {
-    parts.push(`状态依据：${sourceLabel(item.latest_source)}${current && evidenceAt ? ` · ${formatTime(evidenceAt)}` : ''}`);
+    parts.push(`状态依据：${sourceLabel(item.latest_source)}${evidenceAt ? ` · ${formatTime(evidenceAt)}` : ''}`);
   }
   return parts.join(' · ');
 }
@@ -584,6 +587,8 @@ function renderRouteState(item) {
 
 function staleLabel(item, status) {
   if ((status === 'failed' || status === 'error') && item?.latest_source === 'request_error') return '请求错误状态';
+  if (status === 'degraded' && item?.health_reason === 'rate_limited') return '限速状态';
+  if (status === 'degraded' && item?.health_reason === 'upstream_error') return '请求错误状态';
   if (status === 'degraded') return '延迟状态';
   if (status === 'failed' || status === 'error') return '错误状态';
   if (item?.latest_source === 'probe') return '探测状态';

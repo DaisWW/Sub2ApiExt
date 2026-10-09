@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DashboardPanel } from './assets/js/dashboard.js';
+import { formatTime } from './assets/js/shared.js';
 
 function renderTarget(target) {
   const elements = new Map();
@@ -168,3 +169,36 @@ test('rate limits explain upstream attempts separately from final outcomes', () 
   assert.match(html, /当前可用但阶段性限速/);
   assert.match(html, /429 尝试 2\/10（20\.00%）/);
 });
+
+for (const current of [false, true]) {
+  test(`${current ? 'current' : 'idle'} request metrics stay neutral after a newer recovery probe`, () => {
+    const requestAt = '2026-10-09T01:02:03Z';
+    const probeAt = '2026-10-09T01:04:03Z';
+    const health = {
+      samples: 8, first_byte_samples: 8, first_byte: { median_ms: 25000 },
+      latest_at: requestAt, applied: false
+    };
+    const html = renderTarget({
+      kind: 'account', key: 'account:1', status: 'operational',
+      latest_source: 'probe', last_checked_at: probeAt,
+      current_health: current ? health : { samples: 0 },
+      last_request_health: current ? {} : health
+    });
+    assert.match(html, /target-card target-operational/);
+    assert.doesNotMatch(html, /metric-value warn/);
+    assert.ok(html.includes(`仅供参考 · 请求证据 ${formatTime(requestAt)}`));
+    assert.ok(html.includes(`状态依据：主动探测 · ${formatTime(probeAt)}`));
+  });
+}
+
+for (const [reason, label] of [['upstream_error', '请求错误状态'], ['rate_limited', '限速状态']]) {
+  test(`idle ${reason} warning uses its actual reason`, () => {
+    const html = renderTarget({
+      kind: 'group', key: 'group:1', status: 'degraded', health_reason: reason,
+      latest_source: 'aggregate', stale: true,
+      last_request_health: { samples: 10, applied: true }
+    });
+    assert.ok(html.includes(`沿用最近${label}`));
+    assert.doesNotMatch(html, /沿用最近延迟状态/);
+  });
+}
