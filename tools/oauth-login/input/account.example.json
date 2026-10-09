@@ -1,0 +1,5 @@
+{
+  "email": "codex-demo@example.invalid",
+  "password": "not-a-real-password",
+  "totp_secret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+}
