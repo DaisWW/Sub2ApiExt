@@ -274,12 +274,7 @@ export class DashboardPanel {
     const availabilityDetail = hasSamples ? ` · ${samples} 次样本` : '';
     const availabilityLabel = `近 1 小时通过率${availabilityDetail}`;
     const availabilityValue = hasSamples ? formatPct(stats.availability) : '—';
-    const recentSamples = Array.isArray(item.recent_samples) ? item.recent_samples : [];
-    const currentSample = recentSamples[recentSamples.length - 1];
-    const currentGridStatus = currentSample
-      ? displayHealthStatus(item, normalizeStatus(currentSample.status), currentSample.latency_ms, currentSample.checked_at, currentSample.health_reason)
-      : displayStatus;
-    const availabilityTone = availabilityToneForStatus(currentGridStatus);
+    const availabilityTone = availabilityToneForStatus(displayStatus);
     const currentRate = formatCurrentRate(item.rate_multiplier);
     const currentRateLabel = item.kind === 'group' ? '当前倍率' : '账户倍率';
     const currentRateTitle = item.kind === 'group' ? '当前分组成本倍率' : '当前账户成本倍率';
@@ -359,7 +354,7 @@ export class DashboardPanel {
           ${renderMetric('P95', formatMs(latency.p95_ms), '95% 的成功样本耗时不超过该值', latencyMetricClass(latency.p95_ms))}
         </div>
         <div class="card-foot">
-          ${renderStatusHistory(item.recent_samples || [], item)}
+          ${renderStatusHistory(item.recent_samples || [], item, displayStatus)}
         </div>
       </article>`;
   }
@@ -443,6 +438,9 @@ function displayHealthStatus(item, status, sampleLatencyMs = null, sampleChecked
   // Group status is already the account aggregate. Its latency is diagnostic;
   // deriving the color again could turn an operational mixed group yellow.
   if (item?.kind === 'group') return status === 'degraded' ? 'degraded' : 'operational';
+  // The server has already applied the current request window. Older latency
+  // must not repaint an account that has recovered in that window.
+  if (!sampleCheckedAt && Number(item?.current_health?.samples) > 0) return status;
   const latency = Number(sampleLatencyMs);
   if (Number.isFinite(latency) && latency > 0) {
     return latency >= slowLatencyThresholdMs ? 'degraded' : 'operational';
@@ -499,7 +497,7 @@ function availabilityToneForStatus(status) {
   return 'good';
 }
 
-function renderStatusHistory(samples, item) {
+function renderStatusHistory(samples, item, displayStatus) {
   const recent = Array.isArray(samples) ? samples.slice(-24) : [];
   const hasUnknownSamples = recent.some((sample) => {
     const sampleStatus = normalizeStatus(sample?.status);
@@ -507,10 +505,15 @@ function renderStatusHistory(samples, item) {
   });
   const gatewayError = String(item?.source_status || '').trim().toLowerCase() === 'error';
   const recoveryPending = hasRecoveryTrigger(item);
-  const emptyTone = 'ok';
-  const emptyLabel = '可用 · 数据不足，默认可用';
-  const empty = Array.from({ length: Math.max(0, 24 - recent.length) }, () => `<i class="${emptyTone}" role="img" aria-label="${escapeHTML(emptyLabel)}" title="${escapeHTML(emptyLabel)}"></i>`);
-  const items = recent.map((sample) => {
+  const currentLabel = `当前 · ${healthLabel(displayStatus, item?.health_reason)}`;
+  const timeline = Array(24 - recent.length).fill(null).concat(recent);
+  const items = timeline.map((sample, index) => {
+    const current = index === timeline.length - 1;
+    if (!sample) {
+      const tone = current ? statusTone(displayStatus) : 'ok';
+      const label = current ? `${currentLabel}；该小时无轨迹样本` : '可用 · 数据不足，默认可用';
+      return `<i class="${tone}" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
+    }
     const sampleStatus = normalizeStatus(sample?.status);
     const successful = sampleStatus === 'operational' || sampleStatus === 'degraded';
     const failed = sampleStatus === 'failed' || sampleStatus === 'error';
@@ -523,15 +526,16 @@ function renderStatusHistory(samples, item) {
       : failed || successful
       ? `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus, sample?.health_reason)} · ${sourceLabel(sample?.source)}`
       : `${formatTime(sample?.checked_at)} · ${healthLabel(displaySampleStatus, sample?.health_reason)}`;
-    const tone = statusTone(displaySampleStatus);
-    const classes = [tone, carried ? 'carried' : ''].filter(Boolean).join(' ');
-    return `<i class="${classes}" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"></i>`;
+    const tone = statusTone(current ? displayStatus : displaySampleStatus);
+    const classes = [tone, (current ? item?.stale : carried) ? 'carried' : ''].filter(Boolean).join(' ');
+    const title = current ? `${currentLabel}；${sampleStatus === 'unknown' ? '数据不足 · ' : ''}轨迹记录：${label}` : label;
+    return `<i class="${classes}" role="img" aria-label="${escapeHTML(title)}" title="${escapeHTML(title)}"></i>`;
   });
   const caption = statusHistoryCaption(recent, item, gatewayError, recoveryPending);
   const captionMarkup = `<span class="status-history-caption">${caption ? escapeHTML(caption) : ''}</span>`;
   const legend = statusHistoryLegend(hasUnknownSamples);
   return `<div class="status-history-block">
-    <div class="status-history" aria-label="24 小时内 24 段状态轨迹">${empty.concat(items).join('')}</div>
+    <div class="status-history" aria-label="24 小时内 24 段状态轨迹，最右格为当前状态">${items.join('')}</div>
     ${legend}
     ${captionMarkup}
   </div>`;

@@ -452,8 +452,7 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 	}
 	for _, marker := range []string{
 		"const availabilityLabel = `近 1 小时通过率${availabilityDetail}`",
-		"const currentSample = recentSamples[recentSamples.length - 1]",
-		"const availabilityTone = availabilityToneForStatus(currentGridStatus)",
+		"const availabilityTone = availabilityToneForStatus(displayStatus)",
 		"renderMetric('首字最快', formatMs(firstByte.fastest_ms)",
 		"renderMetric('首字中位数', formatMedianMs(firstByte)",
 		"renderMetric('总耗时中位数', formatMedianMs(latency)",
