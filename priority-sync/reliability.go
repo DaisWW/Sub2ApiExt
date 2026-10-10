@@ -76,8 +76,8 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 }
 
 func reliabilityRollbackBaseline(state accountState) *time.Time {
-	if state.LastReliabilityRollbackAt == nil && state.LastReliabilityFailureAt == nil {
-		// Use old writes only until reliability evidence has its own watermark.
+	if state.LastReliabilityRollbackAt == nil && (state.LastReliabilityFailureAt == nil || state.RecoveryFailures > 0) {
+		// Migrate old reliability/recovery writes into a durable watermark once.
 		return state.LastAppliedAt
 	}
 	return state.LastReliabilityRollbackAt
