@@ -6,6 +6,7 @@ import (
 )
 
 type reliabilityAssessment struct {
+	snapshot    *MetricSnapshot
 	window      string
 	samples     int64
 	failureRate float64
@@ -29,7 +30,7 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 		}
 	}
 	samples := maxInt64(snapshot.SuccessfulRequests, 0) + maxInt64(snapshot.TerminalFailures, 0)
-	evidence := reliabilityAssessment{window: window, samples: samples, action: "cost"}
+	evidence := reliabilityAssessment{snapshot: snapshot, window: window, samples: samples, action: "cost"}
 	if samples > 0 {
 		evidence.failureRate = float64(maxInt64(snapshot.TerminalFailures, 0)) / float64(samples)
 	}
@@ -85,6 +86,19 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 		evidence := r.assessReliability(byID[recommendation.ID], now)
 		recommendation.ReliabilityWindow, recommendation.ReliabilitySamples = evidence.window, evidence.samples
 		recommendation.AccountFailureRate, recommendation.ReliabilityAction = evidence.failureRate, evidence.action
+		recommendation.DeliveryWindow = evidence.window
+		recommendation.SameAccountRecoveredRequests = evidence.snapshot.SameAccountRecoveredRequests
+		recommendation.FallbackRecoveredRequests = evidence.snapshot.FallbackRecoveredRequests
+		recommendation.UnresolvedRequests = evidence.snapshot.UnresolvedRequests
+		recommendation.RecordedFallbackCost = positiveMetric(evidence.snapshot.FallbackCost)
+		recommendation.FallbackLatencyP90Ms = positiveMetric(evidence.snapshot.FallbackLatencyP90Ms)
+		cost := positiveMetric(evidence.snapshot.AccountCost)
+		if cost == 0 {
+			cost = positiveMetric(evidence.snapshot.ActualCost)
+		}
+		if tokens := evidence.snapshot.PricedTokens + evidence.snapshot.FallbackPricedTokens; tokens > 0 {
+			recommendation.RecordedDeliveryCostPerMillion = (cost + recommendation.RecordedFallbackCost) * 1_000_000 / float64(tokens)
+		}
 		recommendation.reliabilityLastFailureAt = evidence.lastFailure
 		recommendation.reliabilityLastSuccessAt = evidence.lastSuccess
 		recommendation.reliabilityHighSince = evidence.highSince

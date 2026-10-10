@@ -172,6 +172,18 @@ WITH usage_candidates AS (
                  )),
                  '^client:', '', 'i'
              ))
+), fallback_successes AS (
+    SELECT e.account_id, e.request_key, MAX(ul.created_at) AS success_at,
+           SUM(COALESCE(ul.unit_cost, 0) * (GREATEST(COALESCE(ul.input_tokens, 0), 0)::bigint +
+               GREATEST(COALESCE(ul.output_tokens, 0), 0)::bigint + GREATEST(COALESCE(ul.cache_creation_tokens, 0), 0)::bigint +
+               GREATEST(COALESCE(ul.cache_read_tokens, 0), 0)::bigint) / 1000000.0)::double precision AS recorded_cost,
+           (ARRAY_AGG(CASE WHEN ul.unit_cost > 0 THEN GREATEST(COALESCE(ul.input_tokens, 0), 0)::bigint +
+               GREATEST(COALESCE(ul.output_tokens, 0), 0)::bigint + GREATEST(COALESCE(ul.cache_creation_tokens, 0), 0)::bigint +
+               GREATEST(COALESCE(ul.cache_read_tokens, 0), 0)::bigint ELSE 0 END ORDER BY ul.created_at DESC, ul.id DESC))[1] AS priced_tokens,
+           (ARRAY_AGG(ul.duration_ms ORDER BY ul.created_at DESC, ul.id DESC))[1] AS duration_ms
+    FROM error_requests e
+    JOIN usage_rows ul ON ul.request_key = e.request_key AND ul.account_id <> e.account_id AND ul.created_at >= e.error_at
+    GROUP BY e.account_id, e.request_key
 ), errors AS (
     SELECT e.account_id,
            MAX(e.error_at) FILTER (WHERE s.success_at IS NULL) AS last_terminal_failure_at,
@@ -185,13 +197,21 @@ WITH usage_candidates AS (
            COUNT(*) FILTER (
                WHERE s.success_at IS NULL
                  AND (latest.success_at IS NULL OR e.error_at > latest.success_at)
-           )::bigint AS trailing_terminal_failures
+           )::bigint AS trailing_terminal_failures,
+           COUNT(*) FILTER (WHERE s.success_at IS NOT NULL)::bigint AS same_account_recovered_requests,
+           COUNT(*) FILTER (WHERE s.success_at IS NULL AND f.success_at IS NOT NULL)::bigint AS fallback_recovered_requests,
+           COUNT(*) FILTER (WHERE s.success_at IS NULL AND f.success_at IS NULL)::bigint AS unresolved_requests,
+           COALESCE(SUM(f.recorded_cost) FILTER (WHERE s.success_at IS NULL), 0)::double precision AS fallback_cost,
+           COALESCE(SUM(f.priced_tokens) FILTER (WHERE s.success_at IS NULL), 0)::bigint AS fallback_priced_tokens,
+           percentile_cont(0.90) WITHIN GROUP (ORDER BY f.duration_ms)
+             FILTER (WHERE s.success_at IS NULL AND f.duration_ms > 0) AS fallback_latency_p90_ms
     FROM error_requests e
     LEFT JOIN successful_keys s
       ON s.account_id = e.account_id
      AND s.request_key = e.request_key
      AND s.success_at >= e.error_at
     LEFT JOIN latest_success latest ON latest.account_id = e.account_id
+    LEFT JOIN fallback_successes f ON f.account_id = e.account_id AND f.request_key = e.request_key
     GROUP BY e.account_id
 )
 SELECT a.id,
@@ -228,7 +248,13 @@ SELECT a.id,
        COALESCE(e.terminal_failures, 0),
        COALESCE(e.trailing_terminal_failures, 0),
        u.last_priced_success_at,
-       e.last_terminal_failure_at
+       e.last_terminal_failure_at,
+       COALESCE(e.same_account_recovered_requests, 0),
+       COALESCE(e.fallback_recovered_requests, 0),
+       COALESCE(e.unresolved_requests, 0),
+       COALESCE(e.fallback_cost, 0),
+       COALESCE(e.fallback_priced_tokens, 0),
+       e.fallback_latency_p90_ms
 FROM accounts a
 LEFT JOIN usage u ON u.account_id = a.id
 LEFT JOIN errors e ON e.account_id = a.id
@@ -309,6 +335,14 @@ WITH usage_candidates AS (
     GROUP BY ul.account_id
 ), error_requests AS (
     __ERROR_REQUESTS_BODY__
+), fallback_successes AS (
+    SELECT e.account_id, e.request_key, MAX(ul.created_at) AS success_at,
+           SUM(COALESCE(ul.unit_cost, 0) * (__TOKEN_COUNT__) / 1000000.0)::double precision AS recorded_cost,
+           (ARRAY_AGG(CASE WHEN ul.unit_cost > 0 THEN __TOKEN_COUNT__ ELSE 0 END ORDER BY ul.created_at DESC, ul.id DESC))[1] AS priced_tokens,
+           (ARRAY_AGG(__DURATION__ ORDER BY ul.created_at DESC, ul.id DESC))[1] AS duration_ms
+    FROM error_requests e
+    JOIN usage_rows ul ON ul.request_key = e.request_key AND ul.account_id <> e.account_id AND ul.created_at >= e.error_at
+    GROUP BY e.account_id, e.request_key
 ), errors AS (
     SELECT e.account_id,
            MAX(e.error_at) FILTER (WHERE s.success_at IS NULL) AS last_terminal_failure_at,
@@ -322,13 +356,21 @@ WITH usage_candidates AS (
            COUNT(*) FILTER (
                WHERE s.success_at IS NULL
                  AND (latest.success_at IS NULL OR e.error_at > latest.success_at)
-           )::bigint AS trailing_terminal_failures
+           )::bigint AS trailing_terminal_failures,
+           COUNT(*) FILTER (WHERE s.success_at IS NOT NULL)::bigint AS same_account_recovered_requests,
+           COUNT(*) FILTER (WHERE s.success_at IS NULL AND f.success_at IS NOT NULL)::bigint AS fallback_recovered_requests,
+           COUNT(*) FILTER (WHERE s.success_at IS NULL AND f.success_at IS NULL)::bigint AS unresolved_requests,
+           COALESCE(SUM(f.recorded_cost) FILTER (WHERE s.success_at IS NULL), 0)::double precision AS fallback_cost,
+           COALESCE(SUM(f.priced_tokens) FILTER (WHERE s.success_at IS NULL), 0)::bigint AS fallback_priced_tokens,
+           percentile_cont(0.90) WITHIN GROUP (ORDER BY f.duration_ms)
+             FILTER (WHERE s.success_at IS NULL AND f.duration_ms > 0) AS fallback_latency_p90_ms
     FROM error_requests e
     LEFT JOIN successful_keys s
       ON s.account_id = e.account_id
      AND s.request_key = e.request_key
      AND s.success_at >= e.error_at
     LEFT JOIN latest_success latest ON latest.account_id = e.account_id
+    LEFT JOIN fallback_successes f ON f.account_id = e.account_id AND f.request_key = e.request_key
     GROUP BY e.account_id
 )
 SELECT a.id,
@@ -365,7 +407,13 @@ SELECT a.id,
        COALESCE(e.terminal_failures, 0),
        COALESCE(e.trailing_terminal_failures, 0),
        u.last_priced_success_at,
-       e.last_terminal_failure_at
+       e.last_terminal_failure_at,
+       COALESCE(e.same_account_recovered_requests, 0),
+       COALESCE(e.fallback_recovered_requests, 0),
+       COALESCE(e.unresolved_requests, 0),
+       COALESCE(e.fallback_cost, 0),
+       COALESCE(e.fallback_priced_tokens, 0),
+       e.fallback_latency_p90_ms
 FROM accounts a
 LEFT JOIN usage u ON u.account_id = a.id
 LEFT JOIN errors e ON e.account_id = a.id
@@ -452,7 +500,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		var priority sql.NullInt64
 		var rateLimitReset, tempUnschedulable, overload sql.NullTime
 		var lastSuccess, lastFailure sql.NullTime
-		var costP75, latencyP90, firstTokenP90 sql.NullFloat64
+		var costP75, latencyP90, firstTokenP90, fallbackLatencyP90 sql.NullFloat64
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Platform, &item.Type, &item.Status, &priority,
 			&item.RateMultiplier, &rateLimitReset, &tempUnschedulable, &overload,
@@ -464,6 +512,8 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 			&item.RateLimitedRequests, &item.RecoveredRateLimited, &item.RecoveredRateLimitWeight, &item.TerminalFailures,
 			&item.TrailingTerminalFailures,
 			&lastSuccess, &lastFailure,
+			&item.SameAccountRecoveredRequests, &item.FallbackRecoveredRequests, &item.UnresolvedRequests,
+			&item.FallbackCost, &item.FallbackPricedTokens, &fallbackLatencyP90,
 		); err != nil {
 			return nil, fmt.Errorf("scan priority metrics: %w", err)
 		}
@@ -477,6 +527,9 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		item.OverloadUntil = nullTimePtr(overload)
 		item.LastPricedSuccessAt = nullTimePtr(lastSuccess)
 		item.LastTerminalFailureAt = nullTimePtr(lastFailure)
+		if fallbackLatencyP90.Valid {
+			item.FallbackLatencyP90Ms = fallbackLatencyP90.Float64
+		}
 		if latencyP90.Valid {
 			item.LatencyP90Ms = latencyP90.Float64
 		}
@@ -695,6 +748,13 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 
 func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 	return &MetricSnapshot{
+		SameAccountRecoveredRequests: account.SameAccountRecoveredRequests,
+		FallbackRecoveredRequests:    account.FallbackRecoveredRequests,
+		UnresolvedRequests:           account.UnresolvedRequests,
+		FallbackCost:                 account.FallbackCost,
+		FallbackPricedTokens:         account.FallbackPricedTokens,
+		FallbackLatencyP90Ms:         account.FallbackLatencyP90Ms,
+
 		SuccessfulRequests:       account.SuccessfulRequests,
 		PricedRequests:           account.PricedRequests,
 		PricedTokens:             account.PricedTokens,
@@ -788,6 +848,12 @@ func priorityMetricsQueryForColumns(usageColumns, errorColumns map[string]bool) 
 		"__CACHE_READ_COST__", priorityMetricsCostExpr(usageColumns, "cache_read_cost"),
 		"__DURATION__", priorityMetricsNullableExpr(usageColumns, "duration_ms"),
 		"__FIRST_TOKEN__", priorityMetricsNullableExpr(usageColumns, "first_token_ms"),
+		"__TOKEN_COUNT__", strings.Join([]string{
+			priorityMetricsValueExpr(usageColumns, "input_tokens") + "::bigint",
+			priorityMetricsValueExpr(usageColumns, "output_tokens") + "::bigint",
+			priorityMetricsValueExpr(usageColumns, "cache_creation_tokens") + "::bigint",
+			priorityMetricsValueExpr(usageColumns, "cache_read_tokens") + "::bigint",
+		}, " + "),
 		"__ERROR_REQUESTS_BODY__", priorityErrorRequestsExpr(errorColumns, errorRequestColumns),
 	).Replace(priorityMetricsCompatQueryTemplate)
 }

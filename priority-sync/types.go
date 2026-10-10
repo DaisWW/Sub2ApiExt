@@ -47,6 +47,14 @@ type AccountMetrics struct {
 	GroupDataAvailable       bool
 	GroupPriorities          map[int64]int
 	Pools                    []PoolMetrics
+
+	SameAccountRecoveredRequests int64
+	FallbackRecoveredRequests    int64
+	UnresolvedRequests           int64
+	FallbackCost                 float64
+	FallbackPricedTokens         int64
+	FallbackLatencyP90Ms         float64
+
 	// The primary fields above represent the configured reporting window.
 	// These optional snapshots let scoring use fixed decision and observation
 	// windows when the store can provide them. They are intentionally kept
@@ -64,6 +72,13 @@ type AccountMetrics struct {
 // MetricSnapshot is an aggregate for one time window.  Costs are kept by
 // token class so a window can be normalized to a common cache mix later.
 type MetricSnapshot struct {
+	SameAccountRecoveredRequests int64
+	FallbackRecoveredRequests    int64
+	UnresolvedRequests           int64
+	FallbackCost                 float64
+	FallbackPricedTokens         int64
+	FallbackLatencyP90Ms         float64
+
 	SuccessfulRequests       int64
 	PricedRequests           int64
 	PricedTokens             int64
@@ -202,6 +217,16 @@ type Recommendation struct {
 	reliabilityLastFailureAt     *time.Time
 	reliabilityLastSuccessAt     *time.Time
 	reliabilityHighSince         *time.Time
+
+	DeliveryWindow               string `json:"delivery_window,omitempty"`
+	SameAccountRecoveredRequests int64  `json:"same_account_recovered_requests"`
+	FallbackRecoveredRequests    int64  `json:"fallback_recovered_requests"`
+	// Missing a correlated success does not prove a final client failure.
+	UnresolvedRequests             int64   `json:"unresolved_requests"`
+	RecordedFallbackCost           float64 `json:"recorded_fallback_cost,omitempty"`
+	RecordedDeliveryCostPerMillion float64 `json:"recorded_delivery_cost_per_million_tokens,omitempty"`
+	// Successful fallback duration excludes unrecorded failed-attempt latency.
+	FallbackLatencyP90Ms float64 `json:"fallback_latency_p90_ms,omitempty"`
 }
 
 type CostWindowObservation struct {

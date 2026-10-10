@@ -124,6 +124,53 @@ VALUES (10, 1, $1::timestamptz-INTERVAL '1 minute', 'platform-error', 'platform'
 	if got := attributed[0].Window2h; got.TerminalFailures != 3 || got.TrailingTerminalFailures != 3 {
 		t.Fatalf("platform/client failures were charged to account or real provider failures lost: %+v", got)
 	}
+	for _, query := range []string{`
+INSERT INTO usage_logs (id, account_id, created_at, request_id, client_request_id,
+    input_tokens, total_cost, account_rate_multiplier, duration_ms)
+VALUES (9300, 2, $1::timestamptz-INTERVAL '30 seconds', 'fallback-client', 'client:fallback-client', 100000, 0.5, 2, 500),
+       (9301, 2, $1::timestamptz-INTERVAL '60 seconds', 'fallback-client', 'client:fallback-client', 100000, 100, 2, 99999),
+       (9302, 3, $1::timestamptz-INTERVAL '20 seconds', 'fallback-client', 'client:fallback-client', 100000, 0.5, 1, 700),
+       (9303, 1, $1::timestamptz-INTERVAL '20 seconds', 'own-client', 'client:own-client', 100000, 0.25, 2, 200),
+       (9304, 2, $1::timestamptz-INTERVAL '2 minutes', 'late-failure', 'client:late-failure', 100000, 1, 2, 300),
+       (9305, 3, $1::timestamptz-INTERVAL '20 seconds', 'unpriced-fallback', 'client:unpriced-fallback', 100000, 0, 1, 0);`, `
+INSERT INTO ops_error_logs (id, account_id, created_at, request_id, client_request_id, error_owner, upstream_status_code)
+VALUES (40, 1, $1::timestamptz-INTERVAL '2 minutes', 'provider-request-1', 'CLIENT:fallback-client', 'provider', 503),
+       (41, 1, $1::timestamptz-INTERVAL '90 seconds', 'provider-request-2', 'client:fallback-client', 'provider', 503),
+       (42, 1, $1::timestamptz-INTERVAL '1 minute', 'provider-request-3', 'client:own-client', 'provider', 503),
+       (43, 1, $1::timestamptz-INTERVAL '1 minute', 'provider-request-4', 'client:late-failure', 'provider', 503),
+       (44, 1, $1::timestamptz-INTERVAL '1 minute', 'provider-request-5', 'client:unpriced-fallback', 'provider', 503);`} {
+		if _, err := db.ExecContext(ctx, query, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	delivery, err := store.LoadAccountMetricsWindows(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := delivery[0].Window2h
+	if got.SameAccountRecoveredRequests != 1 || got.FallbackRecoveredRequests != 2 || got.UnresolvedRequests != 4 || got.TerminalFailures != 6 ||
+		math.Abs(got.FallbackCost-1.5) > 1e-9 || got.FallbackPricedTokens != 100000 || got.FallbackLatencyP90Ms != 700 {
+		t.Fatalf("retry/fallback outcomes, billed attempts or final priced-token denominator incorrect: %+v", got)
+	}
+	runner := NewRunner(Config{}, nil, nil, nil, nil)
+	report := scoreAccounts(delivery, now, 5)
+	runner.prepareExploration(delivery, report, now)
+	observed := testRecommendationByID(t, report, 1)
+	if math.Abs(observed.RecordedDeliveryCostPerMillion-10) > 1e-9 || observed.DeliveryWindow != "2h" || observed.UnresolvedRequests != 4 {
+		t.Fatalf("recorded successful delivery cost was diluted by duplicate or unpriced tokens: %+v", observed)
+	}
+	// Live schemas often expose usage.request_id and errors.client_request_id.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE usage_logs DROP COLUMN client_request_id`); err != nil {
+		t.Fatal(err)
+	}
+	compatible, err := store.LoadAccountMetricsWindows(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = compatible[0].Window2h
+	if got.SameAccountRecoveredRequests != 1 || got.FallbackRecoveredRequests != 2 || math.Abs(got.FallbackCost-1.5) > 1e-9 {
+		t.Fatalf("compat schema lost client request association: %+v", got)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE usage_logs SET output_cost = NULL WHERE id = 201`); err != nil {
 		t.Fatal(err)
 	}
