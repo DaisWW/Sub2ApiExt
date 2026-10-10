@@ -32,10 +32,10 @@ const (
 const (
 	costWeight             = 1.00
 	speedWeight            = 0.00
-	evaluationWeights      = "成本=100%,速度=0%,可用性=0%,失败/429=0%"
+	evaluationWeights      = "成本=100%;故障容忍约束=零星暂停/2%～5%慢升/连续3次或持续>5%回退"
 	strategyVersion        = "evidence-cost-v4"
 	decisionWindowPolicy   = "同池倍率先验+30m/2h缓存证据;成熟24h/7d历史按24h半衰期衰减;直接成本只在同池集合比较"
-	recoveryAnchorPolicy   = "同模型/分组/档位的基础成本中位数×当前倍率;渐进恢复保留进度;新故障退避2h/6h/24h"
+	recoveryAnchorPolicy   = "同模型/分组/档位成本先验与缓存证据;渐进恢复保留进度;首次软故障观察30m,重复新故障退避2h/6h/24h"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
 	minimumCostAdvantage   = 0.05

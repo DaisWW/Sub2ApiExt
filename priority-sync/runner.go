@@ -184,6 +184,7 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 	if r == nil || r.state == nil || len(recommendations) == 0 {
 		return
 	}
+	defer r.prepareReliability(accounts, recommendations, now)
 	byID := make(map[int64]AccountMetrics, len(accounts))
 	for _, account := range accounts {
 		byID[account.ID] = account
@@ -191,19 +192,6 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 	for index := range recommendations {
 		recommendation := &recommendations[index]
 		state := r.state.Accounts[recommendation.ID]
-		active := r.state.Exploration != nil && r.state.Exploration.AccountID == recommendation.ID
-		account := byID[recommendation.ID]
-		lastFailure := latestStateTime(account.LastTerminalFailureAt, snapshotLastFailure(account.Window30m), snapshotLastFailure(account.Window2h))
-		// Low-evidence recovery still needs fault handling after its bounded
-		// lease ends. The last successful write prevents consuming old errors.
-		if !active && !recommendation.HardExcluded && state.RecoveryOriginalPriority > recommendation.CurrentPriority && !hasReliableCost(recommendation) &&
-			newRecoveryEvidence(lastFailure, state.LastAppliedAt, state.LastExploredAt) {
-			recommendation.RecommendedPriority = state.RecoveryOriginalPriority
-			recommendation.Recovery = true
-			recommendation.applyImmediately = true
-			recommendation.recoveryOutcome = recoveryOutcomeFailure
-			recommendation.Reason = fmt.Sprintf("低样本恢复后出现新的上游终态失败，退回本步之前的 %d 并退避", state.RecoveryOriginalPriority)
-		}
 		if !recommendation.HardExcluded && state.RecoveryRetryAt != nil && now.Before(*state.RecoveryRetryAt) && recommendation.RecommendedPriority < recommendation.CurrentPriority {
 			recommendation.RecommendedPriority = recommendation.CurrentPriority
 			recommendation.Reason += "；恢复退避中，暂停提升"
@@ -323,9 +311,11 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 }
 
 const (
-	recoveryOutcomeSuccess  = "success"
-	recoveryOutcomeFailure  = "failure"
-	recoveryOutcomeNoResult = "no-result"
+	recoveryOutcomeSuccess    = "success"
+	recoveryOutcomeFailure    = "failure"
+	recoveryOutcomeNoResult   = "no-result"
+	recoveryOutcomeUnreliable = "unreliable"
+	recoveryOutcomeProgress   = "progress"
 )
 
 type recoveryCandidate struct {
@@ -369,13 +359,8 @@ func (r *Runner) prepareActiveRecovery(account AccountMetrics, recommendation *R
 	recommendation.applyImmediately = true
 	recommendation.explorationEnd = true
 	if !hasReliableCost(recommendation) {
-		if recoveryTerminalFailures(account) > exploration.RecoveryBaselineFailures {
-			recommendation.recoveryOutcome = recoveryOutcomeFailure
-			recommendation.Reason = fmt.Sprintf("倍率恢复试跑出现终态失败，恢复原优先级 %d", restorePriority)
-		} else {
-			recommendation.recoveryOutcome = recoveryOutcomeNoResult
-			recommendation.Reason = fmt.Sprintf("倍率恢复试跑无有效成本，恢复原优先级 %d，2 小时后可重试", restorePriority)
-		}
+		recommendation.recoveryOutcome = recoveryOutcomeNoResult
+		recommendation.Reason = fmt.Sprintf("倍率恢复试跑无有效成本，恢复原优先级 %d，2 小时后可重试", restorePriority)
 		return
 	}
 	if measuredPriority < restorePriority && measuredPriority < priorityNeutral {
@@ -395,6 +380,10 @@ func (r *Runner) selectRecoveryCandidate(accounts []AccountMetrics, recommendati
 	}
 	for _, account := range accounts {
 		recommendation := byID[account.ID]
+		action := r.assessReliability(account, now).action
+		if action == "pause" || action == "observe" || action == "rollback" {
+			continue
+		}
 		if !recommendation.recoveryNeeded || recommendation.recoveryOutcome != "" || recommendation.AnchorPriority >= normalizedPriority(account.CurrentPriority) {
 			continue
 		}
@@ -447,15 +436,6 @@ func newRecoveryEvidence(latest, baseline, startedAt *time.Time) bool {
 
 func (r *Runner) prepareProgressiveRecovery(account AccountMetrics, recommendation *Recommendation, exploration *explorationState, now time.Time) {
 	recommendation.RecommendedPriority = recommendation.CurrentPriority
-	lastFailure := latestStateTime(account.LastTerminalFailureAt, snapshotLastFailure(account.Window30m), snapshotLastFailure(account.Window2h))
-	if newRecoveryEvidence(lastFailure, exploration.RecoveryLastFailureAt, exploration.StartedAt) {
-		recommendation.RecommendedPriority = normalizedPriority(exploration.OriginalPriority)
-		recommendation.applyImmediately = true
-		recommendation.explorationEnd = true
-		recommendation.recoveryOutcome = recoveryOutcomeFailure
-		recommendation.Reason = fmt.Sprintf("恢复期间出现新的上游终态失败，退回本步之前的 %d 并退避", recommendation.RecommendedPriority)
-		return
-	}
 	if !explorationExpired(exploration, now) {
 		recommendation.Reason = "渐进恢复观察中，保留当前进度"
 		recommendation.ApplyStatus = "recovery-testing"
@@ -501,6 +481,10 @@ func (r *Runner) selectExplorationCandidate(accounts []AccountMetrics, now time.
 	eligible := make([]AccountMetrics, 0, len(accounts))
 	for _, account := range accounts {
 		if accountState, ok := r.state.Accounts[account.ID]; ok && accountState.LastExploredAt != nil && now.Sub(*accountState.LastExploredAt) < explorationDuration {
+			continue
+		}
+		action := r.assessReliability(account, now).action
+		if action == "pause" || action == "observe" || action == "rollback" {
 			continue
 		}
 		if directAccountCost(account).Valid {
@@ -616,12 +600,16 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		}
 		isActiveExploration := recommendation.Exploration && r.state.Exploration != nil && r.state.Exploration.AccountID == recommendation.ID
 		if recommendation.RecommendedPriority == recommendation.CurrentPriority {
+			recordReliabilityObservation(&state, recommendation, now)
 			state.CandidatePriority = 0
 			state.CandidateCount = 0
 			if isActiveExploration && recommendation.explorationEnd {
 				r.finishExploration(recommendation, &state, now)
 				activeExplorationID = 0
 				recommendation.ApplyStatus = explorationEndStatus(recommendation)
+			} else if recommendation.reliabilityRollback {
+				recordRecoveryOutcome(&state, recommendation.recoveryOutcome, now, true)
+				recommendation.ApplyStatus = "reliability-observing"
 			} else if recommendation.ApplyStatus == "" {
 				recommendation.ApplyStatus = "unchanged"
 			}
@@ -754,6 +742,15 @@ func (r *Runner) finishExploration(recommendation *Recommendation, state *accoun
 
 func recordRecoveryOutcome(state *accountState, outcome string, now time.Time, progressive bool) {
 	switch outcome {
+	case recoveryOutcomeUnreliable:
+		state.RecoveryFailures++
+		backoff := 30 * time.Minute
+		if state.RecoveryFailures > 1 {
+			backoff = recoveryBackoff(state.RecoveryFailures - 1)
+		}
+		state.RecoveryRetryAt = timePtr(now.Add(backoff))
+	case recoveryOutcomeProgress:
+		state.RecoveryRetryAt = nil
 	case recoveryOutcomeSuccess:
 		state.RecoveryFailures = 0
 		state.RecoveryRetryAt = nil
@@ -872,6 +869,7 @@ func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recomm
 		return false
 	}
 	state.LastAppliedAt = timePtr(now)
+	recordReliabilityObservation(state, recommendation, now)
 	state.LastApplied = priority
 	state.CandidatePriority = 0
 	state.CandidateCount = 0

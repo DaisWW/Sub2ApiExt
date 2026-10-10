@@ -927,9 +927,10 @@ func TestRecoveryTrialRestoresPriorityAndRecordsOutcomeAfterSuccessfulWrite(t *t
 		wantRetry        time.Duration
 	}{
 		{name: "no result", wantRetry: 2 * time.Hour},
-		{name: "terminal failure", snapshot: &MetricSnapshot{TerminalFailures: 1}, wantFailures: 1, wantRetry: 2 * time.Hour},
+		{name: "isolated terminal failure", snapshot: &MetricSnapshot{TerminalFailures: 1}, wantRetry: 2 * time.Hour},
 		{name: "still expensive", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, wantFailures: 1, wantRetry: 2 * time.Hour},
-		{name: "cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2},
+		{name: "short cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2, wantFailures: 2},
+		{name: "mature cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 50, PricedRequests: 50, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

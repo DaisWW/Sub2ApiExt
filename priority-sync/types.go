@@ -175,6 +175,10 @@ type Recommendation struct {
 	NextPriority                 int                     `json:"next_priority,omitempty"`
 	HardExcluded                 bool                    `json:"hard_excluded"`
 	PromotionFrozen              bool                    `json:"promotion_frozen,omitempty"`
+	ReliabilityWindow            string                  `json:"reliability_window,omitempty"`
+	ReliabilitySamples           int64                   `json:"reliability_samples"`
+	AccountFailureRate           float64                 `json:"account_failure_rate"`
+	ReliabilityAction            string                  `json:"reliability_action,omitempty"`
 	Exploration                  bool                    `json:"exploration,omitempty"`
 	Recovery                     bool                    `json:"recovery,omitempty"`
 	RecoveryAnchorCostPerMillion float64                 `json:"recovery_anchor_cost_per_million,omitempty"`
@@ -194,6 +198,10 @@ type Recommendation struct {
 	recoveryProgressive          bool
 	recoveryNeeded               bool
 	recoveryReevaluation         bool
+	reliabilityRollback          bool
+	reliabilityLastFailureAt     *time.Time
+	reliabilityLastSuccessAt     *time.Time
+	reliabilityHighSince         *time.Time
 }
 
 type CostWindowObservation struct {

@@ -11,7 +11,8 @@ func TestStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	want := &syncState{Accounts: map[int64]accountState{
-		42: {CandidatePriority: 120, CandidateCount: 2, LastAppliedAt: &now, LastApplied: 120},
+		42: {CandidatePriority: 120, CandidateCount: 2, LastAppliedAt: &now, LastApplied: 120,
+			LastReliabilityFailureAt: &now, LastReliabilityRollbackAt: &now, ReliabilityHighSince: &now},
 	}}
 	if err := saveState(path, want); err != nil {
 		t.Fatal(err)
@@ -22,6 +23,11 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if got.Accounts[42].CandidatePriority != 120 || got.Accounts[42].CandidateCount != 2 || got.Accounts[42].LastApplied != 120 {
 		t.Fatalf("state = %+v", got)
+	}
+	account := got.Accounts[42]
+	if account.LastReliabilityFailureAt == nil || account.LastReliabilityRollbackAt == nil || account.ReliabilityHighSince == nil ||
+		!account.LastReliabilityFailureAt.Equal(now) || !account.LastReliabilityRollbackAt.Equal(now) || !account.ReliabilityHighSince.Equal(now) {
+		t.Fatalf("reliability watermarks did not survive restart: %+v", account)
 	}
 }
 
@@ -109,6 +115,7 @@ func TestCloneSyncStateIsIndependent(t *testing.T) {
 				RecoveryFailures:         2,
 				RecoveryOriginalPriority: 90,
 				RecoveryRetryAt:          timePtr(started.Add(6 * time.Hour)),
+				LastReliabilityFailureAt: timePtr(started), LastReliabilityRollbackAt: timePtr(started), ReliabilityHighSince: timePtr(started),
 			},
 		},
 		Exploration: &explorationState{
@@ -119,6 +126,13 @@ func TestCloneSyncStateIsIndependent(t *testing.T) {
 		ExplorationCursor: 7,
 	}
 	clone := cloneSyncState(state)
+	cloned := clone.Accounts[7]
+	*cloned.LastReliabilityFailureAt = started.Add(time.Hour)
+	*cloned.LastReliabilityRollbackAt = started.Add(time.Hour)
+	*cloned.ReliabilityHighSince = started.Add(time.Hour)
+	if !state.Accounts[7].LastReliabilityFailureAt.Equal(started) || !state.Accounts[7].LastReliabilityRollbackAt.Equal(started) || !state.Accounts[7].ReliabilityHighSince.Equal(started) {
+		t.Fatal("clone mutation changed source reliability watermarks")
+	}
 	if clone.Accounts[7].RecoveryOriginalPriority != 90 {
 		t.Fatalf("clone lost recovery rollback priority: %+v", clone.Accounts[7])
 	}

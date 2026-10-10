@@ -107,6 +107,23 @@ VALUES (1, 1, $1::timestamptz-INTERVAL '5 minutes', 'new-failure', 'provider', 5
 	if !candidate.recoveryNeeded || candidate.AnchorPriority != priorityBest || math.Abs(candidate.CostPerMillionTokens-0.371) > 1e-9 {
 		t.Fatalf("store evidence did not produce the expected recovery: %+v", candidate)
 	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO ops_error_logs (id, account_id, created_at, request_id, error_owner, error_source, error_phase, upstream_status_code)
+VALUES (10, 1, $1::timestamptz-INTERVAL '1 minute', 'platform-error', 'platform', 'gateway', 'internal', 503),
+       (11, 1, $1::timestamptz-INTERVAL '1 minute', 'client-error', 'client', 'upstream_http', 'upstream', 502),
+       (12, 1, $1::timestamptz-INTERVAL '1 minute', 'bad-input', 'provider', 'upstream_http', 'upstream', 400),
+       (13, 1, $1::timestamptz-INTERVAL '1 minute', 'forbidden', 'provider', 'upstream_http', 'upstream', 403),
+       (14, 1, $1::timestamptz-INTERVAL '1 minute', 'timeout', 'provider', 'upstream_network', 'network', 0),
+       (15, 1, $1::timestamptz-INTERVAL '1 minute', 'internal-error', 'provider', 'gateway', 'internal', 503);`, now); err != nil {
+		t.Fatal(err)
+	}
+	attributed, err := store.LoadAccountMetricsWindows(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := attributed[0].Window2h; got.TerminalFailures != 3 || got.TrailingTerminalFailures != 3 {
+		t.Fatalf("platform/client failures were charged to account or real provider failures lost: %+v", got)
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE usage_logs SET output_cost = NULL WHERE id = 201`); err != nil {
 		t.Fatal(err)
 	}

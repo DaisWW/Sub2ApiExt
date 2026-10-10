@@ -153,6 +153,9 @@ WITH usage_candidates AS (
     WHERE oe.account_id IS NOT NULL
       AND oe.created_at >= $1 AND oe.created_at < $2
       AND COALESCE(oe.is_business_limited, FALSE) = FALSE
+      AND LOWER(BTRIM(COALESCE(oe.error_owner, ''))) NOT IN ('platform', 'client', 'user')
+      AND LOWER(BTRIM(COALESCE(oe.error_phase, ''))) <> 'internal'
+      AND COALESCE(NULLIF(oe.upstream_status_code, 0), oe.status_code, 0) NOT IN (400, 404, 422)
       AND (
           LOWER(BTRIM(COALESCE(oe.error_owner, ''))) = 'provider'
           OR LOWER(BTRIM(COALESCE(oe.error_source, ''))) IN ('upstream_http', 'upstream_network')
@@ -893,6 +896,21 @@ func priorityErrorRequestsExpr(columns, sharedRequestColumns map[string]bool) st
 	if columns["is_business_limited"] {
 		filters = append(filters, "COALESCE(oe.is_business_limited, FALSE) = FALSE")
 	}
+	if columns["error_owner"] {
+		filters = append(filters, "LOWER(BTRIM(COALESCE(oe.error_owner, ''))) NOT IN ('platform', 'client', 'user')")
+	}
+	if columns["error_phase"] {
+		filters = append(filters, "LOWER(BTRIM(COALESCE(oe.error_phase, ''))) <> 'internal'")
+	}
+	statusCodes := make([]string, 0, 3)
+	if columns["upstream_status_code"] {
+		statusCodes = append(statusCodes, "NULLIF(oe.upstream_status_code, 0)")
+	}
+	if columns["status_code"] {
+		statusCodes = append(statusCodes, "oe.status_code")
+	}
+	statusCodes = append(statusCodes, "0")
+	filters = append(filters, "COALESCE("+strings.Join(statusCodes, ", ")+") NOT IN (400, 404, 422)")
 	ownerFilters := []string{}
 	if columns["error_owner"] {
 		ownerFilters = append(ownerFilters, "LOWER(BTRIM(COALESCE(oe.error_owner, ''))) = 'provider'")
