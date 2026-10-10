@@ -71,6 +71,58 @@ func TestMaturePersistentFailureRollsBackOnceWithShortObservation(t *testing.T) 
 	}
 }
 
+func TestCostWriteDoesNotConsumeObservedReliabilityFailure(t *testing.T) {
+	now := nowForTest()
+	account := reliabilityAccount(90, 10, 0, now.Add(-time.Minute))
+	account.CurrentPriority = priorityBest
+	peer := comparableCostAccount(2, 0.05, 0.9, 100, 5_000_000, 90)
+	peer.CurrentPriority = priorityBest
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.state.Accounts[1] = accountState{LastAppliedAt: timePtr(now.Add(-time.Hour))}
+	for cycle := 0; cycle < 3; cycle++ {
+		at := now.Add(time.Duration(cycle) * defaultInterval)
+		accounts := []AccountMetrics{account, peer}
+		recommendations := scoreAccounts(accounts, at, 5)
+		runner.prepareExploration(accounts, recommendations, at)
+		candidate := testRecommendationByID(t, recommendations, 1)
+		if cycle == 0 && (candidate.ReliabilityAction != "observe" || candidate.RecommendedPriority != priorityPoor) {
+			t.Fatalf("test did not produce an ordinary cost downgrade while observing failures: %+v", candidate)
+		}
+		if cycle == 1 && (candidate.ReliabilityAction != "rollback" || candidate.RecommendedPriority != 50) {
+			t.Fatalf("ordinary cost write swallowed the persistent failure: %+v", candidate)
+		}
+		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)
+		if len(updates) > 0 {
+			account.CurrentPriority = <-updates
+		}
+	}
+	state := runner.state.Accounts[1]
+	if state.RecoveryFailures != 1 || state.LastReliabilityRollbackAt == nil || !state.LastReliabilityRollbackAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("observed failure was lost or punished more than once: %+v", state)
+	}
+}
+
+func TestLegacyReliabilityWatermarkSurvivesObservation(t *testing.T) {
+	now := nowForTest()
+	account := AccountMetrics{ID: 1, Status: "active", CurrentPriority: priorityPoor,
+		DecisionWindowsAvailable: true, Window2h: &MetricSnapshot{TerminalFailures: 3, TrailingTerminalFailures: 3,
+			LastTerminalFailureAt: timePtr(now.Add(-2 * defaultInterval))}}
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.state.Accounts[1] = accountState{LastAppliedAt: timePtr(now.Add(-defaultInterval))}
+	for cycle := 0; cycle < 2; cycle++ {
+		at := now.Add(time.Duration(cycle) * defaultInterval)
+		recommendations := scoreAccounts([]AccountMetrics{account}, at, 5)
+		runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+		if recommendations[0].reliabilityRollback {
+			t.Fatalf("pre-migration failure became a new rollback: %+v", recommendations[0])
+		}
+		runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+	}
+	if len(updates) != 0 || runner.state.Accounts[1].RecoveryFailures != 0 {
+		t.Fatalf("legacy failure was punished again: %+v", runner.state.Accounts[1])
+	}
+}
+
 func TestReliabilityRollbackAPIFailureAndDryRunDoNotConsumeEvidence(t *testing.T) {
 	now := nowForTest()
 	for _, dryRun := range []bool{false, true} {

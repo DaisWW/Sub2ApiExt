@@ -868,8 +868,8 @@ func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recomm
 		}
 		return false
 	}
-	state.LastAppliedAt = timePtr(now)
 	recordReliabilityObservation(state, recommendation, now)
+	state.LastAppliedAt = timePtr(now)
 	state.LastApplied = priority
 	state.CandidatePriority = 0
 	state.CandidateCount = 0

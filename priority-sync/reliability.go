@@ -42,8 +42,7 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 		pauseBaseline = latestStateTime(pauseBaseline, lease.RecoveryLastFailureAt, lease.StartedAt)
 	}
 	fresh := evidence.lastFailure != nil && (pauseBaseline == nil || evidence.lastFailure.After(*pauseBaseline))
-	// Existing writes also provide a migration watermark for older state files.
-	rollbackBaseline := latestStateTime(state.LastReliabilityRollbackAt, state.LastAppliedAt)
+	rollbackBaseline := reliabilityRollbackBaseline(state)
 	if lease := r.state.Exploration; lease != nil && lease.AccountID == account.ID {
 		rollbackBaseline = latestStateTime(rollbackBaseline, lease.RecoveryLastFailureAt, lease.StartedAt)
 	}
@@ -74,6 +73,14 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 		evidence.action = "rollback"
 	}
 	return evidence
+}
+
+func reliabilityRollbackBaseline(state accountState) *time.Time {
+	if state.LastReliabilityRollbackAt == nil && state.LastReliabilityFailureAt == nil {
+		// Use old writes only until reliability evidence has its own watermark.
+		return state.LastAppliedAt
+	}
+	return state.LastReliabilityRollbackAt
 }
 
 func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations []Recommendation, now time.Time) {
@@ -164,6 +171,7 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 // Commit evidence only after an unchanged decision or successful Admin write.
 // A rejected rollback must remain retryable with the same input evidence.
 func recordReliabilityObservation(state *accountState, recommendation *Recommendation, now time.Time) {
+	state.LastReliabilityRollbackAt = cloneTimePtr(reliabilityRollbackBaseline(*state))
 	state.LastReliabilityFailureAt = cloneTimePtr(latestStateTime(state.LastReliabilityFailureAt, recommendation.reliabilityLastFailureAt))
 	state.ReliabilityHighSince = cloneTimePtr(recommendation.reliabilityHighSince)
 	if recommendation.reliabilityRollback {
