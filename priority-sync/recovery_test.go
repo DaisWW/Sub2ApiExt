@@ -36,6 +36,33 @@ func progressiveRecoveryRunner(t *testing.T, status int) (*Runner, chan int) {
 	return runner, updates
 }
 
+func TestHistoricalReevaluationIsBoundedAndRecoveryCandidatesGetFairTurns(t *testing.T) {
+	now := nowForTest()
+	accounts := comparableRecoveryAccounts()
+	accounts[0].CurrentPriority = priorityPoor
+	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
+	recommendations := scoreAccounts(accounts, now, 5)
+	for index := range recommendations {
+		if recommendations[index].ID == 1 {
+			recommendations[index].recoveryReevaluation = true
+		}
+	}
+	runner.state.Accounts[1] = accountState{LastExploredAt: timePtr(now.Add(-time.Hour))}
+	if _, ok := runner.selectRecoveryCandidate(accounts, recommendations, now); ok {
+		t.Fatal("historical re-evaluation retried within two hours")
+	}
+	if _, ok := runner.selectRecoveryCandidate(accounts, recommendations, now.Add(time.Hour)); !ok {
+		t.Fatal("historical re-evaluation never became eligible again")
+	}
+	other := accounts[0]
+	other.ID, other.RateMultiplier = 4, 0.15
+	accounts = append(accounts, other)
+	recommendations = scoreAccounts(accounts, now, 5)
+	if got, ok := runner.selectRecoveryCandidate(accounts, recommendations, now); !ok || got.Account.ID != 4 {
+		t.Fatalf("repeated cheap candidate starved an untried peer: %+v, %t", got, ok)
+	}
+}
+
 func TestProgressiveRecoveryRetainsNoTrafficProgressAcrossRestart(t *testing.T) {
 	now := nowForTest()
 	accounts := comparableRecoveryAccounts()

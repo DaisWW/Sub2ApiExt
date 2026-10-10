@@ -718,6 +718,7 @@ func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 
 func poolMetricSnapshot(pool PoolMetrics) *MetricSnapshot {
 	return &MetricSnapshot{
+		LastPricedSuccessAt:      pool.LastPricedSuccessAt,
 		SuccessfulRequests:       pool.SuccessfulRequests,
 		PricedRequests:           pool.PricedRequests,
 		PricedTokens:             pool.TotalTokens,
@@ -964,6 +965,7 @@ SELECT ul.account_id,
        __LONG_CONTEXT__,
        COUNT(*)::bigint,
        COUNT(*) FILTER (WHERE ul.created_at - ul.previous_priced_at <= INTERVAL '2 minutes')::bigint,
+       MAX(ul.created_at),
        COALESCE(SUM(__INPUT_TOKENS__::bigint +
                     __OUTPUT_TOKENS__::bigint +
                     __CACHE_CREATION_TOKENS__::bigint +
@@ -1189,10 +1191,11 @@ func (s *MetricsStore) loadPoolMetrics(ctx context.Context, start, end time.Time
 		var pool PoolMetrics
 		var accountID int64
 		var costP75, latencyP90, firstTokenP90 sql.NullFloat64
+		var lastSuccess sql.NullTime
 		if err := rows.Scan(
 			&accountID, &pool.Platform, &pool.RequestedModel, &pool.UpstreamModel,
 			&pool.UpstreamEndpoint, &pool.GroupID, &pool.GroupPriority, &pool.LongContext,
-			&pool.SuccessfulRequests, &pool.ContinuousPricedRequests, &pool.TotalTokens,
+			&pool.SuccessfulRequests, &pool.ContinuousPricedRequests, &lastSuccess, &pool.TotalTokens,
 			&pool.InputTokens, &pool.OutputTokens, &pool.CacheCreationTokens, &pool.CacheReadTokens,
 			&pool.AccountCost, &pool.ActualCost,
 			&pool.InputCost, &pool.OutputCost, &pool.CacheCreationCost, &pool.CacheReadCost,
@@ -1213,6 +1216,7 @@ func (s *MetricsStore) loadPoolMetrics(ctx context.Context, start, end time.Time
 			pool.CostP75PerMillion = costP75.Float64
 		}
 		pool.HasCacheReadCost = columns["cache_read_cost"]
+		pool.LastPricedSuccessAt = nullTimePtr(lastSuccess)
 		pool.PricedRequests = pool.SuccessfulRequests
 		pool.GroupDataAvailable = columns["group_id"]
 		pool.Model = pool.UpstreamModel

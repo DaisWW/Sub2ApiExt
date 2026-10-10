@@ -106,6 +106,7 @@ type PoolMetrics struct {
 	SuccessfulRequests       int64
 	PricedRequests           int64
 	ContinuousPricedRequests int64
+	LastPricedSuccessAt      *time.Time
 	TotalTokens              int64
 	InputTokens              int64
 	OutputTokens             int64
@@ -142,6 +143,7 @@ type Recommendation struct {
 	CostPerMillionTokens         float64                 `json:"cost_per_million_tokens,omitempty"`
 	ObservedCostPerMillion       float64                 `json:"observed_cost_per_million_tokens,omitempty"`
 	CostEvidenceWeight           float64                 `json:"cost_evidence_weight"`
+	CostHistoryWeight            float64                 `json:"cost_history_weight,omitempty"`
 	CostEstimateSource           string                  `json:"cost_estimate_source,omitempty"`
 	FallbackMissCostPerMillion   float64                 `json:"fallback_miss_cost_per_million_tokens,omitempty"`
 	CostAdvantage                float64                 `json:"cost_advantage,omitempty"`
@@ -191,6 +193,7 @@ type Recommendation struct {
 	recoveryLastFailureAt        *time.Time
 	recoveryProgressive          bool
 	recoveryNeeded               bool
+	recoveryReevaluation         bool
 }
 
 type CostWindowObservation struct {

@@ -1,15 +1,19 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
 type costEstimate struct {
 	Cost, Reference, RankingValue, Weight float64
+	HistoryWeight                         float64
 	PeerCount, PoolCount, Component       int
 	Valid                                 bool
+	Reevaluate                            bool
 }
 
 // Only successful history in the same model, endpoint, group and tier proves
@@ -87,6 +91,15 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 			continue
 		}
 		reference := percentile(baseCosts, 0.5)
+		bestRecentCost := math.Inf(1)
+		for _, item := range participants {
+			_, snapshot := recentPoolSnapshot(item.pool)
+			if costEvidenceWeight(snapshot) >= 0.5 {
+				if base := baseCostForMix(snapshot, inputShare); base > 0 {
+					bestRecentCost = math.Min(bestRecentCost, base*accounts[item.index].RateMultiplier)
+				}
+			}
+		}
 		for _, item := range participants {
 			_, snapshot := recentPoolSnapshot(item.pool)
 			weight, observed := costEvidenceWeight(snapshot), baseCostForMix(snapshot, inputShare)
@@ -94,7 +107,9 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 				weight = 0
 				observed = reference
 			}
-			cost := accounts[item.index].RateMultiplier * ((1-weight)*reference + weight*observed)
+			history, historyWeight := historicalPoolCost(item.pool, inputShare, now)
+			historyWeight *= 1 - weight
+			cost := accounts[item.index].RateMultiplier * ((1-weight-historyWeight)*reference + weight*observed + historyWeight*history)
 			if cost <= 0 || !validScore(cost) {
 				continue
 			}
@@ -106,6 +121,10 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 			estimate.Reference += trafficWeight * reference * accounts[item.index].RateMultiplier
 			estimate.RankingValue += trafficWeight * cost / reference
 			estimate.Weight += trafficWeight * weight
+			estimate.HistoryWeight += trafficWeight * historyWeight
+			if historyWeight >= 0.15 && !math.IsInf(bestRecentCost, 1) && history*accounts[item.index].RateMultiplier < bestRecentCost*(1-minimumCostAdvantage) {
+				estimate.Reevaluate = true
+			}
 			estimate.PeerCount = max(estimate.PeerCount, len(baseCosts))
 			estimate.PoolCount++
 			weights[item.index] += trafficWeight
@@ -118,11 +137,50 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 			result[index].Reference /= weights[index]
 			result[index].RankingValue /= weights[index]
 			result[index].Weight /= weights[index]
+			result[index].HistoryWeight /= weights[index]
 			result[index].Component = find(index)
 			result[index].Valid = true
 		}
 	}
 	return result
+}
+
+// History is a decaying prior, never proof of fresh trial success. Mature
+// recent costs replace it completely, including repeated real cold costs.
+func historicalPoolCost(pool PoolMetrics, inputShare float64, now time.Time) (float64, float64) {
+	for _, candidate := range []struct {
+		snapshot *MetricSnapshot
+		cap      float64
+	}{{pool.Window24h, 0.85}, {pool.Window7d, 0.5}} {
+		snapshot := candidate.snapshot
+		quality := costEvidenceWeight(snapshot)
+		if quality < 0.5 || snapshot.LastPricedSuccessAt == nil {
+			continue
+		}
+		age := now.Sub(*snapshot.LastPricedSuccessAt)
+		cost := baseCostForMix(snapshot, inputShare)
+		if age < 0 || age > trafficWindow || cost <= 0 {
+			continue
+		}
+		return cost, math.Min(quality, candidate.cap) * math.Exp2(-age.Hours()/24)
+	}
+	return 0, 0
+}
+
+// Direct costs have no common model-price normalization. Compare only the
+// same observed pool set; old schemas retain a platform-local fallback.
+func directCompetitionKey(account AccountMetrics) string {
+	keys := make([]string, 0, len(account.Pools))
+	for _, pool := range account.Pools {
+		if eligibleCostPool(account, pool) {
+			keys = append(keys, poolIdentity(pool))
+		}
+	}
+	if len(keys) == 0 && (account.GroupDataAvailable || len(account.Pools) > 0) {
+		return fmt.Sprintf("account:%d", account.ID)
+	}
+	sort.Strings(keys)
+	return normalizePoolPart(account.Platform) + ":" + strings.Join(keys, "|")
 }
 
 func eligibleCostPool(account AccountMetrics, pool PoolMetrics) bool {
@@ -192,22 +250,27 @@ func baseCostForMix(snapshot *MetricSnapshot, inputShare float64) float64 {
 // Within a 5% cost band, retain the incumbent order to avoid cooling caches
 // for marginal savings. Ties at the same current priority remain ties.
 func rankEstimatedCosts(values []float64, valid []bool, accounts []AccountMetrics, estimates []costEstimate) []float64 {
-	components := make(map[int][]int)
+	components := make(map[string][]int)
 	for index := range values {
 		if valid[index] {
-			components[estimates[index].Component] = append(components[estimates[index].Component], index)
+			key := "direct:" + directCompetitionKey(accounts[index])
+			if estimates[index].Valid {
+				key = fmt.Sprintf("estimate:%d", estimates[index].Component)
+			}
+			components[key] = append(components[key], index)
 		}
 	}
 	result := make([]float64, len(values))
 	for index := range result {
 		result[index] = 50
 	}
-	for component, indexes := range components {
+	for _, indexes := range components {
+		estimated := estimates[indexes[0]].Valid
 		sort.Slice(indexes, func(i, j int) bool { return values[indexes[i]] < values[indexes[j]] })
 		adjusted, included := make([]float64, len(indexes)), make([]bool, len(indexes))
 		for start := 0; start < len(indexes); {
 			end := start + 1
-			if component >= 0 {
+			if estimated {
 				for end < len(indexes) && values[indexes[end]] <= values[indexes[start]]*(1+minimumCostAdvantage) {
 					end++
 				}
@@ -221,7 +284,7 @@ func rankEstimatedCosts(values []float64, valid []bool, accounts []AccountMetric
 			}
 			for position := start; position < end; position++ {
 				adjusted[position], included[position] = values[indexes[position]], true
-				if component >= 0 {
+				if estimated {
 					adjusted[position] = float64(position + 1)
 					if position > start && accounts[indexes[position]].CurrentPriority == accounts[indexes[position-1]].CurrentPriority {
 						adjusted[position] = adjusted[position-1]

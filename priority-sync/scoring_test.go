@@ -401,7 +401,7 @@ func TestPoolIdentityNormalizesModelFallbacks(t *testing.T) {
 	}
 }
 
-func TestScoreAccountsRanksDirectCostAcrossGroupsAndTiers(t *testing.T) {
+func TestScoreAccountsSeparatesDirectCostAcrossGroupsAndTiers(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	pool := func(groupID int64, groupPriority int, cost float64) PoolMetrics {
 		return PoolMetrics{
@@ -437,8 +437,8 @@ func TestScoreAccountsRanksDirectCostAcrossGroupsAndTiers(t *testing.T) {
 			for _, recommendation := range result {
 				byID[recommendation.ID] = recommendation
 			}
-			if byID[test.first.ID].RecommendedPriority >= byID[test.second.ID].RecommendedPriority {
-				t.Fatalf("group or tier overrode direct cost: cheap=%+v expensive=%+v", byID[test.first.ID], byID[test.second.ID])
+			if byID[test.first.ID].RecommendedPriority != priorityBest || byID[test.second.ID].RecommendedPriority != priorityBest {
+				t.Fatalf("unrelated group or tier affected direct cost rank: cheap=%+v expensive=%+v", byID[test.first.ID], byID[test.second.ID])
 			}
 		})
 	}
@@ -451,6 +451,7 @@ func TestScoreAccountsUsesSameGroupTierCompetition(t *testing.T) {
 			Platform: "openai", RequestedModel: "gpt-test", UpstreamModel: "gpt-test",
 			GroupID: 10, GroupPriority: 3, SuccessfulRequests: 20,
 			TotalTokens: 1_000_000, InputTokens: 1_000_000, AccountCost: cost, InputCost: cost,
+			Window2h: &MetricSnapshot{PricedRequests: 20, PricedTokens: 1_000_000, AccountCost: cost},
 		}
 	}
 	result := scoreQualifiedAccounts([]AccountMetrics{
@@ -482,6 +483,7 @@ func TestScoreAccountsNormalizesIndependentCompetitionDomainsSeparately(t *testi
 				Platform: "openai", RequestedModel: "gpt", UpstreamModel: "gpt", GroupID: groupID,
 				SuccessfulRequests: 20, TotalTokens: 100_000_000, InputTokens: 100_000_000,
 				AccountCost: cost, InputCost: cost, RateMultiplier: 1,
+				Window2h: &MetricSnapshot{PricedRequests: 20, PricedTokens: 100_000_000, AccountCost: cost},
 			}},
 		}
 	}
@@ -493,8 +495,9 @@ func TestScoreAccountsNormalizesIndependentCompetitionDomainsSeparately(t *testi
 	for _, recommendation := range result {
 		byID[recommendation.ID] = recommendation
 	}
-	if !(byID[1].RecommendedPriority < byID[2].RecommendedPriority && byID[2].RecommendedPriority < byID[3].RecommendedPriority && byID[3].RecommendedPriority < byID[4].RecommendedPriority) {
-		t.Fatalf("priorities were not globally ordered by direct cost: %+v", byID)
+	if byID[1].RecommendedPriority != priorityBest || byID[3].RecommendedPriority != priorityBest ||
+		byID[2].RecommendedPriority != priorityPoor || byID[4].RecommendedPriority != priorityPoor {
+		t.Fatalf("independent direct-cost domains affected each other: %+v", byID)
 	}
 }
 

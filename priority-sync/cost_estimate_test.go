@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func comparableCostAccount(id int64, rate, cache float64, requests, tokens, continuous int64) AccountMetrics {
@@ -208,5 +209,86 @@ func TestDisconnectedModelsRankWithinTheirOwnCompetition(t *testing.T) {
 	if testRecommendationByID(t, result, 1).RecommendedPriority != priorityBest || testRecommendationByID(t, result, 3).RecommendedPriority != priorityBest ||
 		testRecommendationByID(t, result, 2).RecommendedPriority != priorityPoor || testRecommendationByID(t, result, 4).RecommendedPriority != priorityPoor {
 		t.Fatalf("unrelated model prices changed the candidate ordering: %+v", result)
+	}
+}
+
+func TestDirectFallbackDoesNotRankUnrelatedPoolsTogether(t *testing.T) {
+	accounts := []AccountMetrics{
+		comparableCostAccount(1, 0.1, 0.9, 100, 5_000_000, 90),
+		comparableCostAccount(2, 0.2, 0.9, 100, 5_000_000, 90),
+		comparableCostAccount(3, 0.001, 0.9, 100, 5_000_000, 90),
+	}
+	// Missing cost detail requires direct-cost fallback, even on a modern schema.
+	for index := range accounts {
+		accounts[index].Window2h.HasOutputCost = false
+	}
+	accounts[2].Platform, accounts[2].Pools[0].Platform = "deepseek", "deepseek"
+	accounts[2].Pools[0].RequestedModel, accounts[2].Pools[0].UpstreamModel = "deepseek-chat", "deepseek-chat"
+	result := scoreAccounts(accounts, nowForTest(), 5)
+	if testRecommendationByID(t, result, 1).RecommendedPriority != priorityBest ||
+		testRecommendationByID(t, result, 2).RecommendedPriority != priorityPoor ||
+		testRecommendationByID(t, result, 3).RecommendedPriority != priorityBest {
+		t.Fatalf("unrelated fallback price changed GPT ranking: %+v", result)
+	}
+	accounts[2].RateMultiplier = 100
+	accounts[2].Window2h.AccountCost *= 100_000
+	if got := testRecommendationByID(t, scoreAccounts(accounts, nowForTest(), 5), 1); got.RecommendedPriority != priorityBest {
+		t.Fatalf("unrelated fallback price movement changed ranking: %+v", got)
+	}
+}
+
+func TestMatureHistorySurvivesTrafficGapAndYieldsToFreshCosts(t *testing.T) {
+	now := nowForTest()
+	accounts := []AccountMetrics{
+		comparableCostAccount(1, 0.25, 0.99, 100, 5_000_000, 90),
+		comparableCostAccount(2, 0.18, 0.6, 100, 5_000_000, 90),
+	}
+	history := accounts[0].Window2h
+	history.LastPricedSuccessAt = timePtr(now.Add(-3 * time.Hour))
+	accounts[0].Window2h, accounts[0].Pools[0].Window2h = nil, nil
+	accounts[0].Pools[0].Window24h = history
+	accounts[0].CurrentPriority, accounts[1].CurrentPriority = priorityPoor, priorityBest
+	got := testRecommendationByID(t, scoreAccounts(accounts, now, 5), 1)
+	if !got.recoveryNeeded || got.AnchorPriority >= priorityPoor || got.CostEvidenceWeight != 0 {
+		t.Fatalf("mature cache history vanished during a traffic gap or became fresh evidence: %+v", got)
+	}
+	cost := got.CostPerMillionTokens
+	got = testRecommendationByID(t, scoreAccounts(accounts, now.Add(24*time.Hour), 5), 1)
+	if got.CostPerMillionTokens <= cost {
+		t.Fatalf("historical cache credit did not decay: old=%v new=%+v", cost, got)
+	}
+	fresh := comparableCostAccount(1, 0.25, 0, 100, 5_000_000, 0).Window2h
+	accounts[0].Window2h, accounts[0].Pools[0].Window2h = fresh, fresh
+	got = testRecommendationByID(t, scoreAccounts(accounts, now, 5), 1)
+	if got.CostEvidenceWeight != 1 || got.recoveryNeeded || got.AnchorPriority != priorityPoor {
+		t.Fatalf("mature real cold costs did not replace history: %+v", got)
+	}
+}
+
+func TestHistoricalCacheCreditRequiresMatureDatedEvidence(t *testing.T) {
+	now := nowForTest()
+	for _, test := range []struct {
+		name     string
+		requests int64
+		last     *time.Time
+	}{
+		{"no timestamp", 100, nil},
+		{"too old", 100, timePtr(now.Add(-8 * 24 * time.Hour))},
+		{"future", 100, timePtr(now.Add(time.Minute))},
+		{"short sample", 1, timePtr(now.Add(-3 * time.Hour))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			accounts := comparableRecoveryAccounts()
+			accounts[0].Pools[0].Window7d.PricedRequests = test.requests
+			accounts[0].Pools[0].Window7d.LastPricedSuccessAt = test.last
+			withHistory := estimateAccountCosts(accounts, now)[0]
+			accounts[0].Pools[0].Window7d = nil
+			// Keep eligibility with an unpriced-incomplete historical snapshot.
+			accounts[0].Pools[0].Window24h = &MetricSnapshot{PricedRequests: 1}
+			withoutHistory := estimateAccountCosts(accounts, now)[0]
+			if withHistory.Cost != withoutHistory.Cost {
+				t.Fatalf("untrusted history changed estimated cost: with=%+v without=%+v", withHistory, withoutHistory)
+			}
+		})
 	}
 }

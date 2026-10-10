@@ -104,6 +104,11 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		recoveryNeeded := false
 		if estimates[index].Valid && !hardExcluded {
 			anchorPriority = priorityForScore(score)
+			// A discounted historical advantage may fall inside the incumbent
+			// deadband. Allow a small, rate-limited re-evaluation in that case.
+			if estimates[index].Reevaluate && estimates[index].Weight < 0.75 && anchorPriority >= currentPriority && currentPriority > priorityBest {
+				anchorPriority = max(priorityBest, currentPriority-priorityRampStep)
+			}
 			recommended = anchorPriority
 			reason = fmt.Sprintf("预计成本 %.4f/M（同模型/分组档位 %d 个参考账户，缓存证据权重 %.0f%%）", costValues[index], estimates[index].PeerCount, estimates[index].Weight*100)
 			recoveryNeeded = recommended < currentPriority && (estimates[index].Weight < 0.75 || currentPriority >= priorityUnavailable)
@@ -148,6 +153,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			applyImmediately:          applyImmediately,
 			AnchorPriority:            anchorPriority,
 			recoveryNeeded:            recoveryNeeded,
+			recoveryReevaluation:      estimates[index].Reevaluate && anchorPriority != priorityForScore(score),
 		}
 		if costEvidence[index].Valid {
 			recommendation.CostPerMillionTokens = costValues[index]
@@ -159,6 +165,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			recommendation.CostPerMillionTokens = costValues[index]
 			recommendation.CostEstimateSource = "model-group-cache"
 			recommendation.CostEvidenceWeight = estimates[index].Weight
+			recommendation.CostHistoryWeight = estimates[index].HistoryWeight
 			recommendation.RecoveryAnchorCostPerMillion = estimates[index].Reference
 			recommendation.RecoveryPeerCount = estimates[index].PeerCount
 			recommendation.PoolCount = estimates[index].PoolCount

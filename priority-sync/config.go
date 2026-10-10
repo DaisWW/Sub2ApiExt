@@ -33,8 +33,8 @@ const (
 	costWeight             = 1.00
 	speedWeight            = 0.00
 	evaluationWeights      = "成本=100%,速度=0%,可用性=0%,失败/429=0%"
-	strategyVersion        = "evidence-cost-v3"
-	decisionWindowPolicy   = "同池倍率先验+30m/2h缓存证据;权重=min(请求/40,Tokens/2000000,连续程度);24h/7d仅证明模型与分组匹配"
+	strategyVersion        = "evidence-cost-v4"
+	decisionWindowPolicy   = "同池倍率先验+30m/2h缓存证据;成熟24h/7d历史按24h半衰期衰减;直接成本只在同池集合比较"
 	recoveryAnchorPolicy   = "同模型/分组/档位的基础成本中位数×当前倍率;渐进恢复保留进度;新故障退避2h/6h/24h"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30

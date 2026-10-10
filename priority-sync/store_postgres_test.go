@@ -95,7 +95,8 @@ VALUES (1, 1, $1::timestamptz-INTERVAL '5 minutes', 'new-failure', 'provider', 5
 	}
 	pool := peer.Pools[0]
 	if pool.Window30m == nil || pool.Window2h == nil || pool.Window2h.PricedRequests != 40 || pool.Window2h.ContinuousPricedRequests != 39 ||
-		math.Abs(pool.Window2h.BaseCost-14.84) > 1e-9 || math.Abs(pool.Window2h.BaseOutputCost-8) > 1e-9 {
+		math.Abs(pool.Window2h.BaseCost-14.84) > 1e-9 || math.Abs(pool.Window2h.BaseOutputCost-8) > 1e-9 ||
+		pool.Window2h.LastPricedSuccessAt == nil || !pool.Window2h.LastPricedSuccessAt.Equal(now.Add(-time.Minute)) {
 		t.Fatalf("historical rates or continuous evidence were aggregated incorrectly: %+v", pool)
 	}
 	if peer.LastPricedSuccessAt == nil || !peer.LastPricedSuccessAt.Equal(now.Add(-time.Minute)) || peer.LastTerminalFailureAt != nil || peer.RecoveredRateLimited != 1 ||

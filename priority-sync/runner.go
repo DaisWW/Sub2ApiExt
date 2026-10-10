@@ -399,6 +399,9 @@ func (r *Runner) selectRecoveryCandidate(accounts []AccountMetrics, recommendati
 			continue
 		}
 		state := r.state.Accounts[account.ID]
+		if recommendation.recoveryReevaluation && state.LastExploredAt != nil && now.Sub(*state.LastExploredAt) < recoveryNoResultBackoff {
+			continue
+		}
 		if state.RecoveryRetryAt != nil && now.Before(*state.RecoveryRetryAt) {
 			continue
 		}
@@ -409,12 +412,19 @@ func (r *Runner) selectRecoveryCandidate(accounts []AccountMetrics, recommendati
 			continue
 		}
 		candidate := recoveryCandidate{Account: account, AnchorCostPerMillion: recommendation.RecoveryAnchorCostPerMillion, PeerCount: recommendation.RecoveryPeerCount, TargetPriority: recommendation.AnchorPriority}
-		if best.Account.ID == 0 || candidate.AnchorCostPerMillion < best.AnchorCostPerMillion ||
-			(candidate.AnchorCostPerMillion == best.AnchorCostPerMillion && candidate.Account.ID < best.Account.ID) {
+		bestExplored := r.state.Accounts[best.Account.ID].LastExploredAt
+		if best.Account.ID == 0 || (state.LastExploredAt == nil && bestExplored != nil) ||
+			(state.LastExploredAt != nil && bestExplored != nil && state.LastExploredAt.Before(*bestExplored)) ||
+			(timesEqual(state.LastExploredAt, bestExplored) && (candidate.AnchorCostPerMillion < best.AnchorCostPerMillion ||
+				(candidate.AnchorCostPerMillion == best.AnchorCostPerMillion && candidate.Account.ID < best.Account.ID))) {
 			best = candidate
 		}
 	}
 	return best, best.Account.ID != 0
+}
+
+func timesEqual(left, right *time.Time) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && left.Equal(*right))
 }
 
 func snapshotLastSuccess(snapshot *MetricSnapshot) *time.Time {
