@@ -83,6 +83,14 @@ func reliabilityRollbackBaseline(state accountState) *time.Time {
 	return state.LastReliabilityRollbackAt
 }
 
+func recoveryFailureBaseline(state accountState) *time.Time {
+	if state.LastReliabilityRollbackAt != nil {
+		return state.LastReliabilityRollbackAt
+	}
+	// Older recovery outcomes only recorded the successful priority write.
+	return state.LastAppliedAt
+}
+
 func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations []Recommendation, now time.Time) {
 	byID := make(map[int64]AccountMetrics, len(accounts))
 	for _, account := range accounts {
@@ -159,9 +167,10 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 			recommendation.PromotionFrozen = true
 			recommendation.Reason += "；退避观察期间暂停提升"
 		}
+		recoveryFailureAt := recoveryFailureBaseline(state)
 		if recommendation.recoveryOutcome == recoveryOutcomeSuccess && state.RecoveryFailures > 0 &&
 			(evidence.samples < 50 || evidence.failureRate >= 0.02 ||
-				(state.LastReliabilityRollbackAt != nil && now.Sub(*state.LastReliabilityRollbackAt) < decisionWindow)) {
+				(recoveryFailureAt != nil && now.Sub(*recoveryFailureAt) < decisionWindow)) {
 			recommendation.recoveryOutcome = recoveryOutcomeProgress
 		}
 	}
@@ -174,12 +183,13 @@ func recordReliabilityObservation(state *accountState, recommendation *Recommend
 	state.LastReliabilityRollbackAt = cloneTimePtr(reliabilityRollbackBaseline(*state))
 	state.LastReliabilityFailureAt = cloneTimePtr(latestStateTime(state.LastReliabilityFailureAt, recommendation.reliabilityLastFailureAt))
 	state.ReliabilityHighSince = cloneTimePtr(recommendation.reliabilityHighSince)
+	recoveryFailureAt := recoveryFailureBaseline(*state)
 	if recommendation.reliabilityRollback {
 		state.LastReliabilityRollbackAt = cloneTimePtr(recommendation.reliabilityLastFailureAt)
-	} else if state.RecoveryFailures > 0 && state.LastReliabilityRollbackAt != nil &&
-		now.Sub(*state.LastReliabilityRollbackAt) >= decisionWindow && recommendation.ReliabilitySamples >= 50 &&
+	} else if state.RecoveryFailures > 0 && recoveryFailureAt != nil &&
+		now.Sub(*recoveryFailureAt) >= decisionWindow && recommendation.ReliabilitySamples >= 50 &&
 		recommendation.AccountFailureRate < 0.02 && recommendation.reliabilityLastSuccessAt != nil &&
-		recommendation.reliabilityLastSuccessAt.After(*state.LastReliabilityRollbackAt) {
+		recommendation.reliabilityLastSuccessAt.After(*recoveryFailureAt) {
 		state.RecoveryFailures = 0
 	}
 }

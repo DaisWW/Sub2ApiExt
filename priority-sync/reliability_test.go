@@ -123,6 +123,73 @@ func TestLegacyReliabilityWatermarkSurvivesObservation(t *testing.T) {
 	}
 }
 
+func TestHealthyEvidenceClearsLegacyRecoveryFailures(t *testing.T) {
+	now := nowForTest()
+	for _, test := range []struct {
+		name                 string
+		successes, failures  int64
+		appliedAt, successAt time.Time
+		wantFailures         int
+	}{
+		{"healthy", 50, 0, now.Add(-3 * time.Hour), now.Add(-time.Minute), 0},
+		{"short sample", 49, 0, now.Add(-3 * time.Hour), now.Add(-time.Minute), 2},
+		{"too soon", 50, 0, now.Add(-time.Hour), now.Add(-time.Minute), 2},
+		{"old success", 50, 0, now.Add(-3 * time.Hour), now.Add(-4 * time.Hour), 2},
+		{"still unreliable", 49, 1, now.Add(-3 * time.Hour), now.Add(-time.Minute), 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			account := comparableCostAccount(1, 0.1, 0.9, 100, 5_000_000, 90)
+			account.CurrentPriority = priorityBest
+			account.Window2h.SuccessfulRequests, account.Window2h.TerminalFailures = test.successes, test.failures
+			account.Window2h.LastPricedSuccessAt = timePtr(test.successAt)
+			runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
+			runner.state.Accounts[1] = accountState{RecoveryFailures: 2, LastAppliedAt: timePtr(test.appliedAt),
+				LastReliabilityFailureAt: timePtr(test.appliedAt.Add(-time.Minute))}
+			recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)
+			runner.prepareExploration([]AccountMetrics{account}, recommendations, now)
+			runner.applyRecommendations(context.Background(), recommendations, "secret", now)
+			if got := runner.state.Accounts[1].RecoveryFailures; got != test.wantFailures {
+				t.Fatalf("legacy recovery count = %d, want %d: %+v", got, test.wantFailures, runner.state.Accounts[1])
+			}
+			if test.wantFailures != 0 {
+				return
+			}
+			account.Window2h.SuccessfulRequests, account.Window2h.TerminalFailures, account.Window2h.TrailingTerminalFailures = 0, 3, 3
+			account.Window2h.LastTerminalFailureAt = timePtr(now.Add(time.Minute))
+			at := now.Add(2 * time.Minute)
+			recommendations = scoreAccounts([]AccountMetrics{account}, at, 5)
+			runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+			runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+			state := runner.state.Accounts[1]
+			if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(at.Add(30*time.Minute)) {
+				t.Fatalf("new failure inherited legacy long backoff after healthy recovery: %+v", state)
+			}
+		})
+	}
+}
+
+func TestLegacyRecoveryProgressDoesNotClearFailuresTooSoon(t *testing.T) {
+	now := nowForTest()
+	accounts := comparableRecoveryAccounts()
+	accounts[0].CurrentPriority = 63
+	accounts[0].Window2h = accounts[0].Pools[0].Window7d
+	accounts[0].Pools[0].Window2h = accounts[0].Window2h
+	accounts[0].Window2h.SuccessfulRequests = 50
+	accounts[0].Window2h.LastPricedSuccessAt = timePtr(now.Add(-time.Minute))
+	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.state.Accounts[1] = accountState{RecoveryFailures: 2, LastAppliedAt: timePtr(now.Add(-recoveryDuration)),
+		LastReliabilityFailureAt: timePtr(now.Add(-time.Hour))}
+	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 90, Recovery: true,
+		RecoveryProgressive: true, RecoveryPriority: 63, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now.Add(-recoveryDuration))}
+	recommendations := scoreAccounts(accounts, now, 5)
+	runner.prepareExploration(accounts, recommendations, now)
+	candidate := testRecommendationByID(t, recommendations, 1)
+	runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", now)
+	if candidate.recoveryOutcome != recoveryOutcomeProgress || runner.state.Accounts[1].RecoveryFailures != 2 {
+		t.Fatalf("one early healthy step erased legacy failure history: %+v state=%+v", candidate, runner.state.Accounts[1])
+	}
+}
+
 func TestReliabilityRollbackAPIFailureAndDryRunDoNotConsumeEvidence(t *testing.T) {
 	now := nowForTest()
 	for _, dryRun := range []bool{false, true} {
