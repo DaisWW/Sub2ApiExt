@@ -76,7 +76,7 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 		}
 	} else if samples >= recoveryMinimumSamples && evidence.failureRate >= recoveryHealthyFailureRate {
 		evidence.action = "slow"
-	} else if fresh && (!activeRecovery || samples < recoveryMinimumSamples) {
+	} else if fresh && samples < recoveryMinimumSamples {
 		evidence.action = "pause"
 	}
 	trailing := maxInt64(snapshot.TrailingTerminalFailures, 0)

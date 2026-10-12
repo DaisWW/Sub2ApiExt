@@ -29,7 +29,7 @@ func TestReliabilityToleratesIsolatedFailureAndSlowsModerateFailureRate(t *testi
 		wantFirst, wantNext int
 	}{
 		{"short sample", 2, 1, 50, 30},
-		{"below two percent", 100, 1, 50, 30},
+		{"below two percent", 100, 1, 30, 30},
 		{"two to five percent", 97, 3, 45, 45},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -48,6 +48,32 @@ func TestReliabilityToleratesIsolatedFailureAndSlowsModerateFailureRate(t *testi
 				t.Fatal("soft failures permanently froze promotion")
 			}
 		})
+	}
+}
+
+func TestHealthyMatureAccountPromotesDespiteFreshIsolatedErrors(t *testing.T) {
+	now := nowForTest()
+	account := reliabilityAccount(300, 1, 0, now.Add(-time.Minute))
+	account.CurrentPriority = priorityPoor
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.config.Confirmations = 2
+	for cycle := 0; cycle < 4; cycle++ {
+		at := now.Add(time.Duration(cycle) * defaultInterval)
+		account.Window2h.TerminalFailures = int64(cycle + 1)
+		account.Window2h.LastTerminalFailureAt = timePtr(at.Add(-2 * time.Minute))
+		account.Window2h.LastPricedSuccessAt = timePtr(at.Add(-time.Minute))
+		recommendations := scoreAccounts([]AccountMetrics{account}, at, 5)
+		runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+		if got := recommendations[0]; got.ReliabilityAction != "cost" || got.PromotionFrozen {
+			t.Fatalf("fresh isolated error blocked a healthy mature account: %+v", got)
+		}
+		changed, _ := runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+		if changed > 0 {
+			account.CurrentPriority = <-updates
+		}
+	}
+	if account.CurrentPriority != priorityNeutral || runner.state.Accounts[1].RecoveryFailures != 0 {
+		t.Fatalf("healthy account did not complete two confirmed cost steps: priority=%d state=%+v", account.CurrentPriority, runner.state.Accounts[1])
 	}
 }
 
