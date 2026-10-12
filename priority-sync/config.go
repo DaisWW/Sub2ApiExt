@@ -35,7 +35,7 @@ const (
 	evaluationWeights      = "成本=100%;故障容忍约束=零星暂停/2%～5%慢升/连续3次或持续>5%回退"
 	strategyVersion        = "evidence-cost-v4"
 	decisionWindowPolicy   = "同池倍率先验+30m/2h缓存证据;成熟24h/7d历史按24h半衰期衰减;直接成本只在同池集合比较"
-	recoveryAnchorPolicy   = "同模型/分组/档位成本先验与缓存证据;渐进恢复保留进度;首次软故障观察30m,重复新故障退避2h/6h/24h"
+	recoveryAnchorPolicy   = "同模型/分组/档位成本先验与缓存证据;恢复观察30m/50新请求;健康5点/中等错误2点;首次软故障观察30m,重复新故障退避2h/6h/24h"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
 	minimumCostAdvantage   = 0.05
@@ -61,10 +61,14 @@ const (
 	priorityRampMaxSteps = 4
 	coldAnchorFloor      = priorityGood
 
-	explorationDuration     = 30 * time.Minute
-	recoveryDuration        = 10 * time.Minute
-	recoveryMinimumPeers    = 1
-	recoveryNoResultBackoff = 2 * time.Hour
+	explorationDuration                 = 30 * time.Minute
+	recoveryDuration                    = 30 * time.Minute
+	recoveryMinimumPeers                = 1
+	recoveryNoResultBackoff             = 2 * time.Hour
+	recoveryMinimumSamples        int64 = 50
+	recoveryHealthyFailureRate          = 0.02
+	recoveryUnreliableFailureRate       = 0.05
+	recoveryRampStep                    = 5
 )
 
 const (

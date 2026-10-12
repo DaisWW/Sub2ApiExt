@@ -187,6 +187,7 @@ WITH usage_candidates AS (
 ), errors AS (
     SELECT e.account_id,
            MAX(e.error_at) FILTER (WHERE s.success_at IS NULL) AS last_terminal_failure_at,
+           (ARRAY_AGG(e.error_at ORDER BY e.error_at DESC) FILTER (WHERE s.success_at IS NULL))[3] AS third_terminal_failure_at,
            COUNT(*)::bigint AS error_requests,
            COUNT(*) FILTER (WHERE e.rate_limited)::bigint AS rate_limited_requests,
            COUNT(*) FILTER (WHERE e.rate_limited AND s.success_at IS NOT NULL)::bigint AS recovered_rate_limited,
@@ -249,6 +250,7 @@ SELECT a.id,
        COALESCE(e.trailing_terminal_failures, 0),
        u.last_priced_success_at,
        e.last_terminal_failure_at,
+       e.third_terminal_failure_at,
        COALESCE(e.same_account_recovered_requests, 0),
        COALESCE(e.fallback_recovered_requests, 0),
        COALESCE(e.unresolved_requests, 0),
@@ -346,6 +348,7 @@ WITH usage_candidates AS (
 ), errors AS (
     SELECT e.account_id,
            MAX(e.error_at) FILTER (WHERE s.success_at IS NULL) AS last_terminal_failure_at,
+           (ARRAY_AGG(e.error_at ORDER BY e.error_at DESC) FILTER (WHERE s.success_at IS NULL))[3] AS third_terminal_failure_at,
            COUNT(*)::bigint AS error_requests,
            COUNT(*) FILTER (WHERE e.rate_limited)::bigint AS rate_limited_requests,
            COUNT(*) FILTER (WHERE e.rate_limited AND s.success_at IS NOT NULL)::bigint AS recovered_rate_limited,
@@ -408,6 +411,7 @@ SELECT a.id,
        COALESCE(e.trailing_terminal_failures, 0),
        u.last_priced_success_at,
        e.last_terminal_failure_at,
+       e.third_terminal_failure_at,
        COALESCE(e.same_account_recovered_requests, 0),
        COALESCE(e.fallback_recovered_requests, 0),
        COALESCE(e.unresolved_requests, 0),
@@ -499,7 +503,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		var item AccountMetrics
 		var priority sql.NullInt64
 		var rateLimitReset, tempUnschedulable, overload sql.NullTime
-		var lastSuccess, lastFailure sql.NullTime
+		var lastSuccess, lastFailure, thirdFailure sql.NullTime
 		var costP75, latencyP90, firstTokenP90, fallbackLatencyP90 sql.NullFloat64
 		if err := rows.Scan(
 			&item.ID, &item.Name, &item.Platform, &item.Type, &item.Status, &priority,
@@ -511,7 +515,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 			&costP75, &latencyP90, &firstTokenP90, &item.ErrorRequests,
 			&item.RateLimitedRequests, &item.RecoveredRateLimited, &item.RecoveredRateLimitWeight, &item.TerminalFailures,
 			&item.TrailingTerminalFailures,
-			&lastSuccess, &lastFailure,
+			&lastSuccess, &lastFailure, &thirdFailure,
 			&item.SameAccountRecoveredRequests, &item.FallbackRecoveredRequests, &item.UnresolvedRequests,
 			&item.FallbackCost, &item.FallbackPricedTokens, &fallbackLatencyP90,
 		); err != nil {
@@ -527,6 +531,7 @@ func (s *MetricsStore) LoadAccountMetrics(ctx context.Context, now time.Time, wi
 		item.OverloadUntil = nullTimePtr(overload)
 		item.LastPricedSuccessAt = nullTimePtr(lastSuccess)
 		item.LastTerminalFailureAt = nullTimePtr(lastFailure)
+		item.ThirdTerminalFailureAt = nullTimePtr(thirdFailure)
 		if fallbackLatencyP90.Valid {
 			item.FallbackLatencyP90Ms = fallbackLatencyP90.Float64
 		}
@@ -776,6 +781,7 @@ func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 		TrailingTerminalFailures: account.TrailingTerminalFailures,
 		LastPricedSuccessAt:      account.LastPricedSuccessAt,
 		LastTerminalFailureAt:    account.LastTerminalFailureAt,
+		ThirdTerminalFailureAt:   account.ThirdTerminalFailureAt,
 	}
 }
 

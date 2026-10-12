@@ -121,8 +121,16 @@ VALUES (10, 1, $1::timestamptz-INTERVAL '1 minute', 'platform-error', 'platform'
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := attributed[0].Window2h; got.TerminalFailures != 3 || got.TrailingTerminalFailures != 3 {
+	if got := attributed[0].Window2h; got.TerminalFailures != 3 || got.TrailingTerminalFailures != 3 ||
+		got.ThirdTerminalFailureAt == nil || !got.ThirdTerminalFailureAt.Equal(now.Add(-5*time.Minute)) {
 		t.Fatalf("platform/client failures were charged to account or real provider failures lost: %+v", got)
+	}
+	trial, err := store.LoadAccountMetrics(ctx, now, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trial[0].TerminalFailures != 2 || trial[0].ThirdTerminalFailureAt != nil {
+		t.Fatalf("trial observation included errors from before its start: %+v", trial[0])
 	}
 	for _, query := range []string{`
 INSERT INTO usage_logs (id, account_id, created_at, request_id, client_request_id,
@@ -170,6 +178,9 @@ VALUES (40, 1, $1::timestamptz-INTERVAL '2 minutes', 'provider-request-1', 'CLIE
 	got = compatible[0].Window2h
 	if got.SameAccountRecoveredRequests != 1 || got.FallbackRecoveredRequests != 2 || math.Abs(got.FallbackCost-1.5) > 1e-9 {
 		t.Fatalf("compat schema lost client request association: %+v", got)
+	}
+	if got.ThirdTerminalFailureAt == nil || !got.ThirdTerminalFailureAt.Equal(now.Add(-time.Minute)) {
+		t.Fatalf("compat schema lost fresh failure timestamps: %+v", got)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE usage_logs SET output_cost = NULL WHERE id = 201`); err != nil {
 		t.Fatal(err)

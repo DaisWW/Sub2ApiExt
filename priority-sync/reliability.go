@@ -18,7 +18,7 @@ type reliabilityAssessment struct {
 
 func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliabilityAssessment {
 	window, snapshot := "2h", account.Window2h
-	if fast := account.Window30m; fast != nil && fast.SuccessfulRequests+fast.TerminalFailures >= 50 {
+	if fast := account.Window30m; fast != nil && fast.SuccessfulRequests+fast.TerminalFailures >= recoveryMinimumSamples {
 		window, snapshot = "30m", fast
 	} else if snapshot == nil {
 		window, snapshot = "30m", account.Window30m
@@ -28,6 +28,11 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 		if !usesDecisionWindows(account) {
 			window, snapshot = "legacy", accountMetricSnapshot(account)
 		}
+	}
+	lease := r.state.Exploration
+	activeRecovery := lease != nil && lease.AccountID == account.ID && lease.RecoveryProgressive
+	if activeRecovery && account.RecoveryWindow != nil {
+		window, snapshot = "recovery", account.RecoveryWindow
 	}
 	samples := maxInt64(snapshot.SuccessfulRequests, 0) + maxInt64(snapshot.TerminalFailures, 0)
 	evidence := reliabilityAssessment{snapshot: snapshot, window: window, samples: samples, action: "cost"}
@@ -44,10 +49,18 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 	fresh := evidence.lastFailure != nil && (pauseBaseline == nil || evidence.lastFailure.After(*pauseBaseline))
 	rollbackBaseline := reliabilityRollbackBaseline(state)
 	if lease := r.state.Exploration; lease != nil && lease.AccountID == account.ID {
-		rollbackBaseline = latestStateTime(rollbackBaseline, lease.RecoveryLastFailureAt, lease.StartedAt)
+		rollbackBaseline = latestStateTime(rollbackBaseline, lease.StartedAt)
+		if !lease.RecoveryProgressive {
+			rollbackBaseline = latestStateTime(rollbackBaseline, lease.RecoveryLastFailureAt)
+		}
 	}
 	unhandled := evidence.lastFailure != nil && (rollbackBaseline == nil || evidence.lastFailure.After(*rollbackBaseline))
-	if samples >= 50 && evidence.failureRate > 0.05 {
+	thirdFailure := latestStateTime(snapshot.ThirdTerminalFailureAt, account.ThirdTerminalFailureAt)
+	if !activeRecovery {
+		thirdFailure = latestStateTime(thirdFailure, thirdSnapshotFailure(account.Window30m), thirdSnapshotFailure(account.Window2h))
+	}
+	newFailures := thirdFailure != nil && (rollbackBaseline == nil || thirdFailure.After(*rollbackBaseline))
+	if samples >= recoveryMinimumSamples && evidence.failureRate > recoveryUnreliableFailureRate {
 		evidence.highSince = state.ReliabilityHighSince
 		if evidence.highSince == nil {
 			evidence.highSince = timePtr(now)
@@ -57,22 +70,30 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 		if interval <= 0 {
 			interval = defaultInterval
 		}
-		if unhandled && now.Sub(*evidence.highSince) >= interval {
+		if unhandled && (state.LastReliabilityRollbackAt == nil || newFailures) &&
+			(now.Sub(*evidence.highSince) >= interval || (activeRecovery && explorationExpired(lease, now))) {
 			evidence.action = "rollback"
 		}
-	} else if samples >= 50 && evidence.failureRate >= 0.02 {
+	} else if samples >= recoveryMinimumSamples && evidence.failureRate >= recoveryHealthyFailureRate {
 		evidence.action = "slow"
-	} else if fresh {
+	} else if fresh && (!activeRecovery || samples < recoveryMinimumSamples) {
 		evidence.action = "pause"
 	}
 	trailing := maxInt64(snapshot.TrailingTerminalFailures, 0)
-	if account.Window2h != nil {
+	if !activeRecovery && account.Window2h != nil {
 		trailing = maxInt64(trailing, account.Window2h.TrailingTerminalFailures)
 	}
-	if trailing >= 3 && unhandled {
+	if trailing >= 3 && unhandled && (newFailures || rollbackBaseline == nil) {
 		evidence.action = "rollback"
 	}
 	return evidence
+}
+
+func thirdSnapshotFailure(snapshot *MetricSnapshot) *time.Time {
+	if snapshot == nil {
+		return nil
+	}
+	return snapshot.ThirdTerminalFailureAt
 }
 
 func reliabilityRollbackBaseline(state accountState) *time.Time {
@@ -129,7 +150,11 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 			}
 			active := r.state.Exploration != nil && r.state.Exploration.AccountID == recommendation.ID
 			if active {
-				target = max(target, r.state.Exploration.OriginalPriority)
+				if r.state.Exploration.RecoveryProgressive {
+					target = max(recommendation.CurrentPriority, r.state.Exploration.OriginalPriority)
+				} else {
+					target = max(target, r.state.Exploration.OriginalPriority)
+				}
 			}
 			recommendation.RecommendedPriority = target
 			recommendation.Recovery = true
@@ -152,8 +177,11 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 			recommendation.Reason += "；新软错误或高失败率待确认，暂停提升并保留进度"
 		case "slow":
 			if recommendation.RecommendedPriority < recommendation.CurrentPriority {
-				step := 5
-				if recommendation.CurrentPriority > priorityPoor {
+				step := recoveryRampStep
+				if recommendation.Recovery {
+					step = 2
+				}
+				if !recommendation.Recovery && recommendation.CurrentPriority > priorityPoor {
 					step = priorityRampStep
 				}
 				recommendation.RecommendedPriority = max(recommendation.RecommendedPriority, recommendation.CurrentPriority-step)
@@ -169,7 +197,7 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 		}
 		recoveryFailureAt := recoveryFailureBaseline(state)
 		if recommendation.recoveryOutcome == recoveryOutcomeSuccess && state.RecoveryFailures > 0 &&
-			(evidence.samples < 50 || evidence.failureRate >= 0.02 ||
+			(evidence.samples < recoveryMinimumSamples || evidence.failureRate >= recoveryHealthyFailureRate ||
 				(recoveryFailureAt != nil && now.Sub(*recoveryFailureAt) < decisionWindow)) {
 			recommendation.recoveryOutcome = recoveryOutcomeProgress
 		}
@@ -185,10 +213,17 @@ func recordReliabilityObservation(state *accountState, recommendation *Recommend
 	state.ReliabilityHighSince = cloneTimePtr(recommendation.reliabilityHighSince)
 	recoveryFailureAt := recoveryFailureBaseline(*state)
 	if recommendation.reliabilityRollback {
-		state.LastReliabilityRollbackAt = cloneTimePtr(recommendation.reliabilityLastFailureAt)
+		rollbackAt := recommendation.reliabilityLastFailureAt
+		if rollbackAt == nil {
+			rollbackAt = timePtr(now)
+		}
+		state.LastReliabilityRollbackAt = cloneTimePtr(rollbackAt)
+		// A rollback starts a new high-failure observation period. The next
+		// cycle must observe the configured interval again before repeating it.
+		state.ReliabilityHighSince = timePtr(now)
 	} else if state.RecoveryFailures > 0 && recoveryFailureAt != nil &&
-		now.Sub(*recoveryFailureAt) >= decisionWindow && recommendation.ReliabilitySamples >= 50 &&
-		recommendation.AccountFailureRate < 0.02 && recommendation.reliabilityLastSuccessAt != nil &&
+		now.Sub(*recoveryFailureAt) >= decisionWindow && recommendation.ReliabilitySamples >= recoveryMinimumSamples &&
+		recommendation.AccountFailureRate < recoveryHealthyFailureRate && recommendation.reliabilityLastSuccessAt != nil &&
 		recommendation.reliabilityLastSuccessAt.After(*recoveryFailureAt) {
 		state.RecoveryFailures = 0
 	}

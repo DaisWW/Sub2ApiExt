@@ -41,6 +41,12 @@ func (s *fakeMetricsSource) LoadAccountMetricsWindows(context.Context, time.Time
 	return withQualifiedTwoHourCosts(s.accounts), nil
 }
 
+func (s *fakeMetricsSource) LoadAccountMetrics(context.Context, time.Time, time.Duration) ([]AccountMetrics, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]AccountMetrics(nil), s.accounts...), nil
+}
+
 func withQualifiedTwoHourCosts(accounts []AccountMetrics) []AccountMetrics {
 	result := make([]AccountMetrics, len(accounts))
 	copy(result, accounts)
@@ -888,7 +894,7 @@ func TestPrepareExplorationStartsMultiplierRecoveryWhenOrdinaryExplorationDisabl
 	runner := NewRunner(config, &fakeMetricsSource{}, http.DefaultClient, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	runner.prepareExploration(accounts, recommendations, now)
 	candidate := testRecommendationByID(t, recommendations, 1)
-	if !candidate.Recovery || !candidate.explorationStart || candidate.RecommendedPriority != 670 {
+	if !candidate.Recovery || !candidate.explorationStart || candidate.RecommendedPriority != priorityUnavailable-recoveryRampStep {
 		t.Fatalf("recovery trial was not prepared: %+v", candidate)
 	}
 	if candidate.RecoveryPeerCount != 2 || math.Abs(candidate.RecoveryAnchorCostPerMillion-1) > 1e-9 || candidate.AnchorPriority != priorityBest {

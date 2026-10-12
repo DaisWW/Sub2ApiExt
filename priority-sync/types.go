@@ -41,6 +41,7 @@ type AccountMetrics struct {
 	TrailingTerminalFailures int64
 	LastPricedSuccessAt      *time.Time
 	LastTerminalFailureAt    *time.Time
+	ThirdTerminalFailureAt   *time.Time
 	RateLimitedRequests      int64
 	RecoveredRateLimited     int64
 	RecoveredRateLimitWeight float64
@@ -66,6 +67,7 @@ type AccountMetrics struct {
 	Window24h                *MetricSnapshot
 	Window6h                 *MetricSnapshot
 	Window7d                 *MetricSnapshot
+	RecoveryWindow           *MetricSnapshot
 	recoveryPlaceholder      bool
 }
 
@@ -100,6 +102,7 @@ type MetricSnapshot struct {
 	TrailingTerminalFailures int64
 	LastPricedSuccessAt      *time.Time
 	LastTerminalFailureAt    *time.Time
+	ThirdTerminalFailureAt   *time.Time
 	ContinuousPricedRequests int64
 	BaseCost                 float64
 	BaseOutputCost           float64

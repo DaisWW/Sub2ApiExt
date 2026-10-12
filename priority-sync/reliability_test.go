@@ -15,6 +15,9 @@ func reliabilityAccount(successes, failures, trailing int64, last time.Time) Acc
 	account.Window2h.TerminalFailures = failures
 	account.Window2h.TrailingTerminalFailures = trailing
 	account.Window2h.LastTerminalFailureAt = timePtr(last)
+	if failures >= 3 {
+		account.Window2h.ThirdTerminalFailureAt = timePtr(last.Add(-2 * time.Second))
+	}
 	return account
 }
 
@@ -156,6 +159,7 @@ func TestHealthyEvidenceClearsLegacyRecoveryFailures(t *testing.T) {
 			}
 			account.Window2h.SuccessfulRequests, account.Window2h.TerminalFailures, account.Window2h.TrailingTerminalFailures = 0, 3, 3
 			account.Window2h.LastTerminalFailureAt = timePtr(now.Add(time.Minute))
+			account.Window2h.ThirdTerminalFailureAt = timePtr(now.Add(time.Second))
 			at := now.Add(2 * time.Minute)
 			recommendations = scoreAccounts([]AccountMetrics{account}, at, 5)
 			runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
@@ -176,6 +180,7 @@ func TestLegacyRecoveryProgressDoesNotClearFailuresTooSoon(t *testing.T) {
 	accounts[0].Pools[0].Window2h = accounts[0].Window2h
 	accounts[0].Window2h.SuccessfulRequests = 50
 	accounts[0].Window2h.LastPricedSuccessAt = timePtr(now.Add(-time.Minute))
+	accounts[0].RecoveryWindow = accounts[0].Window2h
 	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
 	runner.state.Accounts[1] = accountState{RecoveryFailures: 2, LastAppliedAt: timePtr(now.Add(-recoveryDuration)),
 		LastReliabilityFailureAt: timePtr(now.Add(-time.Hour))}
@@ -272,6 +277,7 @@ func TestReliabilityRepeatedFreshFailuresEscalateBackoff(t *testing.T) {
 	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
 	for _, backoff := range []time.Duration{30 * time.Minute, 2 * time.Hour, 6 * time.Hour, 24 * time.Hour} {
 		account.Window2h.LastTerminalFailureAt = timePtr(now.Add(-time.Second))
+		account.Window2h.ThirdTerminalFailureAt = timePtr(now.Add(-3 * time.Second))
 		recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)
 		runner.prepareExploration([]AccountMetrics{account}, recommendations, now)
 		runner.applyRecommendations(context.Background(), recommendations, "secret", now)
@@ -288,6 +294,7 @@ func TestRecoveringAccountRetainsProgressAfterOneSoftFailure(t *testing.T) {
 	accounts := comparableRecoveryAccounts()
 	accounts[0].CurrentPriority = 63
 	accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 1, LastTerminalFailureAt: timePtr(now.Add(time.Minute))}
+	accounts[0].RecoveryWindow = accounts[0].Window30m
 	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
 	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 90, Recovery: true,
 		RecoveryProgressive: true, RecoveryPriority: 63, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now)}
@@ -299,11 +306,112 @@ func TestRecoveringAccountRetainsProgressAfterOneSoftFailure(t *testing.T) {
 		t.Fatalf("one soft error rolled back recovery or imposed backoff: %+v state=%+v", candidate, runner.state)
 	}
 	accounts[0].LastPricedSuccessAt = timePtr(now.Add(3 * time.Minute))
+	accounts[0].RecoveryWindow.SuccessfulRequests = 99
+	accounts[0].RecoveryWindow.LastPricedSuccessAt = accounts[0].LastPricedSuccessAt
 	recommendations = scoreAccounts(accounts, now.Add(recoveryDuration), 5)
 	runner.prepareExploration(accounts, recommendations, now.Add(recoveryDuration))
 	candidate = testRecommendationByID(t, recommendations, 1)
 	runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", now.Add(recoveryDuration))
 	if candidate.RecommendedPriority >= 63 || len(updates) != 1 || runner.state.Accounts[1].RecoveryFailures != 0 {
 		t.Fatalf("old error blocked recovery after fresh success: %+v state=%+v", candidate, runner.state)
+	}
+}
+
+func TestReliabilityCountsNewFailuresAcrossWindowRolloverAndRestart(t *testing.T) {
+	now := nowForTest()
+	account := reliabilityAccount(1, 8, 8, now.Add(-time.Minute))
+	account.CurrentPriority = priorityBest
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)
+	runner.prepareExploration([]AccountMetrics{account}, recommendations, now)
+	runner.applyRecommendations(context.Background(), recommendations, "secret", now)
+	account.CurrentPriority = <-updates
+	if err := saveState(runner.config.StateFile, runner.state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadState(runner.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.state = loaded
+	baseline := runner.state.Accounts[1].LastReliabilityRollbackAt
+	for newFailures := int64(1); newFailures <= 3; newFailures++ {
+		at := now.Add(time.Duration(newFailures) * time.Minute)
+		// All eight old failures have left the window; a smaller total can
+		// still contain three genuinely new failures.
+		account.Window2h.TerminalFailures = newFailures
+		account.Window2h.TrailingTerminalFailures = newFailures
+		account.Window2h.LastTerminalFailureAt = timePtr(at.Add(-time.Second))
+		account.Window2h.ThirdTerminalFailureAt = nil
+		if newFailures == 3 {
+			account.Window2h.ThirdTerminalFailureAt = timePtr(now.Add(time.Second))
+		}
+		recommendations = scoreAccounts([]AccountMetrics{account}, at, 5)
+		runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+		if recommendations[0].reliabilityRollback != (newFailures == 3) {
+			t.Fatalf("new failure count %d incorrectly triggered rollback: %+v", newFailures, recommendations[0])
+		}
+		runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+		state := runner.state.Accounts[1]
+		if newFailures < 3 && (state.RecoveryFailures != 1 || !state.LastReliabilityRollbackAt.Equal(*baseline) || len(updates) != 0) {
+			t.Fatalf("one/two fresh failures repeated the old punishment: %+v", state)
+		}
+	}
+	if runner.state.Accounts[1].RecoveryFailures != 2 || len(updates) != 1 {
+		t.Fatalf("new three-failure streak did not trigger exactly one rollback: %+v", runner.state)
+	}
+}
+
+func TestPersistentHighFailureRateDoesNotRollbackAgainForOneNewError(t *testing.T) {
+	now := nowForTest()
+	account := reliabilityAccount(90, 10, 0, now.Add(-time.Minute))
+	account.CurrentPriority = priorityBest
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	for cycle := 0; cycle < 2; cycle++ {
+		at := now.Add(time.Duration(cycle) * defaultInterval)
+		recommendations := scoreAccounts([]AccountMetrics{account}, at, 5)
+		runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+		runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+	}
+	if len(updates) != 1 {
+		t.Fatal("initial persistent high failure rate did not roll back")
+	}
+	account.CurrentPriority = <-updates
+	baseline := runner.state.Accounts[1].LastReliabilityRollbackAt
+	for newFailures := int64(1); newFailures <= 3; newFailures++ {
+		at := now.Add(time.Duration(newFailures+1) * recoveryDuration)
+		account.Window2h.TerminalFailures = 10 + newFailures
+		account.Window2h.LastTerminalFailureAt = timePtr(at.Add(-time.Second))
+		account.Window2h.ThirdTerminalFailureAt = baseline
+		if newFailures == 3 {
+			account.Window2h.ThirdTerminalFailureAt = timePtr(now.Add(2 * recoveryDuration))
+		}
+		recommendations := scoreAccounts([]AccountMetrics{account}, at, 5)
+		runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+		if recommendations[0].reliabilityRollback != (newFailures == 3) {
+			t.Fatalf("persistent old error rate punished %d new failures: %+v", newFailures, recommendations[0])
+		}
+		runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+		if newFailures < 3 && runner.state.Accounts[1].RecoveryFailures != 1 {
+			t.Fatal("old high failure rate escalated the backoff again")
+		}
+	}
+}
+
+func TestRecoveryRetryCountsFailuresSinceLastWrittenStep(t *testing.T) {
+	now := nowForTest()
+	accounts := comparableRecoveryAccounts()
+	accounts[0].CurrentPriority = 60
+	accounts[0].RecoveryWindow = &MetricSnapshot{TerminalFailures: 3, TrailingTerminalFailures: 3,
+		ThirdTerminalFailureAt: timePtr(now.Add(time.Minute)), LastTerminalFailureAt: timePtr(now.Add(3 * time.Minute))}
+	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.state.Accounts[1] = accountState{RecoveryOriginalPriority: 65, LastAppliedAt: timePtr(now)}
+	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 65, Recovery: true,
+		RecoveryProgressive: true, RecoveryPriority: 60, StartedAt: timePtr(now),
+		RecoveryLastFailureAt: timePtr(now.Add(2 * time.Minute))}
+	recommendations := scoreAccounts(accounts, now.Add(4*time.Minute), 5)
+	runner.prepareExploration(accounts, recommendations, now.Add(4*time.Minute))
+	if got := testRecommendationByID(t, recommendations, 1); !got.reliabilityRollback || got.RecommendedPriority != 65 {
+		t.Fatalf("retry watermark swallowed failures from the same written position: %+v", got)
 	}
 }
