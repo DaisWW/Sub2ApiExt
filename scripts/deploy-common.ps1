@@ -363,8 +363,28 @@ function Build-ExtensionImage {
     param(
         [Parameter(Mandatory = $true)][string]$Context,
         [Parameter(Mandatory = $true)][string]$Dockerfile,
-        [Parameter(Mandatory = $true)][string]$Image
+        [Parameter(Mandatory = $true)][string]$Image,
+        [Parameter(Mandatory = $true)][string[]]$Containers
     )
+
+    $previousIds = @(foreach ($name in $Containers) {
+        if (Test-ExtensionContainerExists -Name $name) {
+            [string](Get-ExtensionContainerInspect -Name $name).Image
+        }
+    })
+    $repository = $Image -replace ':[^:]+$', ''
+    foreach ($id in @($previousIds | Select-Object -Unique)) {
+        $shortId = $id.Replace('sha256:', '').Substring(0, 12)
+        $tags = (Invoke-ExtensionDocker -Arguments @('image', 'inspect', '--format', '{{json .RepoTags}}', $id) -Capture |
+            Out-String) | ConvertFrom-Json
+        $oldTags = @($tags | Where-Object { $_ -match "^$([regex]::Escape($repository)):rollback-\d{8}-\d{6}-\d{3}-${shortId}$" })
+        $rollbackTag = '{0}:rollback-{1}-{2}' -f $repository, [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff'),
+            $shortId
+        Invoke-ExtensionDocker -Arguments @('image', 'tag', $id, $rollbackTag)
+        foreach ($tag in $oldTags | Where-Object { $_ -ne $rollbackTag }) {
+            Invoke-ExtensionDocker -Arguments @('image', 'rm', $tag)
+        }
+    }
 
     Write-Host "Building $Image..." -ForegroundColor Cyan
     Invoke-ExtensionDocker -Arguments @('build', '--file', $Dockerfile, '--tag', $Image, $Context)

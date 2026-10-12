@@ -19,7 +19,8 @@ $image = 'sub2api-ext-rate-sync:local'
 Build-ExtensionImage `
     -Context $PSScriptRoot `
     -Dockerfile (Join-Path $PSScriptRoot 'Dockerfile') `
-    -Image $image
+    -Image $image `
+    -Containers @('sub2api-rate-sync', 'sub2api-rate-sync-account')
 
 New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'compose.runtime.yml') `

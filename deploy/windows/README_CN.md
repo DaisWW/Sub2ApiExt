@@ -55,6 +55,8 @@ scripts\
 
 主服务管理器完成后，综合入口会继续部署 `rate-sync`、`priority-sync` 和 `monitoring`。单独运行各目录下的 `deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
 
+扩展构建前会为现有容器使用的镜像保存带 UTC 时间的自动回滚标签。再次保存同一版本时，先创建新标签，再移除旧自动标签，刷新保留期且不累积重复标签；手工标签不受影响，构建失败仍保留旧镜像。
+
 ## 客户端与模型门禁
 
 门禁配置在 Git 工程的 `deploy/windows/policy-gateway/config.json`，一键部署或启动时会同步到 `C:\ProgramData\Sub2API\runtime\policy-gateway\config.json`。`enabled` 是总开关：设为 `false` 时不加载门禁 Compose 文件、不启动门禁容器，Sub2API 继续直接使用 `18080`。
