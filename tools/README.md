@@ -1,6 +1,6 @@
 # tools 工具目录
 
-`account-pipeline` 是账号导入处理的唯一总目录，四个子目录各自只负责一个模块；`totp` 是独立的本地 2FA 验证码工具：
+`account-pipeline` 是账号导入处理的唯一总目录，四个子目录各自只负责一个模块；`totp` 是本地 2FA 验证码工具；`docker-cleanup` 清理部署后的旧镜像和构建缓存：
 
 ```text
 tools/
@@ -13,10 +13,14 @@ tools/
 │  ├─ normalize/                      账号 JSON 标准化
 │  ├─ sub2api/                        Sub2API Admin API 导入
 │  └─ cockpit/                        Cockpit Tools 本地导入
-└─ totp/
-   ├─ run.bat                         本地生成验证码
-   ├─ main.py                         TOTP 算法与控制台入口
-   └─ input/                          2FA 密钥输入（真实文件被 gitignore）
+├─ totp/
+│  ├─ run.bat                         本地生成验证码
+│  ├─ main.py                         TOTP 算法与控制台入口
+│  └─ input/                          2FA 密钥输入（真实文件被 gitignore）
+└─ docker-cleanup/
+   ├─ run.bat                         独立清理入口（默认预览）
+   ├─ cleanup-docker.ps1              清理过期镜像和构建缓存
+   └─ tests/                         回归检查
 ```
 
 把卡密文件拖到 `account-pipeline\run.bat`，或把卡密逐行写入 `input\redeem-codes.txt`；需要直接导入已有账户时，把多个 JSON 对象（对象之间可空行）写入 `input\accounts.txt`。两个文件同时存在时，一键流程会合并账号、整理格式，然后按 Sub2API → Cockpit 的顺序全量导入。结果会显示在窗口，并覆盖保存到 `account-pipeline\cache\results\redeem-result.txt`。需要只处理新增账号、授权已更新账号并记录输入中减少账号时使用 `account-pipeline\incremental.bat`。
@@ -26,3 +30,5 @@ tools/
 下载缓存、解压目录、标准化 JSON、增量快照、日志和运行 manifest 存放在被 Git 忽略的 `account-pipeline\cache`，不写入 Git 工作区。完整路径、清理方式和单模块用法见 [account-pipeline/README.md](account-pipeline/README.md)。
 
 `totp` 默认读取自己的 `input\secrets.txt`，在控制台输出验证码和剩余有效时间，完全离线且无需第三方依赖。输入模板、支持格式和用法见 [totp/README.md](totp/README.md)。
+
+`docker-cleanup` 可独立预览或清理。保留策略和参数见 [docker-cleanup/README.md](docker-cleanup/README.md)。
