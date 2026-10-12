@@ -540,3 +540,46 @@ func TestPostLeaseRecoveryFailedWriteDoesNotConsumeFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestMatureRecoveryRollsBackToPreviousStepAfterLeaseEnds(t *testing.T) {
+	now := nowForTest()
+	account := AccountMetrics{ID: 1, Status: "active", CurrentPriority: 60, RateMultiplier: 0.1,
+		DecisionWindowsAvailable: true, Window2h: &MetricSnapshot{SuccessfulRequests: 50, PricedRequests: 50,
+			PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1},
+		RecoveryWindow: &MetricSnapshot{SuccessfulRequests: 50, LastPricedSuccessAt: timePtr(now.Add(time.Minute))}}
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.state.Accounts[1] = accountState{RecoveryOriginalPriority: 65, LastAppliedAt: timePtr(now), LastApplied: 60}
+	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 65, Recovery: true,
+		RecoveryProgressive: true, RecoveryPriority: 60, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now)}
+	at := now.Add(recoveryDuration)
+	recommendations := scoreAccounts([]AccountMetrics{account}, at, 5)
+	runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+	runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+	if runner.state.Exploration != nil || len(updates) != 1 || <-updates != 55 {
+		t.Fatalf("test did not complete a healthy recovery step: %+v", runner.state)
+	}
+	account.CurrentPriority = 55
+	if err := saveState(runner.config.StateFile, runner.state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadState(runner.config.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.state = loaded
+	account.Window2h.TerminalFailures, account.Window2h.TrailingTerminalFailures = 3, 3
+	account.Window2h.ThirdTerminalFailureAt = timePtr(at.Add(time.Second))
+	account.Window2h.LastTerminalFailureAt = timePtr(at.Add(time.Minute))
+	at = at.Add(2 * time.Minute)
+	recommendations = scoreAccounts([]AccountMetrics{account}, at, 5)
+	runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
+	if got := recommendations[0]; !hasReliableCost(&got) || !got.reliabilityRollback || got.RecommendedPriority != 60 {
+		t.Fatalf("mature cost discarded the last recovery position after lease/restart: %+v", got)
+	}
+	runner.applyRecommendations(context.Background(), recommendations, "secret", at)
+	state := runner.state.Accounts[1]
+	if len(updates) != 1 || <-updates != 60 || state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil ||
+		!state.RecoveryRetryAt.Equal(at.Add(30*time.Minute)) {
+		t.Fatalf("post-lease rollback did not restore one step with short backoff: %+v", state)
+	}
+}

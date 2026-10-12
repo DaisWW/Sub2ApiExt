@@ -145,7 +145,7 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 		switch evidence.action {
 		case "rollback":
 			target := max(recommendation.CurrentPriority, min(priorityPoor, recommendation.CurrentPriority+priorityRampStep))
-			if state.RecoveryOriginalPriority > recommendation.CurrentPriority && !hasReliableCost(recommendation) {
+			if state.RecoveryOriginalPriority > recommendation.CurrentPriority {
 				target = state.RecoveryOriginalPriority
 			}
 			active := r.state.Exploration != nil && r.state.Exploration.AccountID == recommendation.ID
