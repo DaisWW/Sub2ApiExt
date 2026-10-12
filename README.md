@@ -29,6 +29,8 @@ Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`priority-sy
 
 `deploy-all.bat` 是功能相同的英文文件名入口。首次运行会部署 Sub2API、PostgreSQL、Redis；已有部署再次运行时，会显示当前/目标版本，检测到新版本后询问 `y/N`，确认后先备份再升级主服务；未升级时会自动启动或修复当前主栈。随后每次都会从当前 Git 工程重新构建并更新三个扩展容器。
 
+全部部署成功后自动清理旧 Docker 镜像和构建缓存；独立清理入口和保留策略见 [Docker 清理工具](tools/docker-cleanup/README.md)。
+
 也可以分别运行：
 
 ```bat

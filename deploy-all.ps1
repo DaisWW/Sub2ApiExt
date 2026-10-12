@@ -136,6 +136,20 @@ try {
     Write-DeploymentTrace 'Starting monitoring deployment.'
     Invoke-DeploymentChild -ScriptPath $monitoringPath
 
+    try {
+        Write-Host 'Cleaning unused Docker images and build cache...' -ForegroundColor Cyan
+        $maintenanceRoot = Join-Path $env:ProgramData 'Sub2API\maintenance'
+        New-Item -ItemType Directory -Path $maintenanceRoot -Force | Out-Null
+        $cleanupPath = Join-Path $maintenanceRoot 'cleanup-docker.ps1'
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'tools\docker-cleanup\cleanup-docker.ps1') -Destination $cleanupPath -Force
+        Invoke-DeploymentChild -ScriptPath $cleanupPath -Arguments @('-Apply', '-PruneBuildCache')
+        Write-DeploymentTrace 'Docker cleanup completed successfully.'
+    }
+    catch {
+        Write-Warning "Deployment succeeded, but Docker cleanup failed: $($_.Exception.Message)"
+        Write-DeploymentTrace "Docker cleanup warning: $($_.Exception.Message)"
+    }
+
     Write-Host ''
     Write-Host 'All Sub2API services and extensions were deployed.' -ForegroundColor Green
     Write-DeploymentTrace 'Integrated extension deployment completed successfully.'

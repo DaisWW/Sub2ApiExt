@@ -23,6 +23,7 @@ rate-sync\
 priority-sync\
 monitoring\
 scripts\
+tools\docker-cleanup\
 ```
 
 入口会先以管理员权限运行主服务部署管理器，再部署三个扩展；主服务和扩展均来自当前 Git 工程中的脚本，不依赖已经删除的旧工程目录。
@@ -124,3 +125,7 @@ C:\ProgramData\Sub2API\
 容器使用 `restart: unless-stopped`。需要开机自动运行时，请在 Docker Desktop 中自行启用登录后启动。登录后由 Docker 恢复已部署的容器，不再重复执行旧安装器的 Compose 命令；手动停止的容器需要重新运行一键部署才能恢复自动启动。
 
 门禁开关修改后运行一键部署：开启时只由门禁占用 `18080`，关闭时先移除门禁容器，再由 Sub2API 直接使用 `18080`。重启沿用 ProgramData 中已部署的配置，不依赖 Git 工程，也不会在开机时升级、构建镜像或同步配置。
+
+## Docker 清理
+
+综合一键部署在全部服务部署成功后自动清理旧镜像和构建缓存；部署失败时跳过，清理失败只警告。不需要每周自动化或新增计划任务，独立入口和保留规则见 [Docker 清理工具](../../tools/docker-cleanup/README.md)。
