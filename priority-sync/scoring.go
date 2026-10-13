@@ -26,7 +26,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 	for index, account := range accounts {
 		hardExcluded, _ := accountHardExcluded(account, now)
 		costEvidence[index] = directAccountCost(account)
-		if estimates[index].Valid && costEvidenceWeight(&costEvidence[index].Snapshot) < 0.75 {
+		if costEvidenceWeight(&costEvidence[index].Snapshot) < 0.75 {
 			// A qualified but short 30m sample must not hide mature 2h costs.
 			if main := directCostFromSnapshot("2h", account.Window2h); main.Valid && costEvidenceWeight(&main.Snapshot) >= 0.75 {
 				costEvidence[index] = main

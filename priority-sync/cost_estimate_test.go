@@ -76,17 +76,36 @@ func TestMatureDirectCostOverridesMultiplierAndWorkloadEstimate(t *testing.T) {
 }
 
 func TestMatureTwoHourCostWinsOverShortFastEstimate(t *testing.T) {
-	accounts := []AccountMetrics{
-		comparableCostAccount(1, 0.1, 0, 100, 5_000_000, 90),
-		comparableCostAccount(2, 0.15, 0, 100, 5_000_000, 90),
-	}
-	fast := *accounts[0].Window2h
-	fast.PricedRequests, fast.PricedTokens, fast.TotalTokens = 20, 1_000_000, 1_000_000
-	fast.AccountCost = 10
-	accounts[0].Window30m = &fast
-	got := testRecommendationByID(t, scoreAccounts(accounts, nowForTest(), 5), 1)
-	if got.ScoringWindow != "2h" || got.CostEstimateSource != "" || math.Abs(got.CostPerMillionTokens-1.1) > 1e-9 {
-		t.Fatalf("a short fast window hid mature measured costs: %+v", got)
+	for _, test := range []struct {
+		name   string
+		change func([]AccountMetrics)
+	}{
+		{"with prior", nil},
+		{"without pool", func(a []AccountMetrics) { a[0].Pools = nil }},
+		{"without output cost detail", func(a []AccountMetrics) {
+			a[0].Window30m.HasOutputCost = false
+			for index := range a {
+				a[index].Window2h.HasOutputCost = false
+			}
+		}},
+		{"without multiplier", func(a []AccountMetrics) { a[0].RateMultiplier = 0 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			accounts := []AccountMetrics{
+				comparableCostAccount(1, 0.1, 0, 100, 5_000_000, 90),
+				comparableCostAccount(2, 0.15, 0, 100, 5_000_000, 90),
+			}
+			fast := *comparableCostAccount(1, 0.1, 0, 20, 1_000_000, 19).Window2h
+			fast.AccountCost = 10
+			accounts[0].Window30m = &fast
+			if test.change != nil {
+				test.change(accounts)
+			}
+			got := testRecommendationByID(t, scoreAccounts(accounts, nowForTest(), 5), 1)
+			if got.ScoringWindow != "2h" || got.CostEstimateSource != "" || math.Abs(got.CostPerMillionTokens-1.1) > 1e-9 || got.RecommendedPriority != priorityBest {
+				t.Fatalf("a short fast window hid mature measured costs: %+v", got)
+			}
+		})
 	}
 }
 
