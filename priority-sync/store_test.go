@@ -372,3 +372,19 @@ func TestAccountMetricSnapshotPreservesCacheAndCostDetails(t *testing.T) {
 		t.Fatalf("fallback miss cost = %v, want 100000", fallback)
 	}
 }
+
+func TestAccountSnapshotUsesOnlyCurrentPoolContinuity(t *testing.T) {
+	account := AccountMetrics{PricedRequests: 50, PricedTokens: 5_000_000,
+		Pools: []PoolMetrics{
+			{ContinuousPricedRequests: 15},
+			{ContinuousPricedRequests: 10},
+			{Window7d: &MetricSnapshot{ContinuousPricedRequests: 100}},
+		}}
+	if snapshot := accountMetricSnapshot(account); snapshot.ContinuousPricedRequests != 25 || costEvidenceWeight(snapshot) != 1 {
+		t.Fatalf("current continuity was lost or replaced by history: %+v", snapshot)
+	}
+	account.PricedRequests = 1
+	if got := accountMetricSnapshot(account).ContinuousPricedRequests; got != 1 {
+		t.Fatalf("continuous requests exceeded the account's priced samples: %d", got)
+	}
+}

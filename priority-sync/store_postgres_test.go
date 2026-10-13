@@ -94,6 +94,9 @@ VALUES (1, 1, $1::timestamptz-INTERVAL '5 minutes', 'new-failure', 'provider', 5
 		t.Fatalf("deduplication or unpriced denominators failed: %+v", peer.Window2h)
 	}
 	pool := peer.Pools[0]
+	if peer.Window2h.ContinuousPricedRequests != pool.Window2h.ContinuousPricedRequests || costEvidenceWeight(peer.Window2h) != 1 {
+		t.Fatalf("account snapshots lost current pool continuity: account=%+v pool=%+v", peer.Window2h, pool.Window2h)
+	}
 	if pool.Window30m == nil || pool.Window2h == nil || pool.Window2h.PricedRequests != 40 || pool.Window2h.ContinuousPricedRequests != 39 ||
 		math.Abs(pool.Window2h.BaseCost-14.84) > 1e-9 || math.Abs(pool.Window2h.BaseOutputCost-8) > 1e-9 ||
 		pool.Window2h.LastPricedSuccessAt == nil || !pool.Window2h.LastPricedSuccessAt.Equal(now.Add(-time.Minute)) {

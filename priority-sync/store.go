@@ -752,6 +752,12 @@ func attachWindowSnapshots(primary, secondary []AccountMetrics, window snapshotW
 }
 
 func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
+	var continuousRequests int64
+	for _, pool := range account.Pools {
+		// These aggregates belong to the account window being attached;
+		// long-window snapshots must never count as current continuity.
+		continuousRequests += maxInt64(pool.ContinuousPricedRequests, 0)
+	}
 	return &MetricSnapshot{
 		SameAccountRecoveredRequests: account.SameAccountRecoveredRequests,
 		FallbackRecoveredRequests:    account.FallbackRecoveredRequests,
@@ -763,6 +769,7 @@ func accountMetricSnapshot(account AccountMetrics) *MetricSnapshot {
 		SuccessfulRequests:       account.SuccessfulRequests,
 		PricedRequests:           account.PricedRequests,
 		PricedTokens:             account.PricedTokens,
+		ContinuousPricedRequests: min(continuousRequests, maxInt64(account.PricedRequests, 0)),
 		TerminalFailures:         account.TerminalFailures,
 		RecoveredRateLimitWeight: account.RecoveredRateLimitWeight,
 		TotalTokens:              account.TotalTokens,
