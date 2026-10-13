@@ -38,7 +38,7 @@ refresh-tokens.bat
     "rate_multiplier": 0.1,
     "extra": {
       "codex_cli_only": true,
-      "codex_fingerprint_mode": "full",
+      "codex_fingerprint_mode": "device",
       "openai_long_context_billing_enabled": true,
       "openai_passthrough": true
     }
