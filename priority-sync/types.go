@@ -214,6 +214,7 @@ type Recommendation struct {
 	recoveryLastSuccessAt        *time.Time
 	recoveryLastFailureAt        *time.Time
 	recoveryProgressive          bool
+	recoveryCompleted            bool
 	recoveryNeeded               bool
 	recoveryReevaluation         bool
 	reliabilityRollback          bool

@@ -35,7 +35,7 @@ const (
 	evaluationWeights      = "成本=100%;故障容忍约束=短样本暂停/<2%正常/2%～5%慢升/连续3次或持续>5%回退"
 	strategyVersion        = "evidence-cost-v5"
 	decisionWindowPolicy   = "成熟30m/2h实测成本全局排序;短样本同池缓存/倍率先验仅作恢复参考;历史按24h半衰期衰减"
-	recoveryAnchorPolicy   = "同模型/分组/档位成本先验与缓存证据;恢复观察30m/50新请求;健康5点/中等错误2点;首次软故障观察30m,重复新故障退避2h/6h/24h"
+	recoveryAnchorPolicy   = "倍率仅作短样本恢复参考;观察30m/50新请求;健康5点/中等错误2点;实测成熟且健康后退出恢复;健康新证据解除旧退避;新故障退避30m/2h/6h/24h"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
 	minimumCostAdvantage   = 0.05

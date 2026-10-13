@@ -138,6 +138,9 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 		recommendation.reliabilityLastFailureAt = evidence.lastFailure
 		recommendation.reliabilityLastSuccessAt = evidence.lastSuccess
 		recommendation.reliabilityHighSince = evidence.highSince
+		if evidence.action != "cost" || recommendation.HardExcluded {
+			recommendation.recoveryCompleted = false
+		}
 		if recommendation.HardExcluded {
 			continue
 		}
@@ -221,10 +224,16 @@ func recordReliabilityObservation(state *accountState, recommendation *Recommend
 		// A rollback starts a new high-failure observation period. The next
 		// cycle must observe the configured interval again before repeating it.
 		state.ReliabilityHighSince = timePtr(now)
-	} else if state.RecoveryFailures > 0 && recoveryFailureAt != nil &&
+	} else if (state.RecoveryFailures > 0 || state.RecoveryRetryAt != nil) && recoveryFailureAt != nil &&
 		now.Sub(*recoveryFailureAt) >= decisionWindow && recommendation.ReliabilitySamples >= recoveryMinimumSamples &&
 		recommendation.AccountFailureRate < recoveryHealthyFailureRate && recommendation.reliabilityLastSuccessAt != nil &&
 		recommendation.reliabilityLastSuccessAt.After(*recoveryFailureAt) {
 		state.RecoveryFailures = 0
+		state.RecoveryRetryAt = nil
+	}
+	if recommendation.recoveryCompleted {
+		state.RecoveryOriginalPriority = 0
+		state.RecoveryFailures = 0
+		state.RecoveryRetryAt = nil
 	}
 }

@@ -216,9 +216,20 @@ func (r *Runner) prepareExploration(accounts []AccountMetrics, recommendations [
 		if state.RecoveryOriginalPriority > 0 && recommendation.AnchorPriority <= 0 && hasReliableCost(recommendation) {
 			recommendation.AnchorPriority = recommendation.RecommendedPriority
 		}
-		if !recommendation.HardExcluded && state.RecoveryOriginalPriority > 0 && recommendation.AnchorPriority > 0 && recommendation.AnchorPriority < recommendation.CurrentPriority {
-			// Keep the recovery step limit after a lease ends, even when cost
-			// evidence matures or a no-result observation is retried.
+		active := r.state.Exploration != nil && r.state.Exploration.AccountID == recommendation.ID
+		if !recommendation.HardExcluded && !active && state.RecoveryOriginalPriority > 0 &&
+			recoveryCostMature(recommendation, state, now) && state.LastAppliedAt != nil && now.Sub(*state.LastAppliedAt) >= decisionWindow {
+			evidence := r.assessReliability(byID[recommendation.ID], now)
+			if evidence.action == "cost" && evidence.samples >= recoveryMinimumSamples &&
+				evidence.lastSuccess != nil && evidence.lastSuccess.After(*state.LastAppliedAt) {
+				// Without an active lease, the full rolling window must be newer
+				// than the last recovery write before it can prove graduation.
+				recommendation.recoveryCompleted = true
+				recommendation.Reason += "；恢复证据已成熟，回到普通成本调整"
+			}
+		}
+		if !recommendation.HardExcluded && !recommendation.recoveryCompleted && state.RecoveryOriginalPriority > 0 && recommendation.AnchorPriority > 0 && recommendation.AnchorPriority < recommendation.CurrentPriority {
+			// Keep the step limit until new healthy evidence proves graduation.
 			recommendation.recoveryNeeded = true
 			recommendation.RecommendedPriority = recommendation.CurrentPriority
 		}
@@ -494,9 +505,18 @@ func (r *Runner) prepareProgressiveRecovery(account AccountMetrics, recommendati
 		recommendation.Reason = fmt.Sprintf("本步新增请求失败率 %.1f%% 超过 5%%，退回上一步 %d", failureRate*100, recommendation.RecommendedPriority)
 		return
 	}
-	if snapshot.LastPricedSuccessAt == nil || exploration.StartedAt == nil || snapshot.LastPricedSuccessAt.Before(*exploration.StartedAt) {
+	if snapshot.LastPricedSuccessAt == nil || exploration.StartedAt == nil || !snapshot.LastPricedSuccessAt.After(*exploration.StartedAt) {
 		recommendation.recoveryOutcome = recoveryOutcomeNoResult
 		recommendation.Reason = fmt.Sprintf("本步无新计费请求，保留恢复进度 %d", recommendation.CurrentPriority)
+		return
+	}
+	if failureRate < recoveryHealthyFailureRate && recoveryCostMature(recommendation, r.state.Accounts[account.ID], now) {
+		recommendation.RecommendedPriority = recommendation.AnchorPriority
+		recommendation.recoveryCompleted = true
+		recommendation.recoveryNeeded = false
+		recommendation.recoveryOutcome = recoveryOutcomeSuccess
+		recommendation.applyImmediately = false
+		recommendation.Reason = fmt.Sprintf("本步新增请求 %d，失败率 %.1f%%，实测成本已成熟，回到普通成本调整", samples, failureRate*100)
 		return
 	}
 	if recommendation.CostEstimateSource != "" || hasReliableCost(recommendation) {
@@ -508,6 +528,14 @@ func (r *Runner) prepareProgressiveRecovery(account AccountMetrics, recommendati
 		recommendation.recoveryOutcome = recoveryOutcomeProgress
 	}
 	recommendation.Reason = fmt.Sprintf("本步新增请求 %d，失败率 %.1f%%，向参考位置移动到 %d", samples, failureRate*100, recommendation.RecommendedPriority)
+}
+
+func recoveryCostMature(recommendation *Recommendation, state accountState, now time.Time) bool {
+	failureAt := recoveryFailureBaseline(state)
+	return hasReliableCost(recommendation) && recommendation.CostEstimateSource == "" &&
+		recommendation.CostEvidenceWeight >= 0.75 &&
+		(state.RecoveryRetryAt == nil || !now.Before(*state.RecoveryRetryAt)) &&
+		(state.RecoveryFailures == 0 || (failureAt != nil && now.Sub(*failureAt) >= decisionWindow))
 }
 
 func recoveryTerminalFailures(account AccountMetrics) int64 {
@@ -720,7 +748,7 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			r.state.Accounts[recommendation.ID] = state
 			continue
 		}
-		if !isActiveExploration && state.LastAppliedAt != nil && now.Sub(*state.LastAppliedAt) < r.config.ChangeCooldown {
+		if (!isActiveExploration || recommendation.recoveryCompleted) && state.LastAppliedAt != nil && now.Sub(*state.LastAppliedAt) < r.config.ChangeCooldown {
 			recommendation.ApplyStatus = "cooldown"
 			pending++
 			r.state.Accounts[recommendation.ID] = state
@@ -797,7 +825,7 @@ func (r *Runner) finishExploration(recommendation *Recommendation, state *accoun
 	if r == nil || r.state == nil || r.state.Exploration == nil {
 		return
 	}
-	if r.state.Exploration.Recovery && recommendation != nil && state != nil {
+	if r.state.Exploration.Recovery && recommendation != nil && state != nil && !recommendation.recoveryCompleted {
 		if r.state.Exploration.RecoveryProgressive && recommendation.RecommendedPriority < recommendation.CurrentPriority {
 			state.RecoveryOriginalPriority = recommendation.CurrentPriority
 		}

@@ -198,6 +198,61 @@ func TestHealthyEvidenceClearsLegacyRecoveryFailures(t *testing.T) {
 	}
 }
 
+func TestHealthyEvidenceClearsPendingBackoffAcrossRestart(t *testing.T) {
+	now := nowForTest()
+	for _, test := range []struct {
+		name                string
+		initialFailures     int
+		successes, failures int64
+		age                 time.Duration
+		oldSuccess          bool
+		wantClear           bool
+	}{
+		{"healthy", 3, 100, 0, 3 * time.Hour, false, true},
+		{"failures already cleared", 0, 100, 0, 3 * time.Hour, false, true},
+		{"isolated error", 3, 99, 1, 3 * time.Hour, false, true},
+		{"short sample", 3, 49, 0, 3 * time.Hour, false, false},
+		{"two percent errors", 3, 49, 1, 3 * time.Hour, false, false},
+		{"too soon", 3, 100, 0, time.Hour, false, false},
+		{"old success", 3, 100, 0, 3 * time.Hour, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			account := comparableCostAccount(1, 0.1, 0.9, 100, 5_000_000, 90)
+			account.CurrentPriority = priorityPoor
+			account.Window2h.SuccessfulRequests, account.Window2h.TerminalFailures = test.successes, test.failures
+			account.Window2h.LastPricedSuccessAt = timePtr(now.Add(-time.Minute))
+			baseline := now.Add(-test.age)
+			if test.oldSuccess {
+				account.Window2h.LastPricedSuccessAt = timePtr(baseline.Add(-time.Minute))
+			}
+			runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
+			runner.state.Accounts[1] = accountState{RecoveryFailures: test.initialFailures,
+				LastReliabilityRollbackAt: timePtr(baseline), LastAppliedAt: timePtr(baseline),
+				RecoveryRetryAt: timePtr(now.Add(24 * time.Hour))}
+			recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)
+			runner.prepareExploration([]AccountMetrics{account}, recommendations, now)
+			runner.applyRecommendations(context.Background(), recommendations, "secret", now)
+			state := runner.state.Accounts[1]
+			if (state.RecoveryRetryAt == nil) != test.wantClear || (test.wantClear && state.RecoveryFailures != 0) {
+				t.Fatalf("healthy recovery did not release the matching backoff: %+v", state)
+			}
+			if err := saveState(runner.config.StateFile, runner.state); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := loadState(runner.config.StateFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.state = loaded
+			recommendations = scoreAccounts([]AccountMetrics{account}, now.Add(defaultInterval), 5)
+			runner.prepareExploration([]AccountMetrics{account}, recommendations, now.Add(defaultInterval))
+			if got := recommendations[0]; (got.RecommendedPriority < got.CurrentPriority) != test.wantClear {
+				t.Fatalf("restart changed backoff eligibility: %+v", got)
+			}
+		})
+	}
+}
+
 func TestLegacyRecoveryProgressDoesNotClearFailuresTooSoon(t *testing.T) {
 	now := nowForTest()
 	accounts := comparableRecoveryAccounts()
