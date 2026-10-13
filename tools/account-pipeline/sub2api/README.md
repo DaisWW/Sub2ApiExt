@@ -20,3 +20,18 @@ import-from-cockpit-tools.bat [--what-if]
 总目录的 `incremental.bat` 会使用本模块只读查询带有 `extra.account_pipeline_managed=account-pipeline-v1` 归属标记的账号，用于建立首次增量基线；未匹配账户仍进入逐账户导入和归属检查。输入中减少的账号会把 ID、邮箱和原因写入 `..\cache\results\sub2api-pending-deletions.txt` 供手动处理；本模块不会调用删除接口，也不会按模糊名称或未知 ID 删除。没有归属标记的手动中转账户会跳过，不会被更新或写入工具快照。
 
 总目录的 `refresh-tokens.bat` 复用本模块的凭据专用更新。它逐账号调用 `bulk-update` 的凭据键级合并，只提交账户 ID 以及 `access_token`、`refresh_token`、`id_token`，不会提交分组、代理、并发、优先级、倍率或 `extra`。更新前后都会复核账号标识和自动化归属标记，更新后还会核对提交的凭据是否实际写入；单账户失败不会中断后续账户。该入口同步输入已有 Token，不调用 OpenAI OAuth 接口换取新授权。
+
+## Codex 指纹收敛
+
+本模块导入的 OpenAI OAuth 账户通过 `defaults.extra.codex_fingerprint_mode` 选择模式；目录、邮箱和兑换码配置可按原有继承规则覆盖 `extra` 中的该字段。以下枚举依据 Sub2API `v0.2.15` 的[实现代码](https://github.com/Wei-Shaw/sub2api/blob/v0.2.15/backend/internal/service/openai_codex_fingerprint.go)，未设置或非法值按 `off` 处理。
+
+| 配置值 | 界面选项 | 收敛行为 |
+| --- | --- | --- |
+| `off` | 关闭（透传，默认） | 关闭本层收敛，保留设备、会话和线程区分；网关原有的账户隔离和身份规范化仍执行。 |
+| `device` | 仅设备 | 统一为账户固定安装标识，保留会话和线程区分。 |
+| `session` | 设备+会话 | 统一安装和会话标识，按原始客户端会话派生线程；原始会话标识缺失时回退到统一线程。 |
+| `full` | 完全收敛 | 统一安装、会话和线程标识，多个客户端共享同一线程标识。 |
+
+`session` 和 `full` 还会调整窗口标识、为每次请求生成新的轮次标识；仅当根级 `prompt_cache_key` 等于请求体收敛前的会话标识时，才改写该缓存键。修改模板不会覆盖已有 ProgramData 配置，已有账户需经导入或增量设置同步后应用；Token 刷新不提交这些设置。
+
+这些模式用于多人共享账户时减少上游可见的设备、会话标识数量。单人使用通常保持 `off`；多人共享且需要合并设备标识时，可先选改写较少的 `device`，`session/full` 按账户实测选择。相同安装标识不等于同一个人，也不统一出口 IP、并发或使用节奏；上游注释记录过收敛后额度缩水的报告，不能保证额度或稳定性改善。
