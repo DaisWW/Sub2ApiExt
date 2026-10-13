@@ -58,6 +58,93 @@ func TestEstimatedCostUsesMultiplierAtEqualCacheRate(t *testing.T) {
 	}
 }
 
+func TestMatureDirectCostOverridesMultiplierAndWorkloadEstimate(t *testing.T) {
+	accounts := []AccountMetrics{
+		comparableCostAccount(1, 0.1, 0, 100, 5_000_000, 90),
+		comparableCostAccount(2, 0.15, 0, 100, 5_000_000, 90),
+	}
+	// The current multiplier is lower, but the requests actually cost 38/M.
+	one := accounts[0].Window2h
+	one.InputTokens, one.OutputTokens = 500_000, 4_500_000
+	one.BaseOutputCost, one.BaseCost, one.AccountCost = 90, 95, 190
+	result := scoreAccounts(accounts, nowForTest(), 5)
+	expensive, cheap := testRecommendationByID(t, result, 1), testRecommendationByID(t, result, 2)
+	if expensive.CostPerMillionTokens != 38 || expensive.CostEstimateSource != "" ||
+		expensive.CostPerMillionTokens != expensive.ObservedCostPerMillion || expensive.RecommendedPriority <= cheap.RecommendedPriority {
+		t.Fatalf("mature measured cost was replaced by the multiplier/workload estimate: expensive=%+v cheap=%+v", expensive, cheap)
+	}
+}
+
+func TestMatureTwoHourCostWinsOverShortFastEstimate(t *testing.T) {
+	accounts := []AccountMetrics{
+		comparableCostAccount(1, 0.1, 0, 100, 5_000_000, 90),
+		comparableCostAccount(2, 0.15, 0, 100, 5_000_000, 90),
+	}
+	fast := *accounts[0].Window2h
+	fast.PricedRequests, fast.PricedTokens, fast.TotalTokens = 20, 1_000_000, 1_000_000
+	fast.AccountCost = 10
+	accounts[0].Window30m = &fast
+	got := testRecommendationByID(t, scoreAccounts(accounts, nowForTest(), 5), 1)
+	if got.ScoringWindow != "2h" || got.CostEstimateSource != "" || math.Abs(got.CostPerMillionTokens-1.1) > 1e-9 {
+		t.Fatalf("a short fast window hid mature measured costs: %+v", got)
+	}
+}
+
+func TestMeasuredCostOrderSpansDifferentPoolSetsAndEstimates(t *testing.T) {
+	accounts := []AccountMetrics{
+		comparableCostAccount(1, 0.25, 0.9, 100, 5_000_000, 90),
+		comparableCostAccount(2, 0.18, 0.9, 100, 5_000_000, 90),
+		comparableCostAccount(3, 0.18, 0.9, 100, 5_000_000, 90),
+		comparableCostAccount(4, 0.15, 0.9, 100, 5_000_000, 90),
+	}
+	prices := []float64{0.077586, 0.099690, 0.146484, 0.112409}
+	for index := range accounts {
+		accounts[index].Window2h.AccountCost = prices[index] * 5
+		if index < 2 {
+			accounts[index].Pools = nil
+			accounts[index].CurrentPriority = priorityPoor
+		}
+	}
+	result := scoreAccounts(accounts, nowForTest(), 5)
+	lastPriority := 0
+	for _, id := range []int64{1, 2, 4, 3} {
+		got := testRecommendationByID(t, result, id)
+		if math.Abs(got.CostPerMillionTokens-prices[id-1]) > 1e-9 || got.RecommendedPriority <= lastPriority {
+			t.Fatalf("measured costs did not define a global order: %+v", result)
+		}
+		lastPriority = got.RecommendedPriority
+	}
+}
+
+func TestCostEstimateOnlyProvidesRecoveryReference(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		accounts []AccountMetrics
+	}{
+		{"short cold evidence", []AccountMetrics{
+			comparableCostAccount(1, 0.3, 0, 5, 500_000, 0),
+			comparableCostAccount(2, 0.1, 0.95, 100, 5_000_000, 90),
+		}},
+		{"pool evidence without account cost", []AccountMetrics{
+			comparableCostAccount(1, 0.05, 0.9, 100, 5_000_000, 90),
+			comparableCostAccount(2, 0.1, 0.9, 100, 5_000_000, 90),
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.name == "pool evidence without account cost" {
+				test.accounts[0].Window2h = nil
+				test.accounts[0].CurrentPriority = priorityPoor
+			} else {
+				test.accounts[0].CurrentPriority = priorityBest
+			}
+			got := testRecommendationByID(t, scoreAccounts(test.accounts, nowForTest(), 5), 1)
+			if got.CostEstimateSource == "" || got.RecommendedPriority != got.CurrentPriority {
+				t.Fatalf("an estimate changed formal priority without measured evidence: %+v", got)
+			}
+		})
+	}
+}
+
 func TestMatureCacheEvidenceCanReverseMultiplierOrder(t *testing.T) {
 	accounts := []AccountMetrics{
 		comparableCostAccount(1, 0.18, 0.7, 100, 5_000_000, 90),
@@ -110,7 +197,7 @@ func TestSmallQualifiedColdSampleDoesNotRaiseStablePeerPrior(t *testing.T) {
 	}
 }
 
-func TestEstimatedCostUsesCommonInputOutputWorkloadAndCurrentRate(t *testing.T) {
+func TestCostPriorUsesCommonInputOutputWorkloadAndCurrentRate(t *testing.T) {
 	accounts := []AccountMetrics{
 		comparableCostAccount(1, 0.1, 0, 100, 5_000_000, 90),
 		comparableCostAccount(2, 0.15, 0, 100, 5_000_000, 90),
@@ -119,11 +206,9 @@ func TestEstimatedCostUsesCommonInputOutputWorkloadAndCurrentRate(t *testing.T) 
 	one := accounts[0].Window2h
 	one.InputTokens, one.OutputTokens = 500_000, 4_500_000
 	one.BaseOutputCost, one.BaseCost, one.AccountCost = 90, 95, 190
-	result := scoreAccounts(accounts, nowForTest(), 5)
-	cheap, expensive := testRecommendationByID(t, result, 1), testRecommendationByID(t, result, 2)
-	if cheap.ObservedCostPerMillion <= expensive.ObservedCostPerMillion || cheap.RecommendedPriority >= expensive.RecommendedPriority ||
-		math.Abs(expensive.CostPerMillionTokens/cheap.CostPerMillionTokens-1.5) > 1e-9 {
-		t.Fatalf("historical rate/workload distorted comparison: cheap=%+v expensive=%+v", cheap, expensive)
+	result := estimateAccountCosts(accounts, nowForTest())
+	if !result[0].Valid || !result[1].Valid || math.Abs(result[1].Cost/result[0].Cost-1.5) > 1e-9 {
+		t.Fatalf("historical rate/workload distorted the low-evidence prior: %+v", result)
 	}
 }
 
@@ -175,24 +260,24 @@ func TestRecentPoolSnapshotFallsBackFromIncompleteTwoHourCosts(t *testing.T) {
 	}
 }
 
-func TestEstimatedCostDeadbandRetainsIncumbentUntilSavingsAreMaterial(t *testing.T) {
+func TestMatureCostIgnoresIncumbentAndCurrentMultiplier(t *testing.T) {
 	accounts := []AccountMetrics{
 		comparableCostAccount(1, 0.205, 0.9, 100, 5_000_000, 90),
 		comparableCostAccount(2, 0.2, 0.9, 100, 5_000_000, 90),
 	}
 	accounts[0].CurrentPriority, accounts[1].CurrentPriority = priorityBest, priorityPoor
 	result := scoreAccounts(accounts, nowForTest(), 5)
-	if testRecommendationByID(t, result, 1).RecommendedPriority != priorityBest || testRecommendationByID(t, result, 2).RecommendedPriority != priorityPoor {
-		t.Fatalf("marginal savings reversed the incumbent: %+v", result)
+	if testRecommendationByID(t, result, 1).RecommendedPriority != priorityPoor || testRecommendationByID(t, result, 2).RecommendedPriority != priorityBest {
+		t.Fatalf("incumbent priority overrode cheaper measured cost: %+v", result)
 	}
-	accounts[0].RateMultiplier = 0.25
+	accounts[0].RateMultiplier = 0.001
 	result = scoreAccounts(accounts, nowForTest(), 5)
 	if testRecommendationByID(t, result, 2).RecommendedPriority != priorityBest {
-		t.Fatalf("material savings could not change the order: %+v", result)
+		t.Fatalf("current multiplier replaced actual recorded spending: %+v", result)
 	}
 }
 
-func TestDisconnectedModelsRankWithinTheirOwnCompetition(t *testing.T) {
+func TestDisconnectedModelsRetainGlobalMeasuredCostOrder(t *testing.T) {
 	accounts := []AccountMetrics{
 		comparableCostAccount(1, 0.1, 0.9, 100, 5_000_000, 90),
 		comparableCostAccount(2, 0.2, 0.9, 100, 5_000_000, 90),
@@ -206,13 +291,17 @@ func TestDisconnectedModelsRankWithinTheirOwnCompetition(t *testing.T) {
 		accounts[index].Window2h.AccountCost *= 100
 	}
 	result := scoreAccounts(accounts, nowForTest(), 5)
-	if testRecommendationByID(t, result, 1).RecommendedPriority != priorityBest || testRecommendationByID(t, result, 3).RecommendedPriority != priorityBest ||
-		testRecommendationByID(t, result, 2).RecommendedPriority != priorityPoor || testRecommendationByID(t, result, 4).RecommendedPriority != priorityPoor {
-		t.Fatalf("unrelated model prices changed the candidate ordering: %+v", result)
+	lastPriority := 0
+	for _, id := range []int64{1, 2, 3, 4} {
+		got := testRecommendationByID(t, result, id)
+		if got.RecommendedPriority <= lastPriority {
+			t.Fatalf("pool-local ranks concealed measured price differences: %+v", result)
+		}
+		lastPriority = got.RecommendedPriority
 	}
 }
 
-func TestDirectFallbackDoesNotRankUnrelatedPoolsTogether(t *testing.T) {
+func TestDirectFallbackRanksGlobalCostsWithoutPoolDetails(t *testing.T) {
 	accounts := []AccountMetrics{
 		comparableCostAccount(1, 0.1, 0.9, 100, 5_000_000, 90),
 		comparableCostAccount(2, 0.2, 0.9, 100, 5_000_000, 90),
@@ -225,10 +314,10 @@ func TestDirectFallbackDoesNotRankUnrelatedPoolsTogether(t *testing.T) {
 	accounts[2].Platform, accounts[2].Pools[0].Platform = "deepseek", "deepseek"
 	accounts[2].Pools[0].RequestedModel, accounts[2].Pools[0].UpstreamModel = "deepseek-chat", "deepseek-chat"
 	result := scoreAccounts(accounts, nowForTest(), 5)
-	if testRecommendationByID(t, result, 1).RecommendedPriority != priorityBest ||
+	if testRecommendationByID(t, result, 1).RecommendedPriority != priorityNeutral ||
 		testRecommendationByID(t, result, 2).RecommendedPriority != priorityPoor ||
 		testRecommendationByID(t, result, 3).RecommendedPriority != priorityBest {
-		t.Fatalf("unrelated fallback price changed GPT ranking: %+v", result)
+		t.Fatalf("missing cost detail split the global measured ranking: %+v", result)
 	}
 	accounts[2].RateMultiplier = 100
 	accounts[2].Window2h.AccountCost *= 100_000

@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// scoreAccounts uses comparable cost estimates when model/group evidence is
-// available, retaining qualified direct costs for older schemas.
+// Mature measured costs decide the global order. Estimates are only a prior
+// for short samples and bounded recovery, never a replacement for mature costs.
 func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []Recommendation {
 	if minSamples < 1 {
 		minSamples = defaultMinSamples
@@ -17,7 +17,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 	costValues := make([]float64, len(accounts))
 	costEvidence := make([]directCostEvidence, len(accounts))
 	estimates := estimateAccountCosts(accounts, now)
-	rankingValues := make([]float64, len(accounts))
+	useEstimate := make([]bool, len(accounts))
 	rankingValid := make([]bool, len(accounts))
 	multiplierValues := make([]float64, len(accounts))
 	speedValues := make([]float64, len(accounts))
@@ -26,12 +26,18 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 	for index, account := range accounts {
 		hardExcluded, _ := accountHardExcluded(account, now)
 		costEvidence[index] = directAccountCost(account)
+		if estimates[index].Valid && costEvidenceWeight(&costEvidence[index].Snapshot) < 0.75 {
+			// A qualified but short 30m sample must not hide mature 2h costs.
+			if main := directCostFromSnapshot("2h", account.Window2h); main.Valid && costEvidenceWeight(&main.Snapshot) >= 0.75 {
+				costEvidence[index] = main
+			}
+		}
 		costValues[index] = costEvidence[index].CostPerMillion
 		rankingValid[index] = costEvidence[index].Valid && !hardExcluded
-		rankingValues[index] = costValues[index]
-		if estimates[index].Valid && !hardExcluded {
+		useEstimate[index] = estimates[index].Valid && !hardExcluded &&
+			(!costEvidence[index].Valid || costEvidenceWeight(&costEvidence[index].Snapshot) < 0.75)
+		if useEstimate[index] {
 			costValues[index] = estimates[index].Cost
-			rankingValues[index] = estimates[index].RankingValue
 			rankingValid[index] = true
 		}
 		multiplierValues[index] = account.RateMultiplier
@@ -39,7 +45,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		speedValues[index] = speedMetric(account.LatencyP90Ms, account.FirstTokenP90Ms)
 		speedValid[index] = speedValues[index] > 0 && validScore(speedValues[index]) && !hardExcluded
 	}
-	costScores := rankEstimatedCosts(rankingValues, rankingValid, accounts, estimates)
+	costScores := rankLowerBetter(costValues, rankingValid)
 	multiplierScores := normalizeLowerBetter(multiplierValues, multiplierValid)
 	speedScores := normalizeLowerBetter(speedValues, speedValid)
 
@@ -53,7 +59,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		if costEvidence[index].Valid {
 			scoringWindow = costEvidence[index].Window
 			scoringSnapshot = &costEvidence[index].Snapshot
-		} else if estimates[index].Valid {
+		} else if useEstimate[index] {
 			scoringWindow, scoringSnapshot = "2h", account.Window2h
 			if scoringSnapshot == nil {
 				scoringWindow, scoringSnapshot = "30m", account.Window30m
@@ -71,7 +77,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			scoringPricedRequests = maxInt64(scoringSnapshot.PricedRequests, 0)
 			scoringTokens = maxInt64(scoringSnapshot.PricedTokens, 0)
 		}
-		if usesDecisionWindows(account) && !costEvidence[index].Valid && !estimates[index].Valid {
+		if usesDecisionWindows(account) && !costEvidence[index].Valid && !useEstimate[index] {
 			scoringSuccesses = 0
 			scoringFailures = 0
 			scoringRecovered = 0
@@ -102,19 +108,23 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 		}
 		anchorPriority := 0
 		recoveryNeeded := false
-		if estimates[index].Valid && !hardExcluded {
+		if costEvidence[index].Valid && !hardExcluded && !useEstimate[index] {
+			anchorPriority = recommended
+		}
+		if useEstimate[index] {
 			anchorPriority = priorityForScore(score)
-			// A discounted historical advantage may fall inside the incumbent
-			// deadband. Allow a small, rate-limited re-evaluation in that case.
+			// Cheap history can justify a bounded re-evaluation even while its
+			// discounted estimate still ranks behind a warm incumbent.
 			if estimates[index].Reevaluate && estimates[index].Weight < 0.75 && anchorPriority >= currentPriority && currentPriority > priorityBest {
 				anchorPriority = max(priorityBest, currentPriority-priorityRampStep)
 			}
-			recommended = anchorPriority
+			recommended = currentPriority
 			reason = fmt.Sprintf("预计成本 %.4f/M（同模型/分组档位 %d 个参考账户，缓存证据权重 %.0f%%）", costValues[index], estimates[index].PeerCount, estimates[index].Weight*100)
-			recoveryNeeded = recommended < currentPriority && (estimates[index].Weight < 0.75 || currentPriority >= priorityUnavailable)
+			recoveryNeeded = anchorPriority < currentPriority
 			if recoveryNeeded {
-				recommended = currentPriority
 				reason += "；等待渐进恢复机会"
+			} else {
+				reason += "；仅作恢复参考，保持当前优先级"
 			}
 			confidence = estimates[index].Weight
 		}
@@ -153,15 +163,16 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			applyImmediately:          applyImmediately,
 			AnchorPriority:            anchorPriority,
 			recoveryNeeded:            recoveryNeeded,
-			recoveryReevaluation:      estimates[index].Reevaluate && anchorPriority != priorityForScore(score),
+			recoveryReevaluation:      useEstimate[index] && estimates[index].Reevaluate && anchorPriority != priorityForScore(score),
 		}
 		if costEvidence[index].Valid {
 			recommendation.CostPerMillionTokens = costValues[index]
 			recommendation.ObservedCostPerMillion = costEvidence[index].CostPerMillion
 			recommendation.CacheHitRate = costEvidence[index].CacheHitRate
 			recommendation.CacheHitRateKnown = costEvidence[index].CacheHitRateKnown
+			recommendation.CostEvidenceWeight = costEvidenceWeight(&costEvidence[index].Snapshot)
 		}
-		if estimates[index].Valid {
+		if useEstimate[index] {
 			recommendation.CostPerMillionTokens = costValues[index]
 			recommendation.CostEstimateSource = "model-group-cache"
 			recommendation.CostEvidenceWeight = estimates[index].Weight

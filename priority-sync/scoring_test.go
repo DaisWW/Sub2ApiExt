@@ -401,7 +401,7 @@ func TestPoolIdentityNormalizesModelFallbacks(t *testing.T) {
 	}
 }
 
-func TestScoreAccountsSeparatesDirectCostAcrossGroupsAndTiers(t *testing.T) {
+func TestScoreAccountsRanksDirectCostAcrossGroupsAndTiers(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	pool := func(groupID int64, groupPriority int, cost float64) PoolMetrics {
 		return PoolMetrics{
@@ -437,8 +437,8 @@ func TestScoreAccountsSeparatesDirectCostAcrossGroupsAndTiers(t *testing.T) {
 			for _, recommendation := range result {
 				byID[recommendation.ID] = recommendation
 			}
-			if byID[test.first.ID].RecommendedPriority != priorityBest || byID[test.second.ID].RecommendedPriority != priorityBest {
-				t.Fatalf("unrelated group or tier affected direct cost rank: cheap=%+v expensive=%+v", byID[test.first.ID], byID[test.second.ID])
+			if byID[test.first.ID].RecommendedPriority != priorityBest || byID[test.second.ID].RecommendedPriority != priorityPoor {
+				t.Fatalf("groups or tiers hid direct cost differences: cheap=%+v expensive=%+v", byID[test.first.ID], byID[test.second.ID])
 			}
 		})
 	}
@@ -472,7 +472,7 @@ func TestScoreAccountsUsesSameGroupTierCompetition(t *testing.T) {
 	}
 }
 
-func TestScoreAccountsNormalizesIndependentCompetitionDomainsSeparately(t *testing.T) {
+func TestScoreAccountsKeepsGlobalPriceOrderAcrossCompetitionDomains(t *testing.T) {
 	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	account := func(id, groupID int64, cost float64) AccountMetrics {
 		return AccountMetrics{
@@ -495,9 +495,9 @@ func TestScoreAccountsNormalizesIndependentCompetitionDomainsSeparately(t *testi
 	for _, recommendation := range result {
 		byID[recommendation.ID] = recommendation
 	}
-	if byID[1].RecommendedPriority != priorityBest || byID[3].RecommendedPriority != priorityBest ||
-		byID[2].RecommendedPriority != priorityPoor || byID[4].RecommendedPriority != priorityPoor {
-		t.Fatalf("independent direct-cost domains affected each other: %+v", byID)
+	if !(byID[1].RecommendedPriority < byID[2].RecommendedPriority && byID[2].RecommendedPriority < byID[3].RecommendedPriority &&
+		byID[3].RecommendedPriority < byID[4].RecommendedPriority) {
+		t.Fatalf("competition domains hid absolute price differences: %+v", byID)
 	}
 }
 

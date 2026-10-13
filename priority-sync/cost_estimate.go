@@ -1,19 +1,16 @@
 package main
 
 import (
-	"fmt"
 	"math"
-	"sort"
-	"strings"
 	"time"
 )
 
 type costEstimate struct {
-	Cost, Reference, RankingValue, Weight float64
-	HistoryWeight                         float64
-	PeerCount, PoolCount, Component       int
-	Valid                                 bool
-	Reevaluate                            bool
+	Cost, Reference, Weight float64
+	HistoryWeight           float64
+	PeerCount, PoolCount    int
+	Valid                   bool
+	Reevaluate              bool
 }
 
 // Only successful history in the same model, endpoint, group and tier proves
@@ -24,12 +21,9 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 		pool  PoolMetrics
 	}
 	pools := make(map[string][]participant)
-	parents := make([]int, len(accounts))
 	result := make([]costEstimate, len(accounts))
 	weights := make([]float64, len(accounts))
 	for index, account := range accounts {
-		parents[index] = index
-		result[index].Component = -1
 		if excluded, _ := accountHardExcluded(account, now); excluded || account.RateMultiplier <= 0 || !validScore(account.RateMultiplier) {
 			continue
 		}
@@ -40,12 +34,6 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 			key := poolIdentity(pool)
 			pools[key] = append(pools[key], participant{index, pool})
 		}
-	}
-	find := func(index int) int {
-		for parents[index] != index {
-			index = parents[index]
-		}
-		return index
 	}
 	for _, participants := range pools {
 		if len(participants) < 2 {
@@ -113,13 +101,11 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 			if cost <= 0 || !validScore(cost) {
 				continue
 			}
-			// Use a common workload within each pool; divide out its reference
-			// price so different model prices cannot decide the global order.
+			// Use a common workload only to estimate low-evidence accounts.
 			trafficWeight := float64(totalTokens)
 			estimate := &result[item.index]
 			estimate.Cost += trafficWeight * cost
 			estimate.Reference += trafficWeight * reference * accounts[item.index].RateMultiplier
-			estimate.RankingValue += trafficWeight * cost / reference
 			estimate.Weight += trafficWeight * weight
 			estimate.HistoryWeight += trafficWeight * historyWeight
 			if historyWeight >= 0.15 && !math.IsInf(bestRecentCost, 1) && history*accounts[item.index].RateMultiplier < bestRecentCost*(1-minimumCostAdvantage) {
@@ -128,17 +114,14 @@ func estimateAccountCosts(accounts []AccountMetrics, now time.Time) []costEstima
 			estimate.PeerCount = max(estimate.PeerCount, len(baseCosts))
 			estimate.PoolCount++
 			weights[item.index] += trafficWeight
-			parents[find(item.index)] = find(participants[0].index)
 		}
 	}
 	for index := range result {
 		if weights[index] > 0 {
 			result[index].Cost /= weights[index]
 			result[index].Reference /= weights[index]
-			result[index].RankingValue /= weights[index]
 			result[index].Weight /= weights[index]
 			result[index].HistoryWeight /= weights[index]
-			result[index].Component = find(index)
 			result[index].Valid = true
 		}
 	}
@@ -165,22 +148,6 @@ func historicalPoolCost(pool PoolMetrics, inputShare float64, now time.Time) (fl
 		return cost, math.Min(quality, candidate.cap) * math.Exp2(-age.Hours()/24)
 	}
 	return 0, 0
-}
-
-// Direct costs have no common model-price normalization. Compare only the
-// same observed pool set; old schemas retain a platform-local fallback.
-func directCompetitionKey(account AccountMetrics) string {
-	keys := make([]string, 0, len(account.Pools))
-	for _, pool := range account.Pools {
-		if eligibleCostPool(account, pool) {
-			keys = append(keys, poolIdentity(pool))
-		}
-	}
-	if len(keys) == 0 && (account.GroupDataAvailable || len(account.Pools) > 0) {
-		return fmt.Sprintf("account:%d", account.ID)
-	}
-	sort.Strings(keys)
-	return normalizePoolPart(account.Platform) + ":" + strings.Join(keys, "|")
 }
 
 func eligibleCostPool(account AccountMetrics, pool PoolMetrics) bool {
@@ -245,58 +212,4 @@ func baseCostForMix(snapshot *MetricSnapshot, inputShare float64) float64 {
 		cost += (1 - inputShare) * snapshot.BaseOutputCost * 1_000_000 / float64(snapshot.OutputTokens)
 	}
 	return cost
-}
-
-// Within a 5% cost band, retain the incumbent order to avoid cooling caches
-// for marginal savings. Ties at the same current priority remain ties.
-func rankEstimatedCosts(values []float64, valid []bool, accounts []AccountMetrics, estimates []costEstimate) []float64 {
-	components := make(map[string][]int)
-	for index := range values {
-		if valid[index] {
-			key := "direct:" + directCompetitionKey(accounts[index])
-			if estimates[index].Valid {
-				key = fmt.Sprintf("estimate:%d", estimates[index].Component)
-			}
-			components[key] = append(components[key], index)
-		}
-	}
-	result := make([]float64, len(values))
-	for index := range result {
-		result[index] = 50
-	}
-	for _, indexes := range components {
-		estimated := estimates[indexes[0]].Valid
-		sort.Slice(indexes, func(i, j int) bool { return values[indexes[i]] < values[indexes[j]] })
-		adjusted, included := make([]float64, len(indexes)), make([]bool, len(indexes))
-		for start := 0; start < len(indexes); {
-			end := start + 1
-			if estimated {
-				for end < len(indexes) && values[indexes[end]] <= values[indexes[start]]*(1+minimumCostAdvantage) {
-					end++
-				}
-				sort.Slice(indexes[start:end], func(i, j int) bool {
-					left, right := accounts[indexes[start+i]], accounts[indexes[start+j]]
-					if left.CurrentPriority != right.CurrentPriority {
-						return left.CurrentPriority < right.CurrentPriority
-					}
-					return left.ID < right.ID
-				})
-			}
-			for position := start; position < end; position++ {
-				adjusted[position], included[position] = values[indexes[position]], true
-				if estimated {
-					adjusted[position] = float64(position + 1)
-					if position > start && accounts[indexes[position]].CurrentPriority == accounts[indexes[position-1]].CurrentPriority {
-						adjusted[position] = adjusted[position-1]
-					}
-				}
-			}
-			start = end
-		}
-		scores := rankLowerBetter(adjusted, included)
-		for position, index := range indexes {
-			result[index] = scores[position]
-		}
-	}
-	return result
 }
