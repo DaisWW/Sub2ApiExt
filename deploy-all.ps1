@@ -118,6 +118,7 @@ $bootstrapPath = Join-Path $PSScriptRoot 'deploy\windows\Bootstrap.ps1'
 $rateSyncPath = Join-Path $PSScriptRoot 'rate-sync\deploy.ps1'
 $prioritySyncPath = Join-Path $PSScriptRoot 'priority-sync\deploy.ps1'
 $monitoringPath = Join-Path $PSScriptRoot 'monitoring\deploy.ps1'
+$accountEvalPath = Join-Path $PSScriptRoot 'account-eval\deploy.ps1'
 
 try {
     Write-Host 'Deploying Sub2API, PostgreSQL, Redis, and extensions...' -ForegroundColor Cyan
@@ -135,6 +136,10 @@ try {
     Write-Host 'Deploying monitoring extension...' -ForegroundColor Cyan
     Write-DeploymentTrace 'Starting monitoring deployment.'
     Invoke-DeploymentChild -ScriptPath $monitoringPath
+
+    Write-Host 'Deploying account evaluation extension...' -ForegroundColor Cyan
+    Write-DeploymentTrace 'Starting account evaluation deployment.'
+    Invoke-DeploymentChild -ScriptPath $accountEvalPath
 
     try {
         Write-Host 'Cleaning unused Docker images and build cache...' -ForegroundColor Cyan

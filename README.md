@@ -1,14 +1,15 @@
 # Sub2ApiExt
 
-Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`priority-sync`、`monitoring` 以及 Windows 综合一键部署入口；主 Sub2API 仍使用官方 Docker 镜像部署，本仓库不包含也不修改其上游源码。
+Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`priority-sync`、`monitoring`、`account-eval` 以及 Windows 综合一键部署入口；主 Sub2API 仍使用官方 Docker 镜像部署，本仓库不包含也不修改其上游源码。
 
 ## 服务
 
 - `rate-sync`：同步账号倍率，并根据成功请求维护快慢成本记忆、动态调整分组倍率。
 - `priority-sync`：直接读取原始账号、用量和错误数据，按成本、速度、可用性计算账号路由优先级；默认每 10 分钟通过 Admin API 自动写回，低样本账号按轮换策略获得有限探索机会。
 - `monitoring`：以真实请求和恢复探测判断账户状态，再按当前可路由账户聚合分组状态；仅在渠道报错后低频恢复探测，提供健康、延迟、历史、实时并发与 Tokens 用量面板。
+- [account-eval](account-eval/README.md)：管理员保存自定义题组，按平台/分组选择账户并行测试，对比 HTML/文本回答；独立保存题库、批次和完整结果，支持取消、失败项重试及 SVG 图标上传。
 
-三个扩展在编译时不依赖 Sub2API Go 源码。综合入口会先部署或升级主 Sub2API（含 PostgreSQL、Redis），再部署扩展；扩展运行时连接主服务的 Docker 网络、PostgreSQL 和 Admin API。升级主服务后仍需验证数据库结构及 API 兼容性。
+四个扩展在编译时不依赖 Sub2API Go 源码。综合入口会先部署或升级主 Sub2API（含 PostgreSQL、Redis），再部署扩展；扩展运行时连接主服务的 Docker 网络、PostgreSQL 和 Admin API。升级主服务后仍需验证数据库结构及 API 兼容性。
 
 ## 一键部署
 
@@ -27,7 +28,7 @@ Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`priority-sy
 一键部署.bat
 ```
 
-`deploy-all.bat` 是功能相同的英文文件名入口。首次运行会部署 Sub2API、PostgreSQL、Redis；已有部署再次运行时，会显示当前/目标版本，检测到新版本后询问 `y/N`，确认后先备份再升级主服务；未升级时会自动启动或修复当前主栈。随后每次都会从当前 Git 工程重新构建并更新三个扩展容器。
+`deploy-all.bat` 是功能相同的英文文件名入口。首次运行会部署 Sub2API、PostgreSQL、Redis；已有部署再次运行时，会显示当前/目标版本，检测到新版本后询问 `y/N`，确认后先备份再升级主服务；未升级时会自动启动或修复当前主栈。随后每次都会从当前 Git 工程重新构建并更新四个扩展服务。
 
 全部部署成功后自动清理旧 Docker 镜像和构建缓存；独立清理入口和保留策略见 [Docker 清理工具](tools/docker-cleanup/README.md)。
 
@@ -37,6 +38,7 @@ Sub2API 的综合部署扩展工程。本仓库包含 `rate-sync`、`priority-sy
 rate-sync\deploy.bat
 priority-sync\deploy.bat
 monitoring\deploy.bat
+account-eval\deploy.bat
 ```
 
 主服务运行文件、备份、日志及扩展运行文件会安装到：
@@ -49,7 +51,8 @@ C:\ProgramData\Sub2API\
 └── extensions\
     ├── rate-sync\
     ├── priority-sync\
-    └── monitoring\
+    ├── monitoring\
+    └── account-eval\
 ```
 
 部署完成后，主服务和扩展的 Docker Compose 工作目录、配置、状态卷和密钥都位于 `C:\ProgramData\Sub2API`，运行时不依赖旧工程目录；重新构建扩展新版本时仍需要本仓库源码。
@@ -59,6 +62,8 @@ C:\ProgramData\Sub2API\
 主服务升级只替换 `sub2api` 应用镜像，不自动升级 PostgreSQL 或 Redis；升级失败会恢复升级前备份。单独运行各扩展目录下的 `deploy.bat` 仍只更新对应扩展，并要求主服务和 PostgreSQL 已经运行。
 
 如果检测到原工作目录部署的 `sub2api-monitoring-standalone`，安装器会先等待新监控容器健康，再移除旧容器，避免两个 Worker 并行探测。
+
+账户测评通过主站现有网关的 `/account-eval/` 路径接入，复用主站登录、域名和 HTTPS，不额外开放端口。安装器通过 Admin API 合并“仅管理员可见”的额外入口，并内置 SVG 图标；题库和结果使用独立持久化数据卷，重复部署保留配置及数据。已有管理员密码变化、验证码或 2FA 导致自动注册不可用时，脚本会明确报告菜单未完成；登录主站后打开该路径即可手动安装入口。详细协议支持和部署契约见 [账户测评说明](account-eval/README.md)。
 
 监控面板默认监听 `0.0.0.0:18090`，部署完成后可从同一局域网通过主机名或 IP 访问。部署脚本会校验或创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则，无法安全配置时会停止部署；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再重新运行部署脚本。
 
@@ -102,6 +107,7 @@ Git 只保存配置模板：
 - `rate-sync/account-config.example.json`
 - `monitoring/settings.env.example`
 - `priority-sync/settings.env.example`
+- `account-eval/settings.env.example`
 
 真实数据库密码由部署脚本从现有 PostgreSQL 容器读取，并写入 ProgramData 下受限权限的运行文件，不会写入本仓库。
 
@@ -118,6 +124,10 @@ go test ./...
 
 Set-Location ..\priority-sync
 go test ./...
+
+Set-Location ..\account-eval
+go test ./...
+node --check web/app.js
 ```
 
 ## License

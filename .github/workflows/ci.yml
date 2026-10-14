@@ -15,6 +15,8 @@ jobs:
         service:
           - rate-sync
           - monitoring
+          - account-eval
+          - deploy/windows/policy-gateway
     defaults:
       run:
         working-directory: ${{ matrix.service }}
@@ -23,14 +25,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.23.x"
+          cache: ${{ matrix.service != 'deploy/windows/policy-gateway' }}
           cache-dependency-path: ${{ matrix.service }}/go.sum
       - uses: actions/setup-node@v4
-        if: matrix.service == 'monitoring'
+        if: matrix.service == 'monitoring' || matrix.service == 'account-eval'
         with:
           node-version: "22"
       - name: Test monitoring dashboard
         if: matrix.service == 'monitoring'
         run: node --test internal/web/dashboard_test.mjs
+      - name: Check account evaluation frontend
+        if: matrix.service == 'account-eval'
+        run: node --check web/app.js
       - name: Test monitoring request SQL
         if: matrix.service == 'monitoring'
         env:
@@ -45,6 +51,9 @@ jobs:
           done
           go test ./internal/store -run TestDashboardRequestWindowsPostgres -count=1
       - run: go test ./...
+      - name: Test account evaluation scheduling for races
+        if: matrix.service == 'account-eval'
+        run: go test -race ./...
 
   powershell-parse:
     runs-on: windows-latest
@@ -68,3 +77,6 @@ jobs:
             }
           }
           if ($failed) { exit 1 }
+      - name: Test account evaluation deployment discovery
+        shell: pwsh
+        run: ./account-eval/deploy_test.ps1
