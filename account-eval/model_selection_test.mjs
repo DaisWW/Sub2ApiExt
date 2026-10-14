@@ -27,3 +27,27 @@ for (const [name, models, expected] of [
 ]) {
   test(name, () => assert.equal(selection().latestTextModel(models), expected));
 }
+
+for (const [name, selected, channel, account] of [
+  ['initial catalog spans all groups', [], ['gpt-6.1-sol', 'gpt-8'], ['account-alias', 'gpt-4.1', 'unlinked-alias']],
+  ['ungrouped selection uses its own models', [1], [], ['gpt-4.1']],
+  ['grouped selection excludes unrelated channels', [2], ['gpt-6.1-sol'], ['account-alias']],
+  ['missing group uses account models', [3], [], ['unlinked-alias']],
+  ['mixed selection merges only relevant models', [1, 2], ['gpt-6.1-sol'], ['account-alias', 'gpt-4.1']]
+]) {
+  test(name, () => {
+    const context = selection({
+      accounts: [
+        { id: 1, platform: 'openai', group_ids: [], models: ['gpt-4.1'] },
+        { id: 2, platform: 'openai', group_ids: [7], models: ['gpt-6.1-sol', 'account-alias'] },
+        { id: 3, platform: 'openai', group_ids: [99], models: ['unlinked-alias'] },
+        { id: 4, platform: 'anthropic', group_ids: [8], models: ['claude-sonnet'] }
+      ],
+      groups: [{ id: 7, models: { openai: ['gpt-6.1-sol'] } }, { id: 8, models: { openai: ['gpt-8'], anthropic: ['claude-sonnet'] } }],
+      selected: new Set(selected)
+    });
+    const options = context.modelOptions('openai');
+    assert.deepEqual(Array.from(options.channel), channel);
+    assert.deepEqual(Array.from(options.account), account);
+  });
+}

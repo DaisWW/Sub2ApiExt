@@ -85,7 +85,7 @@ function settingsFromForm() { return { models: { ...savedSettings.models }, prot
 function selectedAccounts() { return state.accounts.filter((a) => state.selected.has(a.id)); }
 function modelOptions(platform) {
   const accounts = selectedAccounts().filter((a) => a.platform === platform), groupIDs = new Set(accounts.flatMap((a) => a.group_ids));
-  let groups = state.groups.filter((g) => groupIDs.has(g.id)); if (!groups.length) groups = state.groups;
+  const groups = accounts.length ? state.groups.filter((g) => groupIDs.has(g.id)) : state.groups;
   const channel = new Set(groups.flatMap((g) => g.models?.[platform] || [])), account = new Set(accounts.flatMap((a) => a.models || []));
   if (!accounts.length) for (const a of state.accounts.filter((a) => a.platform === platform)) for (const model of a.models || []) account.add(model);
   return { channel: [...channel].sort(), account: [...account].filter((id) => !channel.has(id)).sort() };

@@ -19,7 +19,7 @@ func (browserSource) catalog(context.Context) ([]Account, []Group, error) {
 		{ID: 2, Name: "OpenAI Beta", Platform: "openai", Type: "api_key", Status: "active", GroupIDs: []int64{1}, ModelMetadata: map[string]ModelMetadata{"gpt-6.1-sol": {SupportedReasoningLevels: []string{"high"}}}},
 		{ID: 3, Name: "Claude Gamma", Platform: "anthropic", Type: "apikey", Status: "active", Schedulable: true, GroupIDs: []int64{2}},
 		{ID: 4, Name: "OpenAI Delta", Platform: "openai", Type: "oauth", Status: "active", Schedulable: true, RateLimitResetAt: &until, PrivacyMode: "training_off", GroupIDs: []int64{1}},
-		{ID: 5, Name: "OpenAI Epsilon", Platform: "openai", Type: "oauth", Status: "active", Schedulable: true, RateLimitResetAt: &until, TempUnschedulableUntil: &until, PrivacyMode: "training_set_cf_blocked", GroupIDs: []int64{}},
+		{ID: 5, Name: "OpenAI Epsilon", Platform: "openai", Type: "oauth", Status: "active", Schedulable: true, RateLimitResetAt: &until, TempUnschedulableUntil: &until, PrivacyMode: "training_set_cf_blocked", GroupIDs: []int64{}, Models: []string{"gpt-6-sol"}},
 		{ID: 6, Name: "Claude Zeta", Platform: "anthropic", Type: "setup-token", Status: "inactive", Schedulable: true, PrivacyMode: "training_set_failed", GroupIDs: []int64{}},
 		{ID: 7, Name: "Bedrock Eta", Platform: "anthropic", Type: "bedrock", Status: "error", Schedulable: true, GroupIDs: []int64{2}, Unsupported: "暂不支持此账户协议"},
 	}, []Group{{ID: 1, Name: "逻辑测试组", Models: map[string][]string{"openai": {"gpt-6.1-sol", "gpt-6-sol"}}}, {ID: 2, Name: "创作测试组", Models: map[string][]string{"anthropic": {"claude-sonnet"}, "openai": {"gpt-6.1-sol"}}}}, nil
