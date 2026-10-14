@@ -10,6 +10,7 @@ const typeLabels = { oauth: 'OAuth', 'setup-token': 'Setup Token', apikey: 'API 
 const statusLabels = { active: '正常', inactive: '停用', error: '错误', rate_limited: '限流中', temp_unschedulable: '临时不可调度', unschedulable: '已停调' };
 const accountFilterIDs = ['platform-filter', 'type-filter', 'status-filter', 'privacy-filter', 'group-filter', 'account-search'];
 let savedSettings = {}; try { savedSettings = JSON.parse(localStorage.getItem('account_eval_settings') || '{}'); } catch {}
+const manualModels = new Set();
 let noticeTimer;
 function notice(message, error = false) { $('#notice').textContent = message; $('#notice').className = error ? 'error' : ''; $('#notice').hidden = false; clearTimeout(noticeTimer); noticeTimer = setTimeout(() => { $('#notice').hidden = true; }, error ? 15000 : 5000); }
 async function api(path, options = {}) {
@@ -89,21 +90,29 @@ function modelOptions(platform) {
   if (!accounts.length) for (const a of state.accounts.filter((a) => a.platform === platform)) for (const model of a.models || []) account.add(model);
   return { channel: [...channel].sort(), account: [...account].filter((id) => !channel.has(id)).sort() };
 }
+function latestTextModel(models) {
+  const version = (id) => (id.replace(/[-_](?:\d{8}|\d{4}-\d{2}-\d{2})(?=$|[-_])/g, '').match(/\d+(?:[.-]\d+)*/)?.[0] || '').split(/[.-]/).map(Number);
+  return models.filter((id) => !/(^|[-_/.])(image|audio|realtime|tts|whisper|dall[-_]?e|embeddings?|moderation|video)($|[-_/.])/i.test(id)).sort((a, b) => {
+    const av = version(a), bv = version(b);
+    for (let i = 0; i < Math.max(av.length, bv.length); i++) { const diff = (bv[i] || 0) - (av[i] || 0); if (diff) return diff; }
+    return b.localeCompare(a, undefined, { numeric: true });
+  })[0] || '';
+}
 function renderModels() {
   const platforms = [...new Set(selectedAccounts().map((a) => a.platform))]; if (!platforms.length) platforms.push('openai');
   const container = $('#model-settings'); container.replaceChildren(); savedSettings.models ||= {}; savedSettings.protocols ||= {};
   $('#protocol-settings').replaceChildren();
   for (const platform of platforms) {
     const box = el('div', { class: 'model-field' }), label = el('label', {}, `${platformLabels[platform] || platform} 模型`), select = el('select', { 'data-model-platform': platform });
-    const options = modelOptions(platform), all = [...options.channel, ...options.account], saved = savedSettings.models[platform] || '';
+    const options = modelOptions(platform), all = [...options.channel, ...options.account], saved = savedSettings.models[platform] || '', model = manualModels.has(platform) ? saved : latestTextModel(options.channel) || latestTextModel(options.account) || saved;
     for (const [kind, ids] of [['渠道配置', options.channel], ['账户配置', options.account]]) { if (!ids.length) continue; const group = el('optgroup', { label: kind }); for (const id of ids) group.append(el('option', { value: id }, id)); select.append(group); }
-    if (saved && !all.includes(saved)) select.append(el('option', { value: saved }, `${saved}（已保存）`));
+    if (model && !all.includes(model)) select.append(el('option', { value: model }, `${model}（已保存）`));
     if (!select.options.length) select.append(el('option', { value: '' }, '暂无模型目录，请自定义'));
-    select.append(el('option', { value: '__custom__' }, '自定义模型…')); select.value = saved || all[0] || ''; savedSettings.models[platform] = select.value;
+    select.append(el('option', { value: '__custom__' }, '自定义模型…')); select.value = model; savedSettings.models[platform] = select.value;
     const custom = el('input', { placeholder: '输入账户实际支持的模型', 'aria-label': `${platformLabels[platform] || platform} 自定义模型`, hidden: '' });
-    select.onchange = () => { custom.hidden = select.value !== '__custom__'; savedSettings.models[platform] = custom.hidden ? select.value : custom.value.trim(); if (!custom.hidden) custom.focus(); renderReasoning(); };
-    custom.oninput = () => { savedSettings.models[platform] = custom.value.trim(); renderReasoning(); };
-    label.append(select); box.append(label, custom, el('p', { class: 'hint model-hint' }, all.length ? `读取主站渠道与账户配置 · ${all.length} 个候选模型` : '主站尚未配置模型目录，可填写自定义模型。')); container.append(box);
+    select.onchange = () => { manualModels.add(platform); custom.hidden = select.value !== '__custom__'; savedSettings.models[platform] = custom.hidden ? select.value : custom.value.trim(); if (!custom.hidden) custom.focus(); renderReasoning(); };
+    custom.oninput = () => { manualModels.add(platform); savedSettings.models[platform] = custom.value.trim(); renderReasoning(); };
+    label.append(select); box.append(label, custom, el('p', { class: 'hint model-hint' }, all.length ? `读取主站渠道与账户配置 · ${all.length} 个候选模型 · 默认选最新文本模型` : '主站尚未配置模型目录，可填写自定义模型。')); container.append(box);
     if (['openai', 'openai_compatible', 'grok', 'xai'].includes(platform)) { const label = el('label', {}, `${platformLabels[platform] || platform} API Key 协议`), select = el('select'); for (const [value, text] of [['auto', '自动'], ['responses', 'Responses'], ['chat', 'Chat Completions']]) select.append(el('option', { value }, text)); select.value = savedSettings.protocols[platform] || 'auto'; select.onchange = () => { savedSettings.protocols[platform] = select.value; }; label.append(select); $('#protocol-settings').append(label); }
   }
   renderReasoning();
