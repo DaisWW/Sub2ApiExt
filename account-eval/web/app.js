@@ -10,7 +10,7 @@ const typeLabels = { oauth: 'OAuth', 'setup-token': 'Setup Token', apikey: 'API 
 const statusLabels = { active: '正常', inactive: '停用', error: '错误', rate_limited: '限流中', temp_unschedulable: '临时不可调度', unschedulable: '已停调' };
 const accountFilterIDs = ['platform-filter', 'type-filter', 'status-filter', 'privacy-filter', 'group-filter', 'account-search'];
 let savedSettings = {}; try { savedSettings = JSON.parse(localStorage.getItem('account_eval_settings') || '{}'); } catch {}
-const manualModels = new Set();
+const manualModels = new Map();
 let noticeTimer;
 function notice(message, error = false) { $('#notice').textContent = message; $('#notice').className = error ? 'error' : ''; $('#notice').hidden = false; clearTimeout(noticeTimer); noticeTimer = setTimeout(() => { $('#notice').hidden = true; }, error ? 15000 : 5000); }
 async function api(path, options = {}) {
@@ -104,14 +104,15 @@ function renderModels() {
   $('#protocol-settings').replaceChildren();
   for (const platform of platforms) {
     const box = el('div', { class: 'model-field' }), label = el('label', {}, `${platformLabels[platform] || platform} 模型`), select = el('select', { 'data-model-platform': platform });
-    const options = modelOptions(platform), all = [...options.channel, ...options.account], saved = savedSettings.models[platform] || '', model = manualModels.has(platform) ? saved : latestTextModel(options.channel) || latestTextModel(options.account) || saved;
+    const options = modelOptions(platform), all = [...options.channel, ...options.account], saved = savedSettings.models[platform] || '', model = manualModels.has(platform) ? saved : latestTextModel(options.channel) || latestTextModel(options.account) || saved, customMode = manualModels.get(platform) === '__custom__';
     for (const [kind, ids] of [['渠道配置', options.channel], ['账户配置', options.account]]) { if (!ids.length) continue; const group = el('optgroup', { label: kind }); for (const id of ids) group.append(el('option', { value: id }, id)); select.append(group); }
-    if (model && !all.includes(model)) select.append(el('option', { value: model }, `${model}（已保存）`));
-    if (!select.options.length) select.append(el('option', { value: '' }, '暂无模型目录，请自定义'));
-    select.append(el('option', { value: '__custom__' }, '自定义模型…')); select.value = model; savedSettings.models[platform] = select.value;
+    if (model && !all.includes(model) && !customMode) select.append(el('option', { value: model }, `${model}（已保存）`));
+    if (!model) select.append(el('option', { value: '' }, all.length ? '暂无文本模型，请选择或自定义' : '暂无模型目录，请自定义'));
+    select.append(el('option', { value: '__custom__' }, '自定义模型…')); select.value = customMode ? '__custom__' : model; savedSettings.models[platform] = model;
     const custom = el('input', { placeholder: '输入账户实际支持的模型', 'aria-label': `${platformLabels[platform] || platform} 自定义模型`, hidden: '' });
-    select.onchange = () => { manualModels.add(platform); custom.hidden = select.value !== '__custom__'; savedSettings.models[platform] = custom.hidden ? select.value : custom.value.trim(); if (!custom.hidden) custom.focus(); renderReasoning(); };
-    custom.oninput = () => { manualModels.add(platform); savedSettings.models[platform] = custom.value.trim(); renderReasoning(); };
+    custom.hidden = !customMode; custom.value = customMode ? model : '';
+    select.onchange = () => { manualModels.set(platform, select.value); custom.hidden = select.value !== '__custom__'; savedSettings.models[platform] = custom.hidden ? select.value : custom.value.trim(); if (!custom.hidden) custom.focus(); renderReasoning(); };
+    custom.oninput = () => { savedSettings.models[platform] = custom.value.trim(); renderReasoning(); };
     label.append(select); box.append(label, custom, el('p', { class: 'hint model-hint' }, all.length ? `读取主站渠道与账户配置 · ${all.length} 个候选模型 · 默认选最新文本模型` : '主站尚未配置模型目录，可填写自定义模型。')); container.append(box);
     if (['openai', 'openai_compatible', 'grok', 'xai'].includes(platform)) { const label = el('label', {}, `${platformLabels[platform] || platform} API Key 协议`), select = el('select'); for (const [value, text] of [['auto', '自动'], ['responses', 'Responses'], ['chat', 'Chat Completions']]) select.append(el('option', { value }, text)); select.value = savedSettings.protocols[platform] || 'auto'; select.onchange = () => { savedSettings.protocols[platform] = select.value; }; label.append(select); $('#protocol-settings').append(label); }
   }
