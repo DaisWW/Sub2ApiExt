@@ -21,22 +21,30 @@ type Suite struct {
 }
 
 type Account struct {
-	ID                     int64      `json:"id"`
-	Name                   string     `json:"name"`
-	Platform               string     `json:"platform"`
-	Type                   string     `json:"type"`
-	Status                 string     `json:"status"`
-	GroupIDs               []int64    `json:"group_ids"`
-	Unsupported            string     `json:"unsupported,omitempty"`
-	Schedulable            bool       `json:"schedulable"`
-	RateLimitResetAt       *time.Time `json:"rate_limit_reset_at,omitempty"`
-	TempUnschedulableUntil *time.Time `json:"temp_unschedulable_until,omitempty"`
-	PrivacyMode            string     `json:"privacy_mode"`
+	ID                     int64                    `json:"id"`
+	Name                   string                   `json:"name"`
+	Platform               string                   `json:"platform"`
+	Type                   string                   `json:"type"`
+	Status                 string                   `json:"status"`
+	GroupIDs               []int64                  `json:"group_ids"`
+	Unsupported            string                   `json:"unsupported,omitempty"`
+	Schedulable            bool                     `json:"schedulable"`
+	RateLimitResetAt       *time.Time               `json:"rate_limit_reset_at,omitempty"`
+	TempUnschedulableUntil *time.Time               `json:"temp_unschedulable_until,omitempty"`
+	PrivacyMode            string                   `json:"privacy_mode"`
+	Models                 []string                 `json:"models,omitempty"`
+	ModelMetadata          map[string]ModelMetadata `json:"model_metadata,omitempty"`
+}
+
+type ModelMetadata struct {
+	Reasoning                *bool    `json:"reasoning,omitempty"`
+	SupportedReasoningLevels []string `json:"supported_reasoning_levels,omitempty"`
 }
 
 type Group struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
+	ID     int64               `json:"id"`
+	Name   string              `json:"name"`
+	Models map[string][]string `json:"models,omitempty"`
 }
 
 // Secrets only exist while making an upstream request; they cannot be serialized.
@@ -126,6 +134,24 @@ func (s Settings) validate(accounts []Account) error {
 		p := s.Protocols[a.Platform]
 		if p != "" && p != "auto" && p != "responses" && p != "chat" {
 			return fmt.Errorf("%s 的请求协议无效", a.Platform)
+		}
+		if s.Reasoning != "" && (a.Platform == "openai" || a.Platform == "openai_compatible") {
+			info := a.ModelMetadata[strings.TrimSpace(s.Models[a.Platform])]
+			if info.Reasoning != nil && !*info.Reasoning {
+				return fmt.Errorf("账户 #%d 的模型不支持推理强度，请使用模型默认", a.ID)
+			}
+			if len(info.SupportedReasoningLevels) > 0 {
+				supported := false
+				for _, level := range info.SupportedReasoningLevels {
+					if level == s.Reasoning {
+						supported = true
+						break
+					}
+				}
+				if !supported {
+					return fmt.Errorf("账户 #%d 的模型不支持推理强度 %s", a.ID, s.Reasoning)
+				}
+			}
 		}
 	}
 	return nil

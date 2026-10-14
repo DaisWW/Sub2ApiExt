@@ -144,7 +144,7 @@ func buildRequest(ctx context.Context, a CredentialAccount, s Settings, prompt s
 					payload["max_tokens"] = s.MaxTokens
 				}
 			}
-			if s.Reasoning != "" {
+			if s.Reasoning != "" && (a.Platform == "openai" || a.Platform == "openai_compatible") {
 				payload["reasoning_effort"] = s.Reasoning
 			}
 		} else {
@@ -153,7 +153,7 @@ func buildRequest(ctx context.Context, a CredentialAccount, s Settings, prompt s
 			if s.MaxTokens > 0 {
 				payload["max_output_tokens"] = s.MaxTokens
 			}
-			if s.Reasoning != "" {
+			if s.Reasoning != "" && (a.Platform == "openai" || a.Platform == "openai_compatible") {
 				payload["reasoning"] = map[string]string{"effort": s.Reasoning}
 			}
 			if oauth {
