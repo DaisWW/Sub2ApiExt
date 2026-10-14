@@ -42,6 +42,7 @@ type requestModel struct {
 
 type policyHandler struct {
 	proxy        *httputil.ReverseProxy
+	evalProxy    *httputil.ReverseProxy
 	rules        []compiledRule
 	maxBodyBytes int64
 }
@@ -83,8 +84,18 @@ func main() {
 		log.Printf("upstream proxy failed: %T", err)
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 	}
+	evalTarget, err := url.Parse(envOrDefault("POLICY_EVAL_UPSTREAM", "http://sub2api-account-eval:8091"))
+	if err != nil || (evalTarget.Scheme != "http" && evalTarget.Scheme != "https") || evalTarget.Host == "" || evalTarget.User != nil {
+		log.Fatal("invalid POLICY_EVAL_UPSTREAM")
+	}
+	evalProxy := httputil.NewSingleHostReverseProxy(evalTarget)
+	evalProxy.Transport = transport
+	evalProxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+		http.Error(w, "account evaluation service unavailable", http.StatusBadGateway)
+	}
 	handler := &policyHandler{
 		proxy:        proxy,
+		evalProxy:    evalProxy,
 		rules:        rules,
 		maxBodyBytes: maxBodyBytes,
 	}
@@ -115,6 +126,13 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func envOrDefault(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func loadConfig() config {
@@ -185,6 +203,14 @@ func compilePatterns(name string, values []string) []*regexp.Regexp {
 func (h *policyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/health" {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.URL.Path == "/account-eval" || strings.HasPrefix(r.URL.Path, "/account-eval/") {
+		if h.evalProxy == nil {
+			http.Error(w, "account evaluation service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		h.evalProxy.ServeHTTP(w, r)
 		return
 	}
 	userAgent := r.Header.Get("User-Agent")
