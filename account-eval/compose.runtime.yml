@@ -1,0 +1,32 @@
+name: sub2api-account-eval
+
+services:
+  account-eval:
+    image: sub2api-ext-account-eval:local
+    container_name: sub2api-account-eval
+    restart: unless-stopped
+    env_file:
+      - path: database.runtime.env
+        required: true
+        format: raw
+      - path: settings.env
+        required: true
+        format: raw
+    volumes:
+      - eval-data:/data
+    networks:
+      - sub2api-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://127.0.0.1:8091/healthz"]
+      interval: 15s
+      timeout: 6s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  eval-data:
+
+networks:
+  sub2api-network:
+    external: true
+    name: ${SUB2API_NETWORK:?SUB2API_NETWORK is required}

@@ -24,6 +24,7 @@ dist/
 rate-sync/config.json
 rate-sync/account-config.json
 monitoring/settings.env
+account-eval/settings.env
 
 # Logs, state, and temporary files
 *.log

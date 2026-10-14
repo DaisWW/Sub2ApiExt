@@ -1,0 +1,6 @@
+settings.env
+.env
+*.runtime.env
+data/
+*.db*
+*.exe
