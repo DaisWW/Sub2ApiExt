@@ -60,6 +60,7 @@ Windows 新机器只需先安装并启动 Docker Desktop，然后运行根目录
 ```powershell
 go test ./...
 node --check web/app.js
+node --test model_selection_test.mjs
 # 指向独立测试 PostgreSQL，禁止使用生产连接
 $env:EVAL_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5432/account_eval_test?sslmode=disable'
 go test -run TestSourceReadOnlyCatalogAndProxy -v

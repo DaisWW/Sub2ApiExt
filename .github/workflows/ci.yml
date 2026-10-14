@@ -36,7 +36,9 @@ jobs:
         run: node --test internal/web/dashboard_test.mjs
       - name: Check account evaluation frontend
         if: matrix.service == 'account-eval'
-        run: node --check web/app.js
+        run: |
+          node --check web/app.js
+          node --test model_selection_test.mjs
       - name: Test monitoring request SQL
         if: matrix.service == 'monitoring'
         env:

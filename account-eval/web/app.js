@@ -91,7 +91,7 @@ function modelOptions(platform) {
   return { channel: [...channel].sort(), account: [...account].filter((id) => !channel.has(id)).sort() };
 }
 function latestTextModel(models) {
-  const version = (id) => (id.replace(/[-_](?:\d{8}|\d{4}-\d{2}-\d{2})(?=$|[-_])/g, '').match(/\d+(?:[.-]\d+)*/)?.[0] || '').split(/[.-]/).map(Number);
+  const version = (id) => (id.match(/\d+(?:\.\d+)*(?:-\d{1,2}(?=$|[-_.]))*/)?.[0] || '').split(/[.-]/).map(Number);
   return models.filter((id) => !/(^|[-_/.])(image|audio|realtime|tts|whisper|dall[-_]?e|embeddings?|moderation|video)($|[-_/.])/i.test(id)).sort((a, b) => {
     const av = version(a), bv = version(b);
     for (let i = 0; i < Math.max(av.length, bv.length); i++) { const diff = (bv[i] || 0) - (av[i] || 0); if (diff) return diff; }
