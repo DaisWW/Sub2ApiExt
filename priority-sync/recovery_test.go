@@ -102,7 +102,7 @@ func TestProgressiveRecoveryRetainsNoTrafficProgressAcrossRestart(t *testing.T) 
 		now = now.Add(recoveryDuration)
 	}
 	if <-updates != priorityUnavailable-recoveryRampStep {
-		t.Fatal("first recovery step exceeded the five-point limit")
+		t.Fatal("first recovery step exceeded the eight-point limit")
 	}
 }
 
@@ -116,7 +116,7 @@ func TestProgressiveRecoveryUsesFreshTimestampsRatherThanRollingCounts(t *testin
 	}{
 		{"old failure", timePtr(now.Add(-time.Minute)), nil, 670, 0, recoveryOutcomeNoResult},
 		{"isolated new failure", timePtr(now.Add(time.Minute)), nil, 670, 0, recoveryOutcomeNoResult},
-		{"three new failures", timePtr(now.Add(time.Minute)), nil, priorityUnavailable, 1, recoveryOutcomeUnreliable},
+		{"five new failures", timePtr(now.Add(time.Minute)), nil, priorityUnavailable, 1, recoveryOutcomeUnreliable},
 		{"old success", nil, timePtr(now.Add(-time.Minute)), 670, 0, recoveryOutcomeNoResult},
 		{"one new success", nil, timePtr(now.Add(time.Minute)), 670, 0, recoveryOutcomeNoResult},
 	}
@@ -128,8 +128,8 @@ func TestProgressiveRecoveryUsesFreshTimestampsRatherThanRollingCounts(t *testin
 			if test.lastFailure != nil {
 				accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 1, LastTerminalFailureAt: test.lastFailure}
 				if test.wantFailures > 0 {
-					accounts[0].Window30m.TerminalFailures, accounts[0].Window30m.TrailingTerminalFailures = 3, 3
-					accounts[0].Window30m.ThirdTerminalFailureAt = timePtr(now.Add(time.Second))
+					accounts[0].Window30m.TerminalFailures, accounts[0].Window30m.TrailingTerminalFailures = 5, 5
+					accounts[0].Window30m.FifthTerminalFailureAt = timePtr(now.Add(time.Second))
 				}
 			}
 			accounts[0].RecoveryWindow = accounts[0].Window30m
@@ -156,9 +156,9 @@ func TestRecoveryFailedRollbackKeepsLeaseAndDoesNotAdvanceOutcome(t *testing.T) 
 	now := nowForTest()
 	accounts := comparableRecoveryAccounts()
 	accounts[0].CurrentPriority, accounts[0].LastTerminalFailureAt = 670, timePtr(now.Add(time.Minute))
-	accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 3, TrailingTerminalFailures: 3, LastTerminalFailureAt: accounts[0].LastTerminalFailureAt}
+	accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 5, TrailingTerminalFailures: 5, LastTerminalFailureAt: accounts[0].LastTerminalFailureAt}
 	accounts[0].RecoveryWindow = accounts[0].Window30m
-	accounts[0].Window30m.ThirdTerminalFailureAt = timePtr(now.Add(time.Second))
+	accounts[0].Window30m.FifthTerminalFailureAt = timePtr(now.Add(time.Second))
 	runner, _ := progressiveRecoveryRunner(t, http.StatusBadGateway)
 	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: priorityUnavailable, Recovery: true,
 		RecoveryProgressive: true, RecoveryPriority: 670, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now)}
@@ -172,21 +172,110 @@ func TestRecoveryFailedRollbackKeepsLeaseAndDoesNotAdvanceOutcome(t *testing.T) 
 	}
 }
 
-func TestProgressiveRecoveryStopsOnThreeFailuresBeforeObservationExpires(t *testing.T) {
+func TestProgressiveRecoveryStopsOnFiveFailuresBeforeObservationExpires(t *testing.T) {
 	now := nowForTest()
 	accounts := comparableRecoveryAccounts()
-	accounts[0].CurrentPriority, accounts[0].LastTerminalFailureAt = 63, timePtr(now.Add(time.Minute))
-	accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 3, TrailingTerminalFailures: 3, LastTerminalFailureAt: accounts[0].LastTerminalFailureAt}
+	accounts[0].CurrentPriority = 63
+	accounts[0].Window30m = &MetricSnapshot{}
 	accounts[0].RecoveryWindow = accounts[0].Window30m
-	accounts[0].Window30m.ThirdTerminalFailureAt = timePtr(now.Add(time.Second))
-	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
 	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 90, Recovery: true,
 		RecoveryProgressive: true, RecoveryPriority: 63, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now)}
-	recommendations := scoreAccounts(accounts, now.Add(2*time.Minute), 5)
-	runner.prepareExploration(accounts, recommendations, now.Add(2*time.Minute))
+	for failures := int64(1); failures <= 5; failures++ {
+		at := now.Add(time.Duration(failures) * time.Minute)
+		snapshot := accounts[0].RecoveryWindow
+		snapshot.TerminalFailures, snapshot.TrailingTerminalFailures = failures, failures
+		snapshot.LastTerminalFailureAt = timePtr(at.Add(-time.Second))
+		if failures == 5 {
+			snapshot.FifthTerminalFailureAt = timePtr(now.Add(time.Second))
+		}
+		recommendations := scoreAccounts(accounts, at, 5)
+		runner.prepareExploration(accounts, recommendations, at)
+		candidate := testRecommendationByID(t, recommendations, 1)
+		if failures < 5 && (candidate.explorationEnd || candidate.reliabilityRollback || candidate.RecommendedPriority != 63) {
+			t.Fatalf("%d failures rolled back before the five-failure threshold: %+v", failures, candidate)
+		}
+		if failures == 5 && (!candidate.explorationEnd || !candidate.applyImmediately || candidate.RecommendedPriority != 90 || candidate.recoveryOutcome != recoveryOutcomeUnreliable) {
+			t.Fatalf("five new failures waited for the full observation lease: %+v", candidate)
+		}
+		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)
+		if failures < 5 && (runner.state.Exploration == nil || runner.state.Accounts[1].RecoveryFailures != 0 || len(updates) != 0) {
+			t.Fatalf("tolerated failures consumed recovery progress: %+v", runner.state)
+		}
+	}
+	if len(updates) != 1 || <-updates != 90 || runner.state.Exploration != nil || runner.state.Accounts[1].RecoveryFailures != 1 {
+		t.Fatalf("five failures did not roll back exactly once: %+v", runner.state)
+	}
+}
+
+func TestProgressiveRecoveryHighFailureRateWaitsAcrossRestart(t *testing.T) {
+	now := nowForTest()
+	accounts := comparableRecoveryAccounts()
+	accounts[0].CurrentPriority = 60
+	accounts[0].RecoveryWindow = &MetricSnapshot{SuccessfulRequests: 91, TerminalFailures: 9,
+		FifthTerminalFailureAt: timePtr(now.Add(time.Second)), LastTerminalFailureAt: timePtr(now.Add(time.Minute)),
+		LastPricedSuccessAt: timePtr(now.Add(29 * time.Minute))}
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.state.Accounts[1] = accountState{RecoveryOriginalPriority: 65, LastAppliedAt: timePtr(now), LastApplied: 60}
+	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 65, Recovery: true,
+		RecoveryProgressive: true, RecoveryPriority: 60, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now)}
+	for cycle := 0; cycle < 3; cycle++ {
+		at := now.Add(recoveryDuration + time.Duration(cycle)*defaultInterval)
+		recommendations := scoreAccounts(accounts, at, 5)
+		runner.prepareExploration(accounts, recommendations, at)
+		candidate := testRecommendationByID(t, recommendations, 1)
+		if cycle < 2 && (candidate.RecommendedPriority != 60 || candidate.explorationEnd || candidate.ReliabilityAction != "observe") {
+			t.Fatalf("expired recovery lease bypassed high-failure observation: %+v", candidate)
+		}
+		if cycle == 2 && (candidate.RecommendedPriority != 65 || !candidate.explorationEnd || candidate.recoveryOutcome != recoveryOutcomeUnreliable) {
+			t.Fatalf("persistent recovery errors did not roll back after observation: %+v", candidate)
+		}
+		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)
+		if cycle < 2 && (len(updates) != 0 || runner.state.Exploration == nil || runner.state.Accounts[1].RecoveryFailures != 0) {
+			t.Fatalf("observed errors consumed a recovery outcome: %+v", runner.state)
+		}
+		if err := saveState(runner.config.StateFile, runner.state); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := loadState(runner.config.StateFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runner.state = loaded
+	}
+	state := runner.state.Accounts[1]
+	if len(updates) != 1 || <-updates != 65 || runner.state.Exploration != nil || state.RecoveryFailures != 1 ||
+		state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(recoveryDuration+2*defaultInterval+30*time.Minute)) {
+		t.Fatalf("confirmed recovery rollback did not preserve its outcome: %+v", runner.state)
+	}
+}
+
+func TestProgressiveRecoveryHighFailureRateCanRecoverDuringObservation(t *testing.T) {
+	now := nowForTest()
+	accounts := comparableRecoveryAccounts()
+	accounts[0].CurrentPriority = 60
+	accounts[0].RecoveryWindow = &MetricSnapshot{SuccessfulRequests: 91, TerminalFailures: 9,
+		LastTerminalFailureAt: timePtr(now.Add(time.Minute)), LastPricedSuccessAt: timePtr(now.Add(29 * time.Minute))}
+	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 65, Recovery: true,
+		RecoveryProgressive: true, RecoveryPriority: 60, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now)}
+	at := now.Add(recoveryDuration)
+	recommendations := scoreAccounts(accounts, at, 5)
+	runner.prepareExploration(accounts, recommendations, at)
+	runner.applyRecommendations(context.Background(), []Recommendation{testRecommendationByID(t, recommendations, 1)}, "secret", at)
+	accounts[0].RecoveryWindow.SuccessfulRequests = 391
+	accounts[0].RecoveryWindow.LastPricedSuccessAt = timePtr(at.Add(defaultInterval - time.Minute))
+	at = at.Add(defaultInterval)
+	recommendations = scoreAccounts(accounts, at, 5)
+	runner.prepareExploration(accounts, recommendations, at)
 	candidate := testRecommendationByID(t, recommendations, 1)
-	if !candidate.explorationEnd || !candidate.applyImmediately || candidate.RecommendedPriority != 90 || candidate.recoveryOutcome != recoveryOutcomeUnreliable {
-		t.Fatalf("new failure waited for the full observation lease: %+v", candidate)
+	if candidate.RecommendedPriority != 52 || candidate.recoveryOutcome != recoveryOutcomeSuccess || candidate.reliabilityRollback {
+		t.Fatalf("healthier new traffic could not resume recovery during observation: %+v", candidate)
+	}
+	runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)
+	state := runner.state.Accounts[1]
+	if len(updates) != 1 || <-updates != 52 || state.RecoveryFailures != 0 || state.ReliabilityHighSince != nil || state.RecoveryRetryAt != nil {
+		t.Fatalf("transient failure rate left a penalty after healthy recovery: %+v", state)
 	}
 }
 
@@ -248,12 +337,12 @@ func TestProgressiveRecoveryRequiresFreshSamplesAndUsesFailureRateBoundaries(t *
 	}{
 		{"one new success", 1, 0, false, 60, recoveryOutcomeNoResult},
 		{"forty-nine requests", 49, 0, false, 60, recoveryOutcomeNoResult},
-		{"fifty healthy requests", 50, 0, false, 55, recoveryOutcomeSuccess},
-		{"isolated error below two percent", 99, 1, false, 55, recoveryOutcomeSuccess},
-		{"exactly two percent", 98, 2, false, 58, recoveryOutcomeProgress},
-		{"exactly five percent", 95, 5, false, 58, recoveryOutcomeProgress},
-		{"above five percent", 94, 6, false, 65, recoveryOutcomeUnreliable},
-		{"fifty requests above five percent", 47, 3, false, 65, recoveryOutcomeUnreliable},
+		{"fifty healthy requests", 50, 0, false, 52, recoveryOutcomeSuccess},
+		{"isolated error below three percent", 99, 1, false, 52, recoveryOutcomeSuccess},
+		{"exactly three percent", 97, 3, false, 56, recoveryOutcomeProgress},
+		{"exactly eight percent", 92, 8, false, 56, recoveryOutcomeProgress},
+		{"above eight percent waits for confirmation", 91, 9, false, 60, ""},
+		{"fifty requests above eight percent waits for confirmation", 45, 5, false, 60, ""},
 		{"no fresh priced success", 50, 0, true, 60, recoveryOutcomeNoResult},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -267,8 +356,8 @@ func TestProgressiveRecoveryRequiresFreshSamplesAndUsesFailureRateBoundaries(t *
 			if test.failures > 0 {
 				snapshot.LastTerminalFailureAt = timePtr(now.Add(time.Minute))
 			}
-			if test.failures >= 3 {
-				snapshot.ThirdTerminalFailureAt = timePtr(now.Add(time.Second))
+			if test.failures >= 5 {
+				snapshot.FifthTerminalFailureAt = timePtr(now.Add(time.Second))
 			}
 			accounts[0].RecoveryWindow = snapshot
 			runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
@@ -311,7 +400,7 @@ func TestRecoveryPromotionAPIFailureDoesNotConsumeSamples(t *testing.T) {
 		recommendations := scoreAccounts(accounts, at, 5)
 		runner.prepareExploration(accounts, recommendations, at)
 		candidate := testRecommendationByID(t, recommendations, 1)
-		if candidate.RecommendedPriority != 55 || candidate.recoveryOutcome != recoveryOutcomeSuccess {
+		if candidate.RecommendedPriority != 52 || candidate.recoveryOutcome != recoveryOutcomeSuccess {
 			t.Fatalf("failed promotion lost the same unconsumed evidence: %+v", candidate)
 		}
 		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)
@@ -356,7 +445,7 @@ func TestRunnerQueriesFreshRecoveryPeriodRatherThanRollingDeltas(t *testing.T) {
 			if err := runner.RunOnce(context.Background(), now); err != nil {
 				t.Fatal(err)
 			}
-			if source.window != min(duration, decisionWindow) || len(updates) != 1 || <-updates != 55 || runner.state.Exploration != nil {
+			if source.window != min(duration, decisionWindow) || len(updates) != 1 || <-updates != 52 || runner.state.Exploration != nil {
 				t.Fatalf("trial used rolling evidence or unbounded history: window=%s state=%+v", source.window, runner.state)
 			}
 			if runner.state.Accounts[1].RecoveryOriginalPriority != 60 {
@@ -420,7 +509,7 @@ func TestInsufficientRecoverySamplesAccumulateAtSamePriorityAcrossRestart(t *tes
 	if err := runner.RunOnce(context.Background(), now.Add(2*recoveryDuration+defaultInterval)); err != nil {
 		t.Fatal(err)
 	}
-	if source.window != 2*recoveryDuration+defaultInterval || len(updates) != 1 || <-updates != 55 || runner.state.Accounts[1].RecoveryOriginalPriority != 60 {
+	if source.window != 2*recoveryDuration+defaultInterval || len(updates) != 1 || <-updates != 52 || runner.state.Accounts[1].RecoveryOriginalPriority != 60 {
 		t.Fatalf("unconsumed trial samples were lost or reused for multiple steps: window=%s state=%+v", source.window, runner.state)
 	}
 }
@@ -437,7 +526,7 @@ func TestProgressiveRecoveryKeepsStepLimitBeforeCostMatures(t *testing.T) {
 		RecoveryProgressive: true, RecoveryPriority: 60, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now)}
 	recommendations := scoreAccounts(accounts, now.Add(recoveryDuration), 5)
 	runner.prepareExploration(accounts, recommendations, now.Add(recoveryDuration))
-	if got := recommendations[0]; got.CostEstimateSource != "" || got.RecommendedPriority != 55 ||
+	if got := recommendations[0]; got.CostEstimateSource != "" || got.RecommendedPriority != 52 ||
 		got.recoveryOutcome != recoveryOutcomeSuccess || got.recoveryCompleted {
 		t.Fatalf("short cost evidence bypassed or stopped the recovery step: %+v", got)
 	}
@@ -550,8 +639,8 @@ func TestLowEvidenceRecoveryStillHandlesFailureAfterLeaseEnds(t *testing.T) {
 		t.Fatalf("test did not reach the low-evidence reference position: %+v", runner.state)
 	}
 	accounts[0].LastTerminalFailureAt = timePtr(now.Add(time.Minute))
-	accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 3, TrailingTerminalFailures: 3, LastTerminalFailureAt: accounts[0].LastTerminalFailureAt}
-	accounts[0].Window30m.ThirdTerminalFailureAt = accounts[0].LastTerminalFailureAt
+	accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 5, TrailingTerminalFailures: 5, LastTerminalFailureAt: accounts[0].LastTerminalFailureAt}
+	accounts[0].Window30m.FifthTerminalFailureAt = accounts[0].LastTerminalFailureAt
 	now = now.Add(2 * time.Minute)
 	recommendations = scoreAccounts(accounts, now, 5)
 	runner.prepareExploration(accounts, recommendations, now)
@@ -602,8 +691,8 @@ func TestPostLeaseRecoveryFailedWriteDoesNotConsumeFailure(t *testing.T) {
 			accounts := comparableRecoveryAccounts()
 			accounts[0].CurrentPriority = priorityBest
 			accounts[0].LastTerminalFailureAt = timePtr(now.Add(-time.Minute))
-			accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 3, TrailingTerminalFailures: 3, LastTerminalFailureAt: accounts[0].LastTerminalFailureAt}
-			accounts[0].Window30m.ThirdTerminalFailureAt = accounts[0].LastTerminalFailureAt
+			accounts[0].Window30m = &MetricSnapshot{TerminalFailures: 5, TrailingTerminalFailures: 5, LastTerminalFailureAt: accounts[0].LastTerminalFailureAt}
+			accounts[0].Window30m.FifthTerminalFailureAt = accounts[0].LastTerminalFailureAt
 			runner, updates := progressiveRecoveryRunner(t, http.StatusBadGateway)
 			runner.config.DryRun = dryRun
 			runner.source = &fakeMetricsSource{accounts: accounts}
@@ -636,7 +725,7 @@ func TestMatureRecoveryWithModerateErrorsRollsBackToPreviousStepAfterLeaseEnds(t
 	account := AccountMetrics{ID: 1, Status: "active", CurrentPriority: 60, RateMultiplier: 0.1,
 		DecisionWindowsAvailable: true, Window2h: &MetricSnapshot{SuccessfulRequests: 50, PricedRequests: 50,
 			PricedTokens: 2_000_000, TotalTokens: 2_000_000, AccountCost: 2, ContinuousPricedRequests: 49},
-		RecoveryWindow: &MetricSnapshot{SuccessfulRequests: 49, TerminalFailures: 1, LastPricedSuccessAt: timePtr(now.Add(time.Minute))}}
+		RecoveryWindow: &MetricSnapshot{SuccessfulRequests: 48, TerminalFailures: 2, LastPricedSuccessAt: timePtr(now.Add(time.Minute))}}
 	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
 	runner.state.Accounts[1] = accountState{RecoveryOriginalPriority: 65, LastAppliedAt: timePtr(now), LastApplied: 60}
 	runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 65, Recovery: true,
@@ -645,10 +734,10 @@ func TestMatureRecoveryWithModerateErrorsRollsBackToPreviousStepAfterLeaseEnds(t
 	recommendations := scoreAccounts([]AccountMetrics{account}, at, 5)
 	runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
 	runner.applyRecommendations(context.Background(), recommendations, "secret", at)
-	if runner.state.Exploration != nil || len(updates) != 1 || <-updates != 58 {
+	if runner.state.Exploration != nil || len(updates) != 1 || <-updates != 56 {
 		t.Fatalf("test did not complete a slow recovery step: %+v", runner.state)
 	}
-	account.CurrentPriority = 58
+	account.CurrentPriority = 56
 	if err := saveState(runner.config.StateFile, runner.state); err != nil {
 		t.Fatal(err)
 	}
@@ -657,8 +746,8 @@ func TestMatureRecoveryWithModerateErrorsRollsBackToPreviousStepAfterLeaseEnds(t
 		t.Fatal(err)
 	}
 	runner.state = loaded
-	account.Window2h.TerminalFailures, account.Window2h.TrailingTerminalFailures = 3, 3
-	account.Window2h.ThirdTerminalFailureAt = timePtr(at.Add(time.Second))
+	account.Window2h.TerminalFailures, account.Window2h.TrailingTerminalFailures = 5, 5
+	account.Window2h.FifthTerminalFailureAt = timePtr(at.Add(time.Second))
 	account.Window2h.LastTerminalFailureAt = timePtr(at.Add(time.Minute))
 	at = at.Add(2 * time.Minute)
 	recommendations = scoreAccounts([]AccountMetrics{account}, at, 5)

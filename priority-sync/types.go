@@ -42,6 +42,7 @@ type AccountMetrics struct {
 	LastPricedSuccessAt      *time.Time
 	LastTerminalFailureAt    *time.Time
 	ThirdTerminalFailureAt   *time.Time
+	FifthTerminalFailureAt   *time.Time
 	RateLimitedRequests      int64
 	RecoveredRateLimited     int64
 	RecoveredRateLimitWeight float64
@@ -103,6 +104,7 @@ type MetricSnapshot struct {
 	LastPricedSuccessAt      *time.Time
 	LastTerminalFailureAt    *time.Time
 	ThirdTerminalFailureAt   *time.Time
+	FifthTerminalFailureAt   *time.Time
 	ContinuousPricedRequests int64
 	BaseCost                 float64
 	BaseOutputCost           float64

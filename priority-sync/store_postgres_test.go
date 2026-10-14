@@ -125,14 +125,14 @@ VALUES (10, 1, $1::timestamptz-INTERVAL '1 minute', 'platform-error', 'platform'
 		t.Fatal(err)
 	}
 	if got := attributed[0].Window2h; got.TerminalFailures != 3 || got.TrailingTerminalFailures != 3 ||
-		got.ThirdTerminalFailureAt == nil || !got.ThirdTerminalFailureAt.Equal(now.Add(-5*time.Minute)) {
+		got.ThirdTerminalFailureAt == nil || !got.ThirdTerminalFailureAt.Equal(now.Add(-5*time.Minute)) || got.FifthTerminalFailureAt != nil {
 		t.Fatalf("platform/client failures were charged to account or real provider failures lost: %+v", got)
 	}
 	trial, err := store.LoadAccountMetrics(ctx, now, 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if trial[0].TerminalFailures != 2 || trial[0].ThirdTerminalFailureAt != nil {
+	if trial[0].TerminalFailures != 2 || trial[0].ThirdTerminalFailureAt != nil || trial[0].FifthTerminalFailureAt != nil {
 		t.Fatalf("trial observation included errors from before its start: %+v", trial[0])
 	}
 	for _, query := range []string{`
@@ -160,6 +160,7 @@ VALUES (40, 1, $1::timestamptz-INTERVAL '2 minutes', 'provider-request-1', 'CLIE
 	}
 	got := delivery[0].Window2h
 	if got.SameAccountRecoveredRequests != 1 || got.FallbackRecoveredRequests != 2 || got.UnresolvedRequests != 4 || got.TerminalFailures != 6 ||
+		got.FifthTerminalFailureAt == nil || !got.FifthTerminalFailureAt.Equal(now.Add(-90*time.Second)) ||
 		math.Abs(got.FallbackCost-1.5) > 1e-9 || got.FallbackPricedTokens != 100000 || got.FallbackLatencyP90Ms != 700 {
 		t.Fatalf("retry/fallback outcomes, billed attempts or final priced-token denominator incorrect: %+v", got)
 	}
@@ -182,7 +183,8 @@ VALUES (40, 1, $1::timestamptz-INTERVAL '2 minutes', 'provider-request-1', 'CLIE
 	if got.SameAccountRecoveredRequests != 1 || got.FallbackRecoveredRequests != 2 || math.Abs(got.FallbackCost-1.5) > 1e-9 {
 		t.Fatalf("compat schema lost client request association: %+v", got)
 	}
-	if got.ThirdTerminalFailureAt == nil || !got.ThirdTerminalFailureAt.Equal(now.Add(-time.Minute)) {
+	if got.ThirdTerminalFailureAt == nil || !got.ThirdTerminalFailureAt.Equal(now.Add(-time.Minute)) ||
+		got.FifthTerminalFailureAt == nil || !got.FifthTerminalFailureAt.Equal(now.Add(-90*time.Second)) {
 		t.Fatalf("compat schema lost fresh failure timestamps: %+v", got)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE usage_logs SET output_cost = NULL WHERE id = 201`); err != nil {

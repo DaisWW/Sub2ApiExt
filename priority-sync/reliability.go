@@ -55,11 +55,15 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 		}
 	}
 	unhandled := evidence.lastFailure != nil && (rollbackBaseline == nil || evidence.lastFailure.After(*rollbackBaseline))
-	thirdFailure := latestStateTime(snapshot.ThirdTerminalFailureAt, account.ThirdTerminalFailureAt)
-	if !activeRecovery {
-		thirdFailure = latestStateTime(thirdFailure, thirdSnapshotFailure(account.Window30m), thirdSnapshotFailure(account.Window2h))
+	trailing := maxInt64(snapshot.TrailingTerminalFailures, 0)
+	if !activeRecovery && account.Window2h != nil {
+		trailing = maxInt64(trailing, account.Window2h.TrailingTerminalFailures)
 	}
-	newFailures := thirdFailure != nil && (rollbackBaseline == nil || thirdFailure.After(*rollbackBaseline))
+	thresholdFailure := latestStateTime(snapshot.FifthTerminalFailureAt, account.FifthTerminalFailureAt)
+	if !activeRecovery {
+		thresholdFailure = latestStateTime(thresholdFailure, fifthSnapshotFailure(account.Window30m), fifthSnapshotFailure(account.Window2h))
+	}
+	newFailures := thresholdFailure != nil && (rollbackBaseline == nil || thresholdFailure.After(*rollbackBaseline))
 	if samples >= recoveryMinimumSamples && evidence.failureRate > recoveryUnreliableFailureRate {
 		evidence.highSince = state.ReliabilityHighSince
 		if evidence.highSince == nil {
@@ -71,7 +75,7 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 			interval = defaultInterval
 		}
 		if unhandled && (state.LastReliabilityRollbackAt == nil || newFailures) &&
-			(now.Sub(*evidence.highSince) >= interval || (activeRecovery && explorationExpired(lease, now))) {
+			now.Sub(*evidence.highSince) >= time.Duration(recoveryUnreliableObservationCycles)*interval {
 			evidence.action = "rollback"
 		}
 	} else if samples >= recoveryMinimumSamples && evidence.failureRate >= recoveryHealthyFailureRate {
@@ -79,21 +83,17 @@ func (r *Runner) assessReliability(account AccountMetrics, now time.Time) reliab
 	} else if fresh && samples < recoveryMinimumSamples {
 		evidence.action = "pause"
 	}
-	trailing := maxInt64(snapshot.TrailingTerminalFailures, 0)
-	if !activeRecovery && account.Window2h != nil {
-		trailing = maxInt64(trailing, account.Window2h.TrailingTerminalFailures)
-	}
-	if trailing >= 3 && unhandled && (newFailures || rollbackBaseline == nil) {
+	if trailing >= recoveryUnreliableConsecutiveFailures && unhandled && (newFailures || rollbackBaseline == nil) {
 		evidence.action = "rollback"
 	}
 	return evidence
 }
 
-func thirdSnapshotFailure(snapshot *MetricSnapshot) *time.Time {
+func fifthSnapshotFailure(snapshot *MetricSnapshot) *time.Time {
 	if snapshot == nil {
 		return nil
 	}
-	return snapshot.ThirdTerminalFailureAt
+	return snapshot.FifthTerminalFailureAt
 }
 
 func reliabilityRollbackBaseline(state accountState) *time.Time {
@@ -166,7 +166,7 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 			recommendation.explorationStart = false
 			recommendation.explorationEnd = active
 			recommendation.recoveryOutcome = recoveryOutcomeUnreliable
-			recommendation.Reason = fmt.Sprintf("连续至少 3 次失败或 %s 足够样本下持续失败率 %.1f%%，退回一步到 %d 并观察", evidence.window, evidence.failureRate*100, target)
+			recommendation.Reason = fmt.Sprintf("连续至少 %d 次失败或 %s 足够样本下持续失败率 %.1f%%（至少观察 %d 个周期），退回一步到 %d 并观察", recoveryUnreliableConsecutiveFailures, evidence.window, evidence.failureRate*100, recoveryUnreliableObservationCycles, target)
 		case "pause", "observe":
 			recommendation.PromotionFrozen = true
 			recommendation.recoveryNeeded = false
@@ -180,16 +180,16 @@ func (r *Runner) prepareReliability(accounts []AccountMetrics, recommendations [
 			recommendation.Reason += "；新软错误或高失败率待确认，暂停提升并保留进度"
 		case "slow":
 			if recommendation.RecommendedPriority < recommendation.CurrentPriority {
-				step := recoveryRampStep
+				step := reliabilitySlowRampStep
 				if recommendation.Recovery {
-					step = 2
+					step = recoverySlowRampStep
 				}
 				if !recommendation.Recovery && recommendation.CurrentPriority > priorityPoor {
 					step = priorityRampStep
 				}
 				recommendation.RecommendedPriority = max(recommendation.RecommendedPriority, recommendation.CurrentPriority-step)
 			}
-			recommendation.Reason += "；失败率 2%～5%，减慢提升并观察兜底成本和延迟"
+			recommendation.Reason += "；失败率 3%～8%，减慢提升并观察兜底成本和延迟"
 		}
 		if state.RecoveryRetryAt != nil && now.Before(*state.RecoveryRetryAt) && recommendation.RecommendedPriority < recommendation.CurrentPriority {
 			recommendation.RecommendedPriority = recommendation.CurrentPriority

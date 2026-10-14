@@ -161,6 +161,8 @@ func (r *Runner) prepareStrategyState() {
 		state.CandidatePriority = 0
 		state.CandidateCount = 0
 		state.PromotionFrozenCycles = 0
+		// Restart high-failure observation under the new strategy thresholds.
+		state.ReliabilityHighSince = nil
 		r.state.Accounts[id] = state
 	}
 	r.state.Strategy = strategyVersion
@@ -499,10 +501,10 @@ func (r *Runner) prepareProgressiveRecovery(account AccountMetrics, recommendati
 	}
 	failureRate := float64(maxInt64(snapshot.TerminalFailures, 0)) / float64(samples)
 	if failureRate > recoveryUnreliableFailureRate {
-		recommendation.RecommendedPriority = max(recommendation.CurrentPriority, exploration.OriginalPriority)
-		recommendation.reliabilityRollback = true
-		recommendation.recoveryOutcome = recoveryOutcomeUnreliable
-		recommendation.Reason = fmt.Sprintf("本步新增请求失败率 %.1f%% 超过 5%%，退回上一步 %d", failureRate*100, recommendation.RecommendedPriority)
+		// Keep the trial lease while prepareReliability confirms persistence.
+		recommendation.explorationEnd = false
+		recommendation.ApplyStatus = "recovery-testing"
+		recommendation.Reason = fmt.Sprintf("本步新增请求失败率 %.1f%%，等待持续观察确认，保留恢复进度 %d", failureRate*100, recommendation.CurrentPriority)
 		return
 	}
 	if snapshot.LastPricedSuccessAt == nil || exploration.StartedAt == nil || !snapshot.LastPricedSuccessAt.After(*exploration.StartedAt) {
@@ -1025,7 +1027,7 @@ func recoveryRampPriority(current, target int, healthy bool) int {
 	}
 	step := recoveryRampStep
 	if !healthy {
-		step = 2
+		step = recoverySlowRampStep
 	}
 	return max(target, current-step)
 }
