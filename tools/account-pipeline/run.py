@@ -654,6 +654,53 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                     f"已匹配 {len(baseline_sub2api_ids)} 个工具维护的 Sub2API 账户，"
                     f"待导入或校验 {len(incremental_delta.added)} 个账户。"
                 )
+            else:
+                stage = "incremental-remote"
+                previous_current = {
+                    key: record for key, record in incremental_delta.current.items()
+                    if key in incremental_delta.previous
+                }
+                resolved_sub2api_ids = sub2api_module.resolve_account_ids(
+                    sub2api_config, previous_current.values(), require_managed=False,
+                    failed_accounts=account_failures,
+                    known_ids={
+                        key: incremental_delta.previous[key]["sub2api_id"]
+                        for key in previous_current
+                        if incremental_delta.previous[key].get("sub2api_id") is not None
+                    },
+                )
+                missing_keys = previous_current.keys() - resolved_sub2api_ids.keys() - account_failures.keys()
+                incremental_delta.current = {
+                    key: record for key, record in incremental_delta.current.items()
+                    if key not in account_failures
+                }
+                incremental_delta.added.extend(
+                    record for key, record in incremental_delta.current.items()
+                    if key in missing_keys
+                )
+                incremental_delta.refreshed = [
+                    record for record in incremental_delta.refreshed
+                    if incremental_module.account_key(record) in incremental_delta.current
+                    and incremental_module.account_key(record) not in missing_keys
+                ]
+                incremental_delta.configured = [
+                    record for record in incremental_delta.configured
+                    if incremental_module.account_key(record) in incremental_delta.current
+                    and incremental_module.account_key(record) not in missing_keys
+                ]
+                incremental_delta.unchanged = (
+                    len(incremental_delta.current) - len(incremental_delta.added)
+                    - len(incremental_delta.refreshed) - len(incremental_delta.configured)
+                )
+                for key in previous_current:
+                    if key in missing_keys:
+                        old_id = incremental_delta.previous[key].get("sub2api_id") or "-"
+                        print(f"[增量][远端缺失] {key}（原 ID {old_id}）；将重新导入账号。")
+                if missing_keys:
+                    # 先记重试，避免远端创建成功而 Cockpit 投递失败后被当成未变化。
+                    for key in missing_keys:
+                        incremental_state["accounts"][key]["retry"] = True
+                    incremental_module.write_state(incremental_state_file, incremental_state)
             unidentified_failure = any(not key.startswith(("email:", "id:")) for key in account_failures)
             failed_previous_keys = {
                 key for key, item in incremental_delta.previous.items()
@@ -863,7 +910,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                 set(incremental_delta.previous) & set(incremental_delta.current)
             ) - {
                 incremental_module.account_key(record)
-                for record in [*incremental_delta.refreshed, *incremental_delta.configured]
+                for record in [*incremental_delta.added, *incremental_delta.refreshed, *incremental_delta.configured]
             }
             managed_current_keys.update(summary_ids)
             state_value = incremental_module.build_state(
@@ -886,7 +933,7 @@ def run_pipeline(args: argparse.Namespace, config: Dict[str, Any], runtime_dir: 
                 state_value["accounts"][key] = incremental_delta.previous.get(key, item)
             failed_credentials = {
                 incremental_module.account_key(record)
-                for record in incremental_delta.refreshed
+                for record in [*incremental_delta.added, *incremental_delta.refreshed]
                 if incremental_module.account_key(record) in account_failures
             }
             # 输入失败不等于授权变化；只有实际凭据导入失败才安排凭据重试。

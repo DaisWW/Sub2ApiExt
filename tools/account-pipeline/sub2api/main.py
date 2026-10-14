@@ -1294,6 +1294,7 @@ def resolve_account_ids(
     *,
     require_managed: bool = True,
     failed_accounts: Optional[Dict[str, str]] = None,
+    known_ids: Optional[Mapping[str, int]] = None,
 ) -> Dict[str, int]:
     """只读查询输入账号对应的、可安全确认的 Sub2API 数据库 ID。"""
     record_list = list(records)
@@ -1340,6 +1341,24 @@ def resolve_account_ids(
                 result.pop(canonical, None)
                 failed_accounts[canonical] = safe_api_message(str(exc))
                 print(f"[Sub2API][失败] {canonical}：{failed_accounts[canonical]}")
+    # 列表未匹配时，旧 ID 的 404 才能确认账号已删除。
+    for record in record_list:
+        canonical = record_key(record)
+        account_id = (known_ids or {}).get(canonical)
+        if not account_id or canonical in result or (failed_accounts is not None and canonical in failed_accounts):
+            continue
+        try:
+            account_detail(client, token, account_id)
+            raise Sub2ApiError(
+                f"快照中的账户 ID {account_id} 仍存在但未匹配当前账号；已停止重新导入"
+            )
+        except Sub2ApiError as exc:
+            if isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 404:
+                continue
+            if failed_accounts is None:
+                raise
+            failed_accounts[canonical] = safe_api_message(str(exc))
+            print(f"[Sub2API][失败] {canonical}：{failed_accounts[canonical]}")
     return result
 
 

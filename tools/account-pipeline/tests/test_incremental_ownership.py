@@ -434,6 +434,8 @@ class IncrementalOwnershipTests(unittest.TestCase):
                 pipeline.sub2api_module, "execute", side_effect=fake_sub2api
             ), patch.object(
                 pipeline.cockpit_module, "execute", side_effect=fake_cockpit
+            ), patch.object(
+                sub2api, "resolve_account_ids", return_value={"email:existing@example.com": 7}
             ):
                 self.assertEqual(
                     pipeline.run(self.pipeline_args(root, codes=codes)),
@@ -666,7 +668,9 @@ class IncrementalOwnershipTests(unittest.TestCase):
             ), patch.object(
                 pipeline.cockpit_module, "execute", side_effect=AssertionError("cockpit called")
             ), patch.object(
-                sub2api, "admin_session", side_effect=AssertionError("remote lookup called")
+                sub2api, "admin_session", return_value=(config_file, {}, client, "token")
+            ), patch.object(
+                sub2api, "get_accounts", side_effect=lambda *_: list(client.accounts.values())
             ):
                 self.assertEqual(
                     pipeline.run(args),
