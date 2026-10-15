@@ -146,7 +146,8 @@ func TestReliabilityStrategyUpgradeRestartsHighFailureObservation(t *testing.T) 
 	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
 	runner.source = &fakeMetricsSource{accounts: []AccountMetrics{account}}
 	runner.state.Strategy = "evidence-cost-v5"
-	rollbackAt, retryAt := now.Add(-3*time.Hour), now.Add(24*time.Hour)
+	rollbackAt := now.Add(-3 * time.Hour)
+	retryAt := rollbackAt.Add(6 * time.Hour)
 	runner.state.Accounts[1] = accountState{RecoveryFailures: 2, LastAppliedAt: timePtr(rollbackAt),
 		LastReliabilityRollbackAt: timePtr(rollbackAt), RecoveryRetryAt: timePtr(retryAt), ReliabilityHighSince: timePtr(now.Add(-time.Hour))}
 	for cycle := 0; cycle < 2; cycle++ {
@@ -156,7 +157,7 @@ func TestReliabilityStrategyUpgradeRestartsHighFailureObservation(t *testing.T) 
 		state := runner.state.Accounts[1]
 		if len(updates) != 0 || runner.state.Strategy != strategyVersion || state.ReliabilityHighSince == nil || !state.ReliabilityHighSince.Equal(now) ||
 			state.RecoveryFailures != 2 || state.LastReliabilityRollbackAt == nil || !state.LastReliabilityRollbackAt.Equal(rollbackAt) ||
-			state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(retryAt) {
+			state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(rollbackAt.Add(5*time.Hour)) {
 			t.Fatalf("old strategy timer bypassed observation or lost recovery watermarks: %+v", runner.state)
 		}
 	}
@@ -388,7 +389,7 @@ func TestReliabilityRepeatedFreshFailuresEscalateBackoff(t *testing.T) {
 	account := reliabilityAccount(1, 5, 5, now.Add(-time.Minute))
 	account.CurrentPriority = priorityBest
 	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
-	for _, backoff := range []time.Duration{30 * time.Minute, 2 * time.Hour, 6 * time.Hour, 24 * time.Hour} {
+	for _, backoff := range []time.Duration{30 * time.Minute, 2 * time.Hour, 5 * time.Hour, 5 * time.Hour, 5 * time.Hour} {
 		account.Window2h.LastTerminalFailureAt = timePtr(now.Add(-time.Second))
 		account.Window2h.FifthTerminalFailureAt = timePtr(now.Add(-5 * time.Second))
 		recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)

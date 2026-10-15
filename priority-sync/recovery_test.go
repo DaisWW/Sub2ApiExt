@@ -36,6 +36,41 @@ func progressiveRecoveryRunner(t *testing.T, status int) (*Runner, chan int) {
 	return runner, updates
 }
 
+func TestRecoveryBackoffUpgradeResumesElapsedWaitAndKeepsDryRunReadOnly(t *testing.T) {
+	now := nowForTest()
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry_run=%t", dryRun), func(t *testing.T) {
+			accounts := comparableRecoveryAccounts()
+			runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
+			runner.config.DryRun = dryRun
+			runner.config.Confirmations = 2
+			runner.source = &fakeMetricsSource{accounts: accounts}
+			runner.state.Strategy = "evidence-cost-v6"
+			runner.state.Accounts[1] = accountState{RecoveryFailures: 4,
+				LastAppliedAt: timePtr(now.Add(-6 * time.Hour)), LastReliabilityRollbackAt: timePtr(now.Add(-6 * time.Hour)),
+				RecoveryRetryAt: timePtr(now.Add(18 * time.Hour))}
+			before := cloneSyncState(runner.state)
+			if err := runner.RunOnce(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			if dryRun {
+				if len(updates) != 0 || !reflect.DeepEqual(runner.state, before) {
+					t.Fatal("dry-run migrated live backoff or wrote a priority")
+				}
+				return
+			}
+			if len(updates) != 1 || <-updates != priorityUnavailable-recoveryRampStep || runner.state.Exploration == nil ||
+				runner.state.Exploration.AccountID != 1 || runner.state.Accounts[1].RecoveryFailures != 4 {
+				t.Fatalf("elapsed legacy backoff still blocked gradual recovery: %+v", runner.state)
+			}
+			loaded, err := loadState(runner.config.StateFile)
+			if err != nil || loaded.Accounts[1].RecoveryRetryAt == nil || !loaded.Accounts[1].RecoveryRetryAt.Equal(now.Add(-time.Hour)) {
+				t.Fatalf("shortened backoff was not persisted: state=%+v err=%v", loaded, err)
+			}
+		})
+	}
+}
+
 func TestHistoricalReevaluationIsBoundedAndRecoveryCandidatesGetFairTurns(t *testing.T) {
 	now := nowForTest()
 	accounts := comparableRecoveryAccounts()

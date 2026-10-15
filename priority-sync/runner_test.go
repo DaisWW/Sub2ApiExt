@@ -935,6 +935,8 @@ func TestRecoveryTrialRestoresPriorityAndRecordsOutcomeAfterSuccessfulWrite(t *t
 		{name: "no result", wantRetry: 2 * time.Hour},
 		{name: "isolated terminal failure", snapshot: &MetricSnapshot{TerminalFailures: 1}, wantRetry: 2 * time.Hour},
 		{name: "still expensive", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, wantFailures: 1, wantRetry: 2 * time.Hour},
+		{name: "repeated expensive trial", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, previousFailures: 1, wantFailures: 2, wantRetry: 5 * time.Hour},
+		{name: "capped expensive trial", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, previousFailures: 4, wantFailures: 5, wantRetry: 5 * time.Hour},
 		{name: "short cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2, wantFailures: 2},
 		{name: "mature cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 50, PricedRequests: 50, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2},
 	}
@@ -1093,7 +1095,7 @@ func TestRecoveryBackoffEscalatesAndCaps(t *testing.T) {
 	tests := []struct {
 		failures int
 		want     time.Duration
-	}{{1, 2 * time.Hour}, {2, 6 * time.Hour}, {3, 24 * time.Hour}, {20, 24 * time.Hour}}
+	}{{1, 2 * time.Hour}, {2, 5 * time.Hour}, {3, 5 * time.Hour}, {20, 5 * time.Hour}}
 	for _, test := range tests {
 		if got := recoveryBackoff(test.failures); got != test.want {
 			t.Fatalf("recoveryBackoff(%d) = %s, want %s", test.failures, got, test.want)

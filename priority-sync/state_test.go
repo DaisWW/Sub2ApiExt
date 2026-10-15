@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -96,10 +97,59 @@ func TestLegacyRecoveryStateKeepsRestorationLeaseOnStrategyUpgrade(t *testing.T)
 		t.Fatal(err)
 	}
 	runner := &Runner{state: state}
-	runner.prepareStrategyState()
+	runner.prepareStrategyState(nowForTest())
 	if state.Strategy != strategyVersion || state.Accounts[9].CandidateCount != 0 || state.Exploration == nil ||
 		state.Exploration.RecoveryProgressive || state.Exploration.OriginalPriority != 90 {
 		t.Fatalf("strategy upgrade lost the fixed-trial restoration lease: %+v", state)
+	}
+}
+
+func TestStrategyUpgradeCapsRecoveryBackoffAcrossRestart(t *testing.T) {
+	now := nowForTest()
+	for _, test := range []struct {
+		name                     string
+		rollback, applied, trial *time.Time
+		retry, wantRetry         time.Time
+	}{
+		{"24h backoff", timePtr(now), nil, nil, now.Add(24 * time.Hour), now.Add(5 * time.Hour)},
+		{"6h backoff", timePtr(now), nil, nil, now.Add(6 * time.Hour), now.Add(5 * time.Hour)},
+		{"elapsed wait", timePtr(now.Add(-6 * time.Hour)), nil, nil, now.Add(18 * time.Hour), now.Add(-time.Hour)},
+		{"short wait", timePtr(now), nil, nil, now.Add(2 * time.Hour), now.Add(2 * time.Hour)},
+		{"later priority write", timePtr(now.Add(-8 * time.Hour)), timePtr(now.Add(-time.Hour)), nil, now.Add(16 * time.Hour), now.Add(4 * time.Hour)},
+		{"later trial", timePtr(now.Add(-8 * time.Hour)), nil, timePtr(now), now.Add(30 * time.Minute), now.Add(30 * time.Minute)},
+		{"legacy write", nil, timePtr(now.Add(-time.Hour)), nil, now.Add(23 * time.Hour), now.Add(4 * time.Hour)},
+		{"missing time records", nil, nil, nil, now.Add(24 * time.Hour), now.Add(5 * time.Hour)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			account := accountState{CandidatePriority: 10, CandidateCount: 2, PromotionFrozenCycles: 2,
+				LastReliabilityRollbackAt: test.rollback, LastAppliedAt: test.applied, LastExploredAt: test.trial,
+				RecoveryFailures: 4, RecoveryOriginalPriority: 90, RecoveryRetryAt: timePtr(test.retry),
+				LastReliabilityFailureAt: timePtr(now.Add(-time.Minute)), ReliabilityHighSince: timePtr(now.Add(-time.Hour))}
+			state := &syncState{Strategy: "evidence-cost-v6", Accounts: map[int64]accountState{9: account},
+				Exploration: &explorationState{AccountID: 9, OriginalPriority: 90, Recovery: true, StartedAt: timePtr(now)}}
+			lease := *state.Exploration
+			runner := &Runner{state: state}
+			runner.prepareStrategyState(now)
+			want := account
+			want.CandidatePriority, want.CandidateCount, want.PromotionFrozenCycles = 0, 0, 0
+			want.RecoveryRetryAt = timePtr(test.wantRetry)
+			if !reflect.DeepEqual(state.Accounts[9], want) || !reflect.DeepEqual(*state.Exploration, lease) || state.Strategy != strategyVersion {
+				t.Fatalf("strategy upgrade changed recovery evidence or deadline: %+v", state)
+			}
+			path := filepath.Join(t.TempDir(), "state.json")
+			if err := saveState(path, state); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := loadState(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.state = loaded
+			runner.prepareStrategyState(now.Add(time.Hour))
+			if !reflect.DeepEqual(loaded.Accounts[9], want) {
+				t.Fatalf("restart renewed the recovery wait: %+v", loaded.Accounts[9])
+			}
+		})
 	}
 }
 

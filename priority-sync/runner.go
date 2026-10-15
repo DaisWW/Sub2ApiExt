@@ -66,7 +66,7 @@ func (r *Runner) RunOnce(ctx context.Context, now time.Time) error {
 		r.state = cloneSyncState(r.state)
 		defer func() { r.state = originalState }()
 	}
-	r.prepareStrategyState()
+	r.prepareStrategyState(now)
 	accounts, excluded := r.filterExcludedAccounts(accounts)
 	accounts = r.includeExpiredMissingRecovery(accounts, now)
 	if lease := r.state.Exploration; lease != nil && lease.RecoveryProgressive && lease.StartedAt != nil && now.After(*lease.StartedAt) {
@@ -153,7 +153,7 @@ func (r *Runner) filterExcludedAccounts(accounts []AccountMetrics) ([]AccountMet
 	return filtered, excluded
 }
 
-func (r *Runner) prepareStrategyState() {
+func (r *Runner) prepareStrategyState(now time.Time) {
 	if r == nil || r.state == nil || r.state.Strategy == strategyVersion {
 		return
 	}
@@ -161,8 +161,20 @@ func (r *Runner) prepareStrategyState() {
 		state.CandidatePriority = 0
 		state.CandidateCount = 0
 		state.PromotionFrozenCycles = 0
-		// Restart high-failure observation under the new strategy thresholds.
-		state.ReliabilityHighSince = nil
+		// v6 already uses the current failure thresholds and observation window.
+		if r.state.Strategy != "evidence-cost-v6" {
+			state.ReliabilityHighSince = nil
+		}
+		if state.RecoveryRetryAt != nil {
+			// Retain elapsed waiting time when shortening persisted backoffs.
+			startedAt := latestStateTime(state.LastReliabilityRollbackAt, state.LastAppliedAt, state.LastExploredAt)
+			if startedAt == nil {
+				startedAt = timePtr(now)
+			}
+			if retryAt := startedAt.Add(recoveryMaxBackoff); state.RecoveryRetryAt.After(retryAt) {
+				state.RecoveryRetryAt = timePtr(retryAt)
+			}
+		}
 		r.state.Accounts[id] = state
 	}
 	r.state.Strategy = strategyVersion
@@ -863,14 +875,10 @@ func recordRecoveryOutcome(state *accountState, outcome string, now time.Time, p
 }
 
 func recoveryBackoff(failures int) time.Duration {
-	switch failures {
-	case 1:
+	if failures == 1 {
 		return 2 * time.Hour
-	case 2:
-		return 6 * time.Hour
-	default:
-		return 24 * time.Hour
 	}
+	return recoveryMaxBackoff
 }
 
 func explorationEndStatus(recommendation *Recommendation) string {
