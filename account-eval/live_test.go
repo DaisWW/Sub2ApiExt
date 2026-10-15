@@ -21,19 +21,38 @@ func TestLiveAccountBatch(t *testing.T) {
 		t.Skip("EVAL_LIVE_CONFIG is unset; real account requests are disabled")
 	}
 	var config struct {
-		Email    string            `json:"email"`
-		Password string            `json:"password"`
-		Database map[string]string `json:"database"`
-		Accounts []struct {
+		Email     string            `json:"email"`
+		Password  string            `json:"password"`
+		Database  map[string]string `json:"database"`
+		Settings  Settings          `json:"settings"`
+		Questions []Question        `json:"questions"`
+		Accounts  []struct {
 			ID    int64  `json:"id"`
 			Model string `json:"model"`
 		} `json:"accounts"`
 	}
+	config.Settings = Settings{Concurrency: 3, Timeout: 90}
 	b, err := os.ReadFile(configPath)
 	if err != nil || json.Unmarshal(b, &config) != nil || len(config.Accounts) == 0 {
 		t.Fatal("invalid live-test configuration")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	settings := config.Settings
+	settings.Models = map[string]string{}
+	if err := settings.validate(nil); err != nil {
+		t.Fatal("invalid live-test settings")
+	}
+	suite := Suite{Name: "真实请求验收", Questions: config.Questions}
+	if len(suite.Questions) == 0 {
+		suite.Questions = []Question{
+			{Name: "逻辑", Prompt: "甲比乙高，乙比丙高。谁最矮？只回答名字。", Format: "text"},
+			{Name: "SVG HTML", Prompt: "只输出一个可直接打开的完整 HTML，用内联 SVG 绘制鹈鹕骑自行车，并用 CSS 动画让车轮旋转。使用简单几何图形，不使用外部资源，代码保持在 60 行以内。", Format: "html"},
+		}
+	}
+	if err := suite.validate(); err != nil {
+		t.Fatal("invalid live-test questions")
+	}
+	waves := (len(config.Accounts) + settings.Concurrency - 1) / settings.Concurrency
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(waves*len(suite.Questions)*settings.Timeout+60)*time.Second)
 	defer cancel()
 	for _, key := range []string{"PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGSSLMODE"} {
 		if value := config.Database[key]; value != "" {
@@ -50,7 +69,6 @@ func TestLiveAccountBatch(t *testing.T) {
 	if err != nil {
 		t.Fatal("cannot read live account catalog")
 	}
-	settings := Settings{Models: map[string]string{}, Concurrency: 3, Timeout: 90}
 	ids := []int64{}
 	for _, requested := range config.Accounts {
 		found := false
@@ -120,23 +138,26 @@ func TestLiveAccountBatch(t *testing.T) {
 		}
 	}
 	call("GET", "catalog", nil, nil, 200)
-	suite := Suite{Name: "真实请求验收", Questions: []Question{
-		{Name: "逻辑", Prompt: "甲比乙高，乙比丙高。谁最矮？只回答名字。", Format: "text"},
-		{Name: "SVG HTML", Prompt: "只输出一个可直接打开的完整 HTML，用内联 SVG 绘制鹈鹕骑自行车，并用 CSS 动画让车轮旋转。使用简单几何图形，不使用外部资源，代码保持在 60 行以内。", Format: "html"},
-	}}
 	call("POST", "suites", suite, &suite, 200)
 	var run Run
 	call("POST", "runs", map[string]any{"suite_id": suite.ID, "account_ids": ids, "settings": settings}, &run, 201)
+	t.Logf("live batch: accounts=%d questions=%d reasoning=%s timeout_seconds=%d concurrency=%d", len(ids), len(suite.Questions), settings.Reasoning, settings.Timeout, settings.Concurrency)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	finished := -1
 	for run.Status == "queued" || run.Status == "running" {
 		select {
 		case <-ctx.Done():
 			t.Fatal("live batch timed out")
 		case <-ticker.C:
-			run, err = store.run(ctx, run.ID)
-			if err != nil {
+			runs, err := store.runs(ctx)
+			if err != nil || len(runs) != 1 {
 				t.Fatal("cannot read live batch")
+			}
+			run = runs[0]
+			if run.Done != finished {
+				t.Logf("live progress: %d/%d finished", run.Done, run.Total)
+				finished = run.Done
 			}
 		}
 	}
@@ -148,7 +169,7 @@ func TestLiveAccountBatch(t *testing.T) {
 	if detail.Run.Status != "completed" {
 		t.Errorf("live batch ended with status %s", detail.Run.Status)
 	}
-	if len(detail.Results) != len(ids)*2 {
+	if len(detail.Results) != len(ids)*len(suite.Questions) {
 		t.Fatal("batch result count mismatch")
 	}
 	for _, summary := range detail.Results {
@@ -158,10 +179,10 @@ func TestLiveAccountBatch(t *testing.T) {
 		if result.Status != "completed" || strings.TrimSpace(result.Answer) == "" {
 			t.Errorf("account %d question %d did not complete", result.AccountID, result.Question+1)
 		}
-		if result.Question == 0 && !strings.Contains(result.Answer, "丙") {
+		if len(config.Questions) == 0 && result.Question == 0 && !strings.Contains(result.Answer, "丙") {
 			t.Errorf("account %d: logic answer did not contain 丙", result.AccountID)
 		}
-		if result.Question == 1 && (result.HTML == "" || !strings.Contains(strings.ToLower(result.HTML), "<svg")) {
+		if suite.Questions[result.Question].Format == "html" && (result.HTML == "" || (len(config.Questions) == 0 && !strings.Contains(strings.ToLower(result.HTML), "<svg"))) {
 			t.Errorf("account %d: HTML/SVG answer missing", result.AccountID)
 		}
 	}

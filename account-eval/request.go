@@ -295,24 +295,35 @@ func (e *Evaluator) evaluate(ctx context.Context, a CredentialAccount, s Setting
 	defer closeClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		r.Error = "上游连接失败"
+		r.Error = "上游连接失败：" + upstreamErrorReason(err)
 		if ctx.Err() != nil {
-			r.Error = "请求超时或已取消"
+			r.Error = requestContextError(ctx, s.Timeout)
 		}
 		r.DurationMS = time.Since(start).Milliseconds()
 		return r
 	}
 	defer resp.Body.Close()
+	r.FirstByteMS = time.Since(start).Milliseconds()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		r.Error = fmt.Sprintf("上游返回 HTTP %d", resp.StatusCode)
+		switch resp.StatusCode {
+		case http.StatusTooManyRequests:
+			r.Error += "（上游限流，请稍后重试失败项）"
+		case http.StatusBadGateway, http.StatusServiceUnavailable:
+			r.Error += "（上游服务暂不可用，可重试失败项）"
+		case http.StatusGatewayTimeout:
+			r.Error += "（上游网关等待超时，可重试失败项）"
+		}
 		r.DurationMS = time.Since(start).Milliseconds()
 		return r
 	}
-	r.FirstByteMS = time.Since(start).Milliseconds()
 	readUpstreamAnswer(resp, protocol, &r)
 	if ctx.Err() != nil && r.Status != "completed" {
 		r.Status = "incomplete"
-		r.Error = "请求超时或已取消"
+		r.Error = requestContextError(ctx, s.Timeout)
+		if r.Answer != "" {
+			r.Error += "；已保留收到的部分回答"
+		}
 	}
 	r.DurationMS = time.Since(start).Milliseconds()
 	// Never retain an upstream echo of a known secret.
@@ -350,4 +361,14 @@ func (e *Evaluator) evaluate(ctx context.Context, a CredentialAccount, s Setting
 		r.HTML = extractHTML(r.Answer)
 	}
 	return r
+}
+
+func requestContextError(ctx context.Context, timeout int) string {
+	if ctx.Err() == context.DeadlineExceeded {
+		if timeout > 0 {
+			return fmt.Sprintf("单题超时（%d 秒），可在高级参数中调高超时", timeout)
+		}
+		return "请求超时"
+	}
+	return "请求已取消"
 }

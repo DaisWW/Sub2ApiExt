@@ -3,14 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -89,6 +94,29 @@ func TestUpstreamStreamDetection(t *testing.T) {
 			readUpstreamAnswer(resp, "responses", &r)
 			if r.Status != tc.status || (tc.status == "completed" && r.Answer != "ok") {
 				t.Fatalf("stream detection: %+v", r)
+			}
+		})
+	}
+}
+
+func TestStreamTerminalEventSurvivesReadError(t *testing.T) {
+	for _, tc := range []struct{ name, protocol, body, status, answer string }{
+		{"responses complete", "responses", `data: {"type":"response.completed","response":{"status":"completed","output":[{"content":[{"type":"output_text","text":"ok"}]}]}}` + "\n\n", "completed", "ok"},
+		{"chat complete", "chat", `data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n", "completed", "ok"},
+		{"anthropic complete", "anthropic", `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}` + "\n\n" + `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}` + "\n\n" + `data: {"type":"message_stop"}` + "\n\n", "completed", "ok"},
+		{"incomplete stays incomplete", "responses", `data: {"type":"response.output_text.delta","delta":"partial"}` + "\n\n", "incomplete", "partial"},
+		{"done alone stays failed", "responses", "data: [DONE]\n\n", "failed", ""},
+		{"upstream error stays failed", "responses", `data: {"type":"response.failed","error":{"message":"secret-key"}}` + "\n\n", "failed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := iotest.DataErrReader(io.MultiReader(strings.NewReader(tc.body), iotest.ErrReader(io.ErrUnexpectedEOF)))
+			var r Result
+			readAnswer(body, true, tc.protocol, &r)
+			if r.Status != tc.status || r.Answer != tc.answer {
+				t.Fatalf("terminal result overwritten: %+v", r)
+			}
+			if strings.Contains(r.Error, "secret-key") {
+				t.Fatal("leaked provider error")
 			}
 		})
 	}
@@ -187,8 +215,77 @@ func TestEvaluatorTimeoutKeepsPartialAnswer(t *testing.T) {
 	defer cancel()
 	a := CredentialAccount{Account: Account{Platform: "openai", Type: "apikey"}, Credentials: map[string]any{"base_url": up.URL, "api_key": "test-key"}}
 	r := (&Evaluator{allowPrivate: true}).evaluate(ctx, a, Settings{Models: map[string]string{"openai": "test"}}, Question{Prompt: "wait"})
-	if r.Status != "incomplete" || r.Answer != "partial" || r.Error != "请求超时或已取消" {
+	if r.Status != "incomplete" || r.Answer != "partial" || r.Error != "请求超时；已保留收到的部分回答" {
 		t.Fatalf("timeout misreported or partial answer lost: %+v", r)
+	}
+}
+
+func TestUpstreamErrorDiagnosticsDoNotExposeTransportSecrets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"truncated", io.ErrUnexpectedEOF, "unexpected EOF"},
+		{"reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, "connection reset"},
+		{"refused", syscall.ECONNREFUSED, "connection refused"},
+		{"timeout", context.DeadlineExceeded, "网络超时"},
+		{"cancel", context.Canceled, "请求已取消"},
+		{"http2", errors.New("stream error: stream ID 1; INTERNAL_ERROR; secret-password"), "HTTP/2 流中断（INTERNAL_ERROR）"},
+		{"unknown", errors.New("secret-password"), "连接或响应异常"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := &url.Error{Op: "POST", URL: "https://user:secret-password@example.com/?key=secret-key", Err: tc.err}
+			got := upstreamErrorReason(err)
+			if !strings.Contains(got, tc.want) || strings.Contains(got, "secret") || strings.Contains(got, "example.com") {
+				t.Fatalf("unsafe or missing diagnostic: %s", got)
+			}
+		})
+	}
+}
+
+func TestEvaluatorDistinguishesDisconnectAndUnavailable(t *testing.T) {
+	for _, mode := range []string{"disconnect", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := make(chan struct{}, 2)
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls <- struct{}{}
+				if mode == "unavailable" {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					fmt.Fprint(w, "secret-key upstream error")
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Content-Length", "10000")
+				fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+				w.(http.Flusher).Flush()
+			}))
+			defer up.Close()
+			a := CredentialAccount{Account: Account{Platform: "openai", Type: "apikey"}, Credentials: map[string]any{"base_url": up.URL, "api_key": "secret-key"}}
+			r := (&Evaluator{allowPrivate: true}).evaluate(ctx, a, Settings{Models: map[string]string{"openai": "test"}}, Question{Prompt: "wait"})
+			if mode == "unavailable" {
+				if r.Status != "failed" || !strings.Contains(r.Error, "HTTP 503") || !strings.Contains(r.Error, "可重试失败项") || len(calls) != 1 {
+					t.Fatalf("unavailable request misreported or replayed: %+v calls=%d", r, len(calls))
+				}
+			} else if r.Status != "incomplete" || r.Answer != "partial" || (mode == "disconnect" && !strings.Contains(r.Error, "unexpected EOF")) {
+				t.Fatalf("partial response misreported: %+v", r)
+			}
+			if strings.Contains(r.Error, "secret-key") {
+				t.Fatal("leaked upstream error")
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if requestContextError(ctx, 1200) != "请求已取消" {
+		t.Fatal("cancellation reported as timeout")
+	}
+	ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if !strings.Contains(requestContextError(ctx, 1200), "1200 秒") {
+		t.Fatal("timeout budget missing")
 	}
 }
 

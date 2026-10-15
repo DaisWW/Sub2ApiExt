@@ -29,7 +29,7 @@ OpenAI 推理下拉每次打开默认选中 `max（最高）`，不提供“模�
 
 参考 Sub2API v0.2.16 的账户协议实现，直接向指定账户的上游发送完整问题；不调用会修改账户状态、部分协议只发送 `hi` 的 `/api/v1/admin/accounts/:id/test`。遵循账户代理、模型映射、请求头覆盖和私网校验；代理不可用时停止请求，禁止静默直连及携带凭据重定向。
 
-Responses、Chat Completions、Messages 流必须收到有效完成事件；HTTP 200、单独的 `[DONE]` 或提前断开均不等于成功。对缺少或错误标注 Content-Type 的流同时识别 SSE 内容，保留截断/中断时已收到的文本。单响应读取上限 16MB；并发为 1–32，单题超时为 5–3600 秒。Token 上限 0 表示不额外指定；Anthropic API 必填时使用 16384，Codex OAuth 不支持该上限，必须为 0。
+Responses、Chat Completions、Messages 流必须收到有效完成事件；HTTP 200、单独的 `[DONE]` 或提前断开均不等于成功。有效结束后不再用读取错误覆盖结果；真正断流时保留已收到的文本，并用固定文案区分提前断流、连接重置、网络超时和取消，避免泄露原始网络错误中的凭据。对缺少或错误标注 Content-Type 的流同时识别 SSE 内容。单响应读取上限 16MB；并发为 1–32，单题超时为 5–3600 秒。新浏览器默认超时 1200 秒，保留已保存的设置；`max` 推理可能超过 10 分钟，建议至少 1200 秒。Token 上限 0 表示不额外指定；Anthropic API 必填时使用 16384，Codex OAuth 不支持该上限，必须为 0。
 
 测试会直接产生账户的上游用量，不经过 Sub2API 计费和 `usage_logs`；结果中的 Tokens 只记录上游实际返回的统计，没有返回时为 0。该服务是人工对比工作台，不自动给“智力”打分。
 
@@ -69,3 +69,5 @@ go test -run TestSourceReadOnlyCatalogAndProxy -v
 Go 测试覆盖完成/截断事件、管理员权限、菜单合并、SVG 校验、题组快照、账户去重、批次/账户调度、取消、重启保留和凭据不序列化。浏览器验证可选运行 `EVAL_BROWSER_ADDR=127.0.0.1:8091` 下的 `TestWorkbenchBrowserFixture`；它只编入测试，使用模拟数据和响应，不进入正式服务。
 
 真实请求验收单独使用 `TestLiveAccountBatch`，仅在显式设置 `EVAL_LIVE_CONFIG` 时执行，会产生上游用量。该变量指向权限受限的 JSON 配置，包含管理员登录的 `email`、`password`、PostgreSQL 连接变量映射 `database`（`PGHOST` 等）及 `accounts` 列表（每项为 `id`、`model`）。同平台账户使用相同模型。测试通过真实主站管理员验证、测评 HTTP API、批次 Worker 和上游请求，每个账户验证一道逻辑题及一道 SVG HTML 题，要求有效完成事件、非空回答和 HTML/SVG 结果；主数据库连接强制只读，题库与历史写入临时 SQLite。配置不要放入仓库或日志，推荐通过 stdin 写入临时容器的 tmpfs，执行 `go test -count=1 -run '^TestLiveAccountBatch$' -v` 后移除容器。
+
+复现慢推理或特定题目时，可在真实验收配置中提供 `settings`（如 `reasoning: "max"`、`timeout_seconds: 1200`、`concurrency: 8`、`max_tokens: 0`）及 `questions`（每题含 `name`、`prompt`、`format`）。省略时沿用原验收题目、90 秒超时和并发 3；整体等待预算按题数、账户数和单题超时计算，运行 `go test` 时需相应提高 `-timeout`。自定义题目验证完整非空回答，HTML 题同时要求可提取 HTML。

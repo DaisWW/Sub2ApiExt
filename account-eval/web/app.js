@@ -2,7 +2,7 @@
 document.documentElement.classList.toggle('iframe-embedded', window.self !== window.top);
 const $ = (s) => document.querySelector(s);
 const el = (tag, attrs = {}, text = '') => { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) { if (k === 'class') n.className = v; else n.setAttribute(k, v); } if (text) n.textContent = text; return n; };
-const state = { suites: [], accounts: [], groups: [], selected: new Set(), suite: null, testSuiteID: '', runs: [], markedRuns: new Set(), deletingRuns: false, selectedRuns: { compose: localStorage.getItem('account_eval_current_run') || '', history: '' }, detail: null, detailView: '', cache: new Map(), resultLimit: 24, icon: '', busy: false, refreshing: null, tab: 'compose' };
+const state = { suites: [], accounts: [], groups: [], selected: new Set(), suite: null, testSuiteID: '', runs: [], markedRuns: new Set(), deletingRuns: false, selectedRuns: { compose: localStorage.getItem('account_eval_current_run') || '', history: '' }, detail: null, detailView: '', cache: new Map(), resultLimit: 24, icon: '', busy: false, retrying: false, refreshing: null, tab: 'compose' };
 const labels = { queued: '排队中', running: '执行中', cancelling: '正在取消', cancelled: '已取消', interrupted: '已中断', completed: '完成', completed_with_errors: '部分失败', failed: '失败', incomplete: '未完整输出', pass: '通过', fail: '不通过', review: '待复核' };
 const reasoningLabels = { none: '不推理', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '更高', max: '最高' };
 const platformLabels = { openai: 'OpenAI', anthropic: 'Anthropic', claude: 'Claude', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', kimi: 'Kimi', zhipu: 'Zhipu GLM', deepseek: 'DeepSeek', minimax: 'MiniMax', opencode_go: 'OpenCode', openai_compatible: 'OpenAI Compatible', xai: 'XAI' };
@@ -130,6 +130,7 @@ function renderReasoning() {
   const highest = Object.keys(reasoningLabels).reverse().find((level) => levels.includes(level)) || levels.at(-1) || '';
   select.value = levels.includes(current) ? current : highest;
   $('#reasoning-hint').textContent = !levels.length ? '所选模型没有共同可用的推理等级，本次不发送推理参数。' : known ? `已按 ${known} 个账户的模型能力筛选推理等级，默认选择最高可用等级。` : '默认 max（最高）；主站未提供模型能力时，以账户实际支持的等级为准。';
+  if (select.value === 'max') $('#reasoning-hint').textContent += ' max 推理可能超过 10 分钟，建议在高级参数中将单题超时设为至少 1200 秒。';
 }
 function estimate() { const count = state.selected.size * (testSuite()?.questions.length || 0); $('#run-estimate').textContent = `${state.selected.size} 个账户 × ${testSuite()?.questions.length || 0} 道题 = ${count} 次请求`; $('#start-run').disabled = state.busy || !state.selected.size || !testSuite(); }
 function isActiveRun(run) { return ['queued', 'running', 'cancelling'].includes(run.status); }
@@ -208,13 +209,20 @@ async function selectRun(id, view = state.tab) {
   await renderDetail();
 }
 async function refreshDetail() { const view = state.tab, id = state.detail.run.id; const detail = await api(`runs/${id}`); if (state.tab !== view || state.detailView !== view || state.detail?.run.id !== id || state.selectedRuns[view] !== id) return; state.detail = detail; await renderDetail(); }
+function updateRetryAction() {
+  if (!state.detail) return;
+  const active = isActiveRun(state.detail.run), failed = state.detail.results.filter((r) => !['queued', 'running', 'completed'].includes(r.status)).length, button = $('#retry-run');
+  button.disabled = state.retrying || active || !failed;
+  button.textContent = state.retrying ? '正在创建重试…' : `一键重试失败项（${failed}）`;
+  $('#retry-hint').textContent = active ? '等待本批次结束后，可一键重试失败 / 中断项。' : '重试本批次全部题目的失败 / 中断项，沿用原参数并保留原始结果。';
+}
 async function renderDetail() {
   if (state.detailView !== state.tab || state.selectedRuns[state.tab] !== state.detail.run.id) return;
   const { run } = state.detail; $('#run-detail').hidden = false; $('#detail-title').textContent = run.name;
   $('#detail-status').textContent = labels[run.status] || run.status; $('#detail-status').className = `badge ${run.status}`;
   $('#detail-meta').textContent = `${new Date(run.created_at).toLocaleString()} · ${run.accounts.length} 个账户 · ${run.suite.questions.length} 道题 · 并发 ${run.settings.concurrency} · 单题 ${run.settings.timeout_seconds}s${run.parent_id ? ' · 失败项重试批次' : ''}`;
   $('#run-snapshot').textContent = JSON.stringify({ questions: run.suite.questions, settings: run.settings, accounts: run.accounts }, null, 2);
-  const active = isActiveRun(run); $('#cancel-run').hidden = !active; $('#cancel-run').disabled = run.status === 'cancelling'; $('#retry-run').hidden = active || !state.detail.results.some((r) => r.status !== 'completed'); $('#delete-run').hidden = state.tab !== 'history' || active;
+  const active = isActiveRun(run); $('#cancel-run').hidden = !active; $('#cancel-run').disabled = run.status === 'cancelling'; $('#delete-run').hidden = state.tab !== 'history' || active; updateRetryAction();
   $('#detail-progress').max = run.total || 1; $('#detail-progress').value = run.done; $('#detail-progress-text').textContent = `${run.done} / ${run.total} 完成`;
   const counts = { queued: 0, running: 0, completed: 0, failed: 0 }; for (const r of state.detail.results) counts[r.status in counts ? r.status : 'failed']++;
   $('#result-counts').replaceChildren(); for (const [status, label] of [['queued', '等待'], ['running', '执行中'], ['completed', '完成'], ['failed', '失败 / 中断']]) { const count = el('div', { class: `count ${status}` }); count.append(el('strong', {}, String(counts[status])), el('span', {}, label)); $('#result-counts').append(count); }
@@ -259,7 +267,7 @@ async function boot() {
   const [catalog, suites] = await Promise.all([api('catalog'), api('suites')]); state.accounts = catalog.accounts; state.groups = catalog.groups; state.suites = suites;
   $('#login').hidden = true; $('#workbench').hidden = false; fillCatalogFilters();
   editSuite(suites[0] || blankSuite()); renderAccounts(); renderModels();
-  $('#concurrency').value = savedSettings.concurrency || 4; $('#timeout').value = savedSettings.timeout_seconds || 300; $('#max-tokens').value = savedSettings.max_tokens || 0;
+  $('#concurrency').value = savedSettings.concurrency || 4; $('#timeout').value = savedSettings.timeout_seconds || 1200; $('#max-tokens').value = savedSettings.max_tokens || 0;
   await refreshRuns();
 }
 document.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => tab(b.dataset.tab); });
@@ -272,7 +280,7 @@ $('#add-question').onclick = () => { state.suite.questions.push({ name: `问题 
 $('#save-suite').onclick = guard(async () => { await saveSuite(); notice('题组已保存，下次可以直接使用'); });
 $('#use-suite').onclick = guard(async () => { const suite = await saveSuite(); state.testSuiteID = suite.id; fillSuites(); tab('compose'); notice('题组已保存，选择账户后即可开始测试'); });
 $('#test-suite').onchange = () => { state.testSuiteID = $('#test-suite').value; renderTestSuite(); };
-$('#reasoning').onchange = () => { manualReasoning = $('#reasoning').value; };
+$('#reasoning').onchange = () => { manualReasoning = $('#reasoning').value; renderReasoning(); };
 $('#open-library').onclick = () => tab('library');
 $('#edit-test-suite').onclick = () => { if (testSuite()) editSuite(testSuite()); tab('library'); };
 $('#back-to-test').onclick = () => tab('compose');
@@ -289,7 +297,12 @@ $('#delete-selected-runs').onclick = guard(() => confirmRunDeletion(state.runs.f
 $('#delete-run').onclick = guard(() => confirmRunDeletion([state.detail.run]));
 $('#delete-runs-dialog').addEventListener('close', guard(async () => { const ids = pendingDeleteRuns; pendingDeleteRuns = []; if ($('#delete-runs-dialog').returnValue === 'delete') await deleteRuns(ids); }));
 $('#cancel-run').onclick = guard(async () => { await api(`runs/${state.detail.run.id}/cancel`, { method: 'POST' }); await refreshRuns(); });
-$('#retry-run').onclick = guard(async () => { const button = $('#retry-run'); button.disabled = true; try { const run = await api(`runs/${state.detail.run.id}/retry`, { method: 'POST' }); tab('compose'); await selectRun(run.id, 'compose'); await refreshRuns(); $('#live-section').scrollIntoView({ behavior: 'smooth', block: 'start' }); } finally { button.disabled = false; } });
+$('#retry-run').onclick = guard(async () => {
+  if (state.retrying || !state.detail || $('#retry-run').disabled) return;
+  state.retrying = true; updateRetryAction();
+  try { const run = await api(`runs/${state.detail.run.id}/retry`, { method: 'POST' }); tab('compose'); await selectRun(run.id, 'compose'); await refreshRuns(); $('#live-section').scrollIntoView({ behavior: 'smooth', block: 'start' }); notice(`已创建重试批次，仅重试 ${run.total} 个失败 / 中断项`); }
+  finally { state.retrying = false; updateRetryAction(); }
+});
 $('#export-run').onclick = guard(async () => { const detail = state.detail; const results = []; for (const r of detail.results) results.push(await api(`results/${r.id}`)); download(`${detail.run.name}.json`, JSON.stringify({ run: detail.run, results }, null, 2), 'application/json'); });
 for (const id of ['question-filter', 'result-filter']) $(`#${id}`).onchange = guard(async () => { state.resultLimit = 24; await renderResults(); });
 $('#more-results').onclick = guard(async () => { state.resultLimit += 24; await renderResults(); });

@@ -2,11 +2,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 const responseLimit = 16 * 1024 * 1024
@@ -33,7 +37,7 @@ func readAnswer(body io.Reader, stream bool, protocol string, r *Result) {
 			return
 		}
 		if err != nil {
-			r.Error = "响应读取失败"
+			r.Error = "响应读取失败：" + upstreamErrorReason(err)
 			return
 		}
 		var v map[string]any
@@ -145,9 +149,9 @@ func readAnswer(body io.Reader, stream bool, protocol string, r *Result) {
 		if limited.N <= 0 {
 			r.Status = "incomplete"
 			r.Error = "响应超过 16MB"
-		} else if scanner.Err() != nil {
+		} else if !terminal && scanner.Err() != nil {
 			r.Status = "incomplete"
-			r.Error = "流读取失败"
+			r.Error = "流读取失败：" + upstreamErrorReason(scanner.Err())
 		} else if !terminal {
 			r.Status = "incomplete"
 			r.Error = "连接在完成事件之前断开"
@@ -161,6 +165,31 @@ func readAnswer(body io.Reader, stream bool, protocol string, r *Result) {
 	if r.Status == "failed" && r.Error == "" {
 		r.Error = "缺少有效完成事件"
 	}
+}
+
+// Return fixed diagnostics only: raw transport errors can contain credential-bearing URLs.
+func upstreamErrorReason(err error) string {
+	var networkError net.Error
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "请求已取消"
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &networkError) && networkError.Timeout():
+		return "网络超时"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "上游提前断流（unexpected EOF）"
+	case errors.Is(err, syscall.ECONNRESET):
+		return "连接被重置（connection reset）"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "连接被拒绝（connection refused）"
+	}
+	if strings.Contains(err.Error(), "stream error:") {
+		for _, code := range []string{"INTERNAL_ERROR", "PROTOCOL_ERROR", "CANCEL"} {
+			if strings.Contains(err.Error(), code) {
+				return "HTTP/2 流中断（" + code + "）"
+			}
+		}
+	}
+	return "连接或响应异常"
 }
 
 func readJSON(v map[string]any, protocol string, r *Result) {
