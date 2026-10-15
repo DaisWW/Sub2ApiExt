@@ -38,6 +38,7 @@ type accountState struct {
 	LastApplied               int        `json:"last_applied_priority,omitempty"`
 	LastExploredAt            *time.Time `json:"last_explored_at,omitempty"`
 	RecoveryFailures          int        `json:"recovery_failures,omitempty"`
+	LastRecoveryFailureAt     *time.Time `json:"last_recovery_failure_at,omitempty"`
 	RecoveryOriginalPriority  int        `json:"recovery_original_priority,omitempty"`
 	RecoveryRetryAt           *time.Time `json:"recovery_retry_at,omitempty"`
 	LastReliabilityFailureAt  *time.Time `json:"last_reliability_failure_at,omitempty"`
@@ -71,6 +72,7 @@ func cloneSyncState(source *syncState) *syncState {
 			LastApplied:               account.LastApplied,
 			LastExploredAt:            cloneTimePtr(account.LastExploredAt),
 			RecoveryFailures:          account.RecoveryFailures,
+			LastRecoveryFailureAt:     cloneTimePtr(account.LastRecoveryFailureAt),
 			RecoveryOriginalPriority:  account.RecoveryOriginalPriority,
 			RecoveryRetryAt:           cloneTimePtr(account.RecoveryRetryAt),
 			LastReliabilityFailureAt:  cloneTimePtr(account.LastReliabilityFailureAt),

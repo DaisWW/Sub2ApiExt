@@ -229,11 +229,13 @@ func recordReliabilityObservation(state *accountState, recommendation *Recommend
 		recommendation.AccountFailureRate < recoveryHealthyFailureRate && recommendation.reliabilityLastSuccessAt != nil &&
 		recommendation.reliabilityLastSuccessAt.After(*recoveryFailureAt) {
 		state.RecoveryFailures = 0
+		state.LastRecoveryFailureAt = nil
 		state.RecoveryRetryAt = nil
 	}
 	if recommendation.recoveryCompleted {
 		state.RecoveryOriginalPriority = 0
 		state.RecoveryFailures = 0
+		state.LastRecoveryFailureAt = nil
 		state.RecoveryRetryAt = nil
 	}
 }

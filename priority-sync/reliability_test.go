@@ -100,7 +100,7 @@ func TestMaturePersistentFailureRollsBackAfterTwoObservationCycles(t *testing.T)
 		}
 	}
 	state := runner.state.Accounts[1]
-	if len(updates) != 1 || state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(2*defaultInterval+30*time.Minute)) {
+	if len(updates) != 1 || state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(2*defaultInterval+10*time.Minute)) {
 		t.Fatalf("same window errors repeatedly punished or first backoff too long: writes=%d state=%+v", len(updates), state)
 	}
 }
@@ -112,7 +112,9 @@ func TestCostWriteDoesNotConsumeObservedReliabilityFailure(t *testing.T) {
 	peer := comparableCostAccount(2, 0.05, 0.9, 100, 5_000_000, 90)
 	peer.CurrentPriority = priorityBest
 	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
-	runner.state.Accounts[1] = accountState{LastAppliedAt: timePtr(now.Add(-time.Hour))}
+	lastFailure := now.Add(-6 * time.Hour)
+	runner.state.Accounts[1] = accountState{LastAppliedAt: timePtr(now.Add(-time.Hour)),
+		RecoveryFailures: 2, LastRecoveryFailureAt: timePtr(lastFailure)}
 	for cycle := 0; cycle < 3; cycle++ {
 		at := now.Add(time.Duration(cycle) * defaultInterval)
 		accounts := []AccountMetrics{account, peer}
@@ -129,6 +131,10 @@ func TestCostWriteDoesNotConsumeObservedReliabilityFailure(t *testing.T) {
 			t.Fatalf("ordinary cost write swallowed the persistent failure: %+v", candidate)
 		}
 		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)
+		if state := runner.state.Accounts[1]; cycle < 2 &&
+			(state.RecoveryFailures != 2 || state.LastRecoveryFailureAt == nil || !state.LastRecoveryFailureAt.Equal(lastFailure)) {
+			t.Fatalf("cost write renewed the failure episode: %+v", state)
+		}
 		if len(updates) > 0 {
 			account.CurrentPriority = <-updates
 		}
@@ -156,8 +162,9 @@ func TestReliabilityStrategyUpgradeRestartsHighFailureObservation(t *testing.T) 
 		}
 		state := runner.state.Accounts[1]
 		if len(updates) != 0 || runner.state.Strategy != strategyVersion || state.ReliabilityHighSince == nil || !state.ReliabilityHighSince.Equal(now) ||
-			state.RecoveryFailures != 2 || state.LastReliabilityRollbackAt == nil || !state.LastReliabilityRollbackAt.Equal(rollbackAt) ||
-			state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(rollbackAt.Add(5*time.Hour)) {
+			state.RecoveryFailures != 1 || state.LastReliabilityRollbackAt == nil || !state.LastReliabilityRollbackAt.Equal(rollbackAt) ||
+			state.LastRecoveryFailureAt == nil || !state.LastRecoveryFailureAt.Equal(rollbackAt) ||
+			state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(rollbackAt.Add(10*time.Minute)) {
 			t.Fatalf("old strategy timer bypassed observation or lost recovery watermarks: %+v", runner.state)
 		}
 	}
@@ -223,7 +230,7 @@ func TestHealthyEvidenceClearsLegacyRecoveryFailures(t *testing.T) {
 			runner.prepareExploration([]AccountMetrics{account}, recommendations, at)
 			runner.applyRecommendations(context.Background(), recommendations, "secret", at)
 			state := runner.state.Accounts[1]
-			if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(at.Add(30*time.Minute)) {
+			if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(at.Add(10*time.Minute)) {
 				t.Fatalf("new failure inherited legacy long backoff after healthy recovery: %+v", state)
 			}
 		})
@@ -260,13 +267,14 @@ func TestHealthyEvidenceClearsPendingBackoffAcrossRestart(t *testing.T) {
 			}
 			runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
 			runner.state.Accounts[1] = accountState{RecoveryFailures: test.initialFailures,
+				LastRecoveryFailureAt:     timePtr(baseline),
 				LastReliabilityRollbackAt: timePtr(baseline), LastAppliedAt: timePtr(baseline),
 				RecoveryRetryAt: timePtr(now.Add(24 * time.Hour))}
 			recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)
 			runner.prepareExploration([]AccountMetrics{account}, recommendations, now)
 			runner.applyRecommendations(context.Background(), recommendations, "secret", now)
 			state := runner.state.Accounts[1]
-			if (state.RecoveryRetryAt == nil) != test.wantClear || (test.wantClear && state.RecoveryFailures != 0) {
+			if (state.RecoveryRetryAt == nil) != test.wantClear || (test.wantClear && (state.RecoveryFailures != 0 || state.LastRecoveryFailureAt != nil)) {
 				t.Fatalf("healthy recovery did not release the matching backoff: %+v", state)
 			}
 			if err := saveState(runner.config.StateFile, runner.state); err != nil {
@@ -370,7 +378,7 @@ func TestReliabilityRollbackAPIFailureAndDryRunDoNotConsumeEvidence(t *testing.T
 			t.Fatal(err)
 		}
 		state := runner.state.Accounts[1]
-		if state.RecoveryFailures != 0 || state.RecoveryRetryAt != nil || state.LastReliabilityRollbackAt != nil || state.LastReliabilityFailureAt != nil {
+		if state.RecoveryFailures != 0 || state.LastRecoveryFailureAt != nil || state.RecoveryRetryAt != nil || state.LastReliabilityRollbackAt != nil || state.LastReliabilityFailureAt != nil {
 			t.Fatalf("failed write consumed reliability outcome: %+v", state)
 		}
 		if dryRun && (!reflect.DeepEqual(before, runner.state) || len(updates) != 0) {
@@ -389,17 +397,57 @@ func TestReliabilityRepeatedFreshFailuresEscalateBackoff(t *testing.T) {
 	account := reliabilityAccount(1, 5, 5, now.Add(-time.Minute))
 	account.CurrentPriority = priorityBest
 	runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
-	for _, backoff := range []time.Duration{30 * time.Minute, 2 * time.Hour, 5 * time.Hour, 5 * time.Hour, 5 * time.Hour} {
+	for round, backoff := range []time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 3 * time.Hour, 5 * time.Hour, 5 * time.Hour} {
 		account.Window2h.LastTerminalFailureAt = timePtr(now.Add(-time.Second))
 		account.Window2h.FifthTerminalFailureAt = timePtr(now.Add(-5 * time.Second))
 		recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)
 		runner.prepareExploration([]AccountMetrics{account}, recommendations, now)
 		runner.applyRecommendations(context.Background(), recommendations, "secret", now)
 		state := runner.state.Accounts[1]
-		if state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(backoff)) {
+		if state.RecoveryFailures != round+1 || state.LastRecoveryFailureAt == nil || !state.LastRecoveryFailureAt.Equal(now) ||
+			state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(backoff)) {
 			t.Fatalf("fresh failure did not escalate correctly: want=%s state=%+v", backoff, state)
 		}
+		if err := saveState(runner.config.StateFile, runner.state); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := loadState(runner.config.StateFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runner.state = loaded
 		now = now.Add(backoff + time.Minute)
+	}
+}
+
+func TestReliabilityFailureEpisodeResetsAfterSixHours(t *testing.T) {
+	now := nowForTest()
+	for _, test := range []struct {
+		gap          time.Duration
+		wantFailures int
+		wantBackoff  time.Duration
+	}{
+		{6*time.Hour - time.Second, 6, 3 * time.Hour},
+		{6 * time.Hour, 1, 10 * time.Minute},
+		{6*time.Hour + time.Second, 1, 10 * time.Minute},
+	} {
+		t.Run(test.gap.String(), func(t *testing.T) {
+			account := reliabilityAccount(1, 5, 5, now.Add(-time.Minute))
+			account.CurrentPriority = priorityBest
+			runner, _ := progressiveRecoveryRunner(t, http.StatusOK)
+			runner.state.Strategy = strategyVersion
+			runner.state.Accounts[1] = accountState{RecoveryFailures: 5, LastRecoveryFailureAt: timePtr(now.Add(-test.gap)),
+				LastReliabilityRollbackAt: timePtr(now.Add(-test.gap)), LastAppliedAt: timePtr(now.Add(-time.Minute))}
+			runner.source = &fakeMetricsSource{accounts: []AccountMetrics{account}}
+			if err := runner.RunOnce(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			state := runner.state.Accounts[1]
+			if state.RecoveryFailures != test.wantFailures || state.LastRecoveryFailureAt == nil || !state.LastRecoveryFailureAt.Equal(now) ||
+				state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(test.wantBackoff)) {
+				t.Fatalf("failure episode reset ignored its trigger time: %+v", state)
+			}
+		})
 	}
 }
 

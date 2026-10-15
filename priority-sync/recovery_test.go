@@ -60,11 +60,11 @@ func TestRecoveryBackoffUpgradeResumesElapsedWaitAndKeepsDryRunReadOnly(t *testi
 				return
 			}
 			if len(updates) != 1 || <-updates != priorityUnavailable-recoveryRampStep || runner.state.Exploration == nil ||
-				runner.state.Exploration.AccountID != 1 || runner.state.Accounts[1].RecoveryFailures != 4 {
+				runner.state.Exploration.AccountID != 1 || runner.state.Accounts[1].RecoveryFailures != 1 {
 				t.Fatalf("elapsed legacy backoff still blocked gradual recovery: %+v", runner.state)
 			}
 			loaded, err := loadState(runner.config.StateFile)
-			if err != nil || loaded.Accounts[1].RecoveryRetryAt == nil || !loaded.Accounts[1].RecoveryRetryAt.Equal(now.Add(-time.Hour)) {
+			if err != nil || loaded.Accounts[1].RecoveryRetryAt == nil || !loaded.Accounts[1].RecoveryRetryAt.Equal(now.Add(-6*time.Hour+10*time.Minute)) {
 				t.Fatalf("shortened backoff was not persisted: state=%+v err=%v", loaded, err)
 			}
 		})
@@ -280,7 +280,7 @@ func TestProgressiveRecoveryHighFailureRateWaitsAcrossRestart(t *testing.T) {
 	}
 	state := runner.state.Accounts[1]
 	if len(updates) != 1 || <-updates != 65 || runner.state.Exploration != nil || state.RecoveryFailures != 1 ||
-		state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(recoveryDuration+2*defaultInterval+30*time.Minute)) {
+		state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(recoveryDuration+2*defaultInterval+10*time.Minute)) {
 		t.Fatalf("confirmed recovery rollback did not preserve its outcome: %+v", runner.state)
 	}
 }
@@ -408,7 +408,7 @@ func TestProgressiveRecoveryRequiresFreshSamplesAndUsesFailureRateBoundaries(t *
 			runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)
 			state := runner.state.Accounts[1]
 			if test.wantOutcome == recoveryOutcomeUnreliable {
-				if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(at.Add(30*time.Minute)) {
+				if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(at.Add(10*time.Minute)) {
 					t.Fatalf("failed trial did not roll back once with short observation: %+v", state)
 				}
 			} else if state.RecoveryFailures != 0 {
@@ -686,7 +686,7 @@ func TestLowEvidenceRecoveryStillHandlesFailureAfterLeaseEnds(t *testing.T) {
 	runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", now)
 	accounts[0].CurrentPriority = 15
 	state := runner.state.Accounts[1]
-	if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(30*time.Minute)) {
+	if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(10*time.Minute)) {
 		t.Fatalf("post-lease failure did not record backoff: %+v", state)
 	}
 	// The same error remains in the rolling window but must be consumed once.
@@ -793,7 +793,7 @@ func TestMatureRecoveryWithModerateErrorsRollsBackToPreviousStepAfterLeaseEnds(t
 	runner.applyRecommendations(context.Background(), recommendations, "secret", at)
 	state := runner.state.Accounts[1]
 	if len(updates) != 1 || <-updates != 60 || state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil ||
-		!state.RecoveryRetryAt.Equal(at.Add(30*time.Minute)) {
+		!state.RecoveryRetryAt.Equal(at.Add(10*time.Minute)) {
 		t.Fatalf("post-lease rollback did not restore one step with short backoff: %+v", state)
 	}
 }

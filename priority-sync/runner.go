@@ -161,17 +161,19 @@ func (r *Runner) prepareStrategyState(now time.Time) {
 		state.CandidatePriority = 0
 		state.CandidateCount = 0
 		state.PromotionFrozenCycles = 0
-		// v6 already uses the current failure thresholds and observation window.
-		if r.state.Strategy != "evidence-cost-v6" {
+		// v6 and v7 already use the current failure observation window.
+		if r.state.Strategy != "evidence-cost-v6" && r.state.Strategy != "evidence-cost-v7" {
 			state.ReliabilityHighSince = nil
 		}
-		if state.RecoveryRetryAt != nil {
-			// Retain elapsed waiting time when shortening persisted backoffs.
-			startedAt := latestStateTime(state.LastReliabilityRollbackAt, state.LastAppliedAt, state.LastExploredAt)
-			if startedAt == nil {
-				startedAt = timePtr(now)
+		if state.RecoveryFailures > 0 && state.LastRecoveryFailureAt == nil {
+			// Legacy counts have no episode times; restart at the first tier
+			// without discarding the watermarks that prevent duplicate rollbacks.
+			state.RecoveryFailures = 1
+			state.LastRecoveryFailureAt = cloneTimePtr(recoveryFailureBaseline(state))
+			if state.LastRecoveryFailureAt == nil {
+				state.LastRecoveryFailureAt = timePtr(now)
 			}
-			if retryAt := startedAt.Add(recoveryMaxBackoff); state.RecoveryRetryAt.After(retryAt) {
+			if retryAt := state.LastRecoveryFailureAt.Add(recoveryBackoff(1)); state.RecoveryRetryAt != nil && state.RecoveryRetryAt.After(retryAt) {
 				state.RecoveryRetryAt = timePtr(retryAt)
 			}
 		}
@@ -850,21 +852,19 @@ func (r *Runner) finishExploration(recommendation *Recommendation, state *accoun
 
 func recordRecoveryOutcome(state *accountState, outcome string, now time.Time, progressive bool) {
 	switch outcome {
-	case recoveryOutcomeUnreliable:
-		state.RecoveryFailures++
-		backoff := 30 * time.Minute
-		if state.RecoveryFailures > 1 {
-			backoff = recoveryBackoff(state.RecoveryFailures - 1)
+	case recoveryOutcomeUnreliable, recoveryOutcomeFailure:
+		if state.LastRecoveryFailureAt != nil && now.Sub(*state.LastRecoveryFailureAt) >= recoveryFailureResetAfter {
+			state.RecoveryFailures = 0
 		}
-		state.RecoveryRetryAt = timePtr(now.Add(backoff))
+		state.RecoveryFailures++
+		state.LastRecoveryFailureAt = timePtr(now)
+		state.RecoveryRetryAt = timePtr(now.Add(recoveryBackoff(state.RecoveryFailures)))
 	case recoveryOutcomeProgress:
 		state.RecoveryRetryAt = nil
 	case recoveryOutcomeSuccess:
 		state.RecoveryFailures = 0
+		state.LastRecoveryFailureAt = nil
 		state.RecoveryRetryAt = nil
-	case recoveryOutcomeFailure:
-		state.RecoveryFailures++
-		state.RecoveryRetryAt = timePtr(now.Add(recoveryBackoff(state.RecoveryFailures)))
 	case recoveryOutcomeNoResult:
 		backoff := recoveryNoResultBackoff
 		if progressive {
@@ -875,10 +875,8 @@ func recordRecoveryOutcome(state *accountState, outcome string, now time.Time, p
 }
 
 func recoveryBackoff(failures int) time.Duration {
-	if failures == 1 {
-		return 2 * time.Hour
-	}
-	return recoveryMaxBackoff
+	steps := [...]time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute, time.Hour, 2 * time.Hour, 3 * time.Hour, recoveryMaxBackoff}
+	return steps[min(max(failures, 1), len(steps))-1]
 }
 
 func explorationEndStatus(recommendation *Recommendation) string {

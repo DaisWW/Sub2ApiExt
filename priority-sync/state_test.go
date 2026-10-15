@@ -37,7 +37,7 @@ func TestStateRoundTripPreservesExploration(t *testing.T) {
 	started := time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
 	retryAt := started.Add(6 * time.Hour)
 	want := &syncState{
-		Accounts: map[int64]accountState{9: {RecoveryFailures: 2, RecoveryOriginalPriority: 90, RecoveryRetryAt: &retryAt}},
+		Accounts: map[int64]accountState{9: {RecoveryFailures: 2, LastRecoveryFailureAt: &started, RecoveryOriginalPriority: 90, RecoveryRetryAt: &retryAt}},
 		Exploration: &explorationState{
 			AccountID: 9, OriginalPriority: 90, StartedAt: &started,
 			Recovery: true, RecoveryAnchorCostPerMillion: 0.75, RecoveryPeerCount: 3, RecoveryTargetPriority: 10, RecoveryBaselineFailures: 4,
@@ -62,6 +62,9 @@ func TestStateRoundTripPreservesExploration(t *testing.T) {
 	}
 	if got.Accounts[9].RecoveryFailures != 2 || got.Accounts[9].RecoveryOriginalPriority != 90 || got.Accounts[9].RecoveryRetryAt == nil || !got.Accounts[9].RecoveryRetryAt.Equal(retryAt) {
 		t.Fatalf("recovery retry state = %+v", got.Accounts[9])
+	}
+	if got.Accounts[9].LastRecoveryFailureAt == nil || !got.Accounts[9].LastRecoveryFailureAt.Equal(started) {
+		t.Fatalf("failure episode time did not survive restart: %+v", got.Accounts[9])
 	}
 }
 
@@ -104,34 +107,43 @@ func TestLegacyRecoveryStateKeepsRestorationLeaseOnStrategyUpgrade(t *testing.T)
 	}
 }
 
-func TestStrategyUpgradeCapsRecoveryBackoffAcrossRestart(t *testing.T) {
+func TestStrategyUpgradeRestartsLegacyBackoffAtFirstTierAcrossRestart(t *testing.T) {
 	now := nowForTest()
 	for _, test := range []struct {
 		name                     string
+		strategy                 string
 		rollback, applied, trial *time.Time
 		retry, wantRetry         time.Time
 	}{
-		{"24h backoff", timePtr(now), nil, nil, now.Add(24 * time.Hour), now.Add(5 * time.Hour)},
-		{"6h backoff", timePtr(now), nil, nil, now.Add(6 * time.Hour), now.Add(5 * time.Hour)},
-		{"elapsed wait", timePtr(now.Add(-6 * time.Hour)), nil, nil, now.Add(18 * time.Hour), now.Add(-time.Hour)},
-		{"short wait", timePtr(now), nil, nil, now.Add(2 * time.Hour), now.Add(2 * time.Hour)},
-		{"later priority write", timePtr(now.Add(-8 * time.Hour)), timePtr(now.Add(-time.Hour)), nil, now.Add(16 * time.Hour), now.Add(4 * time.Hour)},
-		{"later trial", timePtr(now.Add(-8 * time.Hour)), nil, timePtr(now), now.Add(30 * time.Minute), now.Add(30 * time.Minute)},
-		{"legacy write", nil, timePtr(now.Add(-time.Hour)), nil, now.Add(23 * time.Hour), now.Add(4 * time.Hour)},
-		{"missing time records", nil, nil, nil, now.Add(24 * time.Hour), now.Add(5 * time.Hour)},
+		{"v6 24h backoff", "evidence-cost-v6", timePtr(now), nil, nil, now.Add(24 * time.Hour), now.Add(10 * time.Minute)},
+		{"v7 5h backoff", "evidence-cost-v7", timePtr(now), nil, nil, now.Add(5 * time.Hour), now.Add(10 * time.Minute)},
+		{"elapsed wait", "evidence-cost-v7", timePtr(now.Add(-6 * time.Hour)), nil, nil, now.Add(18 * time.Hour), now.Add(-6*time.Hour + 10*time.Minute)},
+		{"short wait", "evidence-cost-v7", timePtr(now), nil, nil, now.Add(5 * time.Minute), now.Add(5 * time.Minute)},
+		{"later priority write", "evidence-cost-v7", timePtr(now.Add(-8 * time.Hour)), timePtr(now.Add(-time.Hour)), nil, now.Add(16 * time.Hour), now.Add(-8*time.Hour + 10*time.Minute)},
+		{"later trial", "evidence-cost-v7", timePtr(now.Add(-8 * time.Hour)), nil, timePtr(now), now.Add(30 * time.Minute), now.Add(-8*time.Hour + 10*time.Minute)},
+		{"legacy write", "evidence-cost-v7", nil, timePtr(now.Add(-time.Hour)), nil, now.Add(23 * time.Hour), now.Add(-time.Hour + 10*time.Minute)},
+		{"missing time records", "evidence-cost-v7", nil, nil, nil, now.Add(24 * time.Hour), now.Add(10 * time.Minute)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			account := accountState{CandidatePriority: 10, CandidateCount: 2, PromotionFrozenCycles: 2,
 				LastReliabilityRollbackAt: test.rollback, LastAppliedAt: test.applied, LastExploredAt: test.trial,
 				RecoveryFailures: 4, RecoveryOriginalPriority: 90, RecoveryRetryAt: timePtr(test.retry),
 				LastReliabilityFailureAt: timePtr(now.Add(-time.Minute)), ReliabilityHighSince: timePtr(now.Add(-time.Hour))}
-			state := &syncState{Strategy: "evidence-cost-v6", Accounts: map[int64]accountState{9: account},
+			state := &syncState{Strategy: test.strategy, Accounts: map[int64]accountState{9: account},
 				Exploration: &explorationState{AccountID: 9, OriginalPriority: 90, Recovery: true, StartedAt: timePtr(now)}}
 			lease := *state.Exploration
 			runner := &Runner{state: state}
 			runner.prepareStrategyState(now)
 			want := account
 			want.CandidatePriority, want.CandidateCount, want.PromotionFrozenCycles = 0, 0, 0
+			want.RecoveryFailures = 1
+			want.LastRecoveryFailureAt = test.rollback
+			if want.LastRecoveryFailureAt == nil {
+				want.LastRecoveryFailureAt = test.applied
+			}
+			if want.LastRecoveryFailureAt == nil {
+				want.LastRecoveryFailureAt = timePtr(now)
+			}
 			want.RecoveryRetryAt = timePtr(test.wantRetry)
 			if !reflect.DeepEqual(state.Accounts[9], want) || !reflect.DeepEqual(*state.Exploration, lease) || state.Strategy != strategyVersion {
 				t.Fatalf("strategy upgrade changed recovery evidence or deadline: %+v", state)
@@ -153,6 +165,20 @@ func TestStrategyUpgradeCapsRecoveryBackoffAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestStrategyUpgradePreservesTimedFailuresAndNoResultWait(t *testing.T) {
+	now := nowForTest()
+	state := &syncState{Strategy: "evidence-cost-v7", Accounts: map[int64]accountState{
+		1: {RecoveryRetryAt: timePtr(now.Add(recoveryDuration))},
+		2: {RecoveryFailures: 5, LastRecoveryFailureAt: timePtr(now), RecoveryRetryAt: timePtr(now.Add(2 * time.Hour))},
+	}}
+	want := cloneSyncState(state)
+	runner := &Runner{state: state}
+	runner.prepareStrategyState(now)
+	if !reflect.DeepEqual(state.Accounts, want.Accounts) {
+		t.Fatalf("upgrade changed a non-failure wait or an already timed failure: %+v", state.Accounts)
+	}
+}
+
 func TestCloneSyncStateIsIndependent(t *testing.T) {
 	started := nowForTest()
 	state := &syncState{
@@ -163,6 +189,7 @@ func TestCloneSyncStateIsIndependent(t *testing.T) {
 				LastAppliedAt:            timePtr(started),
 				LastExploredAt:           timePtr(started),
 				RecoveryFailures:         2,
+				LastRecoveryFailureAt:    timePtr(started),
 				RecoveryOriginalPriority: 90,
 				RecoveryRetryAt:          timePtr(started.Add(6 * time.Hour)),
 				LastReliabilityFailureAt: timePtr(started), LastReliabilityRollbackAt: timePtr(started), ReliabilityHighSince: timePtr(started),
@@ -177,10 +204,11 @@ func TestCloneSyncStateIsIndependent(t *testing.T) {
 	}
 	clone := cloneSyncState(state)
 	cloned := clone.Accounts[7]
+	*cloned.LastRecoveryFailureAt = started.Add(time.Hour)
 	*cloned.LastReliabilityFailureAt = started.Add(time.Hour)
 	*cloned.LastReliabilityRollbackAt = started.Add(time.Hour)
 	*cloned.ReliabilityHighSince = started.Add(time.Hour)
-	if !state.Accounts[7].LastReliabilityFailureAt.Equal(started) || !state.Accounts[7].LastReliabilityRollbackAt.Equal(started) || !state.Accounts[7].ReliabilityHighSince.Equal(started) {
+	if !state.Accounts[7].LastRecoveryFailureAt.Equal(started) || !state.Accounts[7].LastReliabilityFailureAt.Equal(started) || !state.Accounts[7].LastReliabilityRollbackAt.Equal(started) || !state.Accounts[7].ReliabilityHighSince.Equal(started) {
 		t.Fatal("clone mutation changed source reliability watermarks")
 	}
 	if clone.Accounts[7].RecoveryOriginalPriority != 90 {

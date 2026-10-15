@@ -934,9 +934,9 @@ func TestRecoveryTrialRestoresPriorityAndRecordsOutcomeAfterSuccessfulWrite(t *t
 	}{
 		{name: "no result", wantRetry: 2 * time.Hour},
 		{name: "isolated terminal failure", snapshot: &MetricSnapshot{TerminalFailures: 1}, wantRetry: 2 * time.Hour},
-		{name: "still expensive", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, wantFailures: 1, wantRetry: 2 * time.Hour},
-		{name: "repeated expensive trial", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, previousFailures: 1, wantFailures: 2, wantRetry: 5 * time.Hour},
-		{name: "capped expensive trial", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, previousFailures: 4, wantFailures: 5, wantRetry: 5 * time.Hour},
+		{name: "still expensive", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, wantFailures: 1, wantRetry: 10 * time.Minute},
+		{name: "repeated expensive trial", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, previousFailures: 1, wantFailures: 2, wantRetry: 20 * time.Minute},
+		{name: "capped expensive trial", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 30}, previousFailures: 6, wantFailures: 7, wantRetry: 5 * time.Hour},
 		{name: "short cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 20, PricedRequests: 20, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2, wantFailures: 2},
 		{name: "mature cheap measurement", snapshot: &MetricSnapshot{SuccessfulRequests: 50, PricedRequests: 50, PricedTokens: 1_000_000, TotalTokens: 1_000_000, AccountCost: 1}, previousFailures: 2},
 	}
@@ -1095,10 +1095,34 @@ func TestRecoveryBackoffEscalatesAndCaps(t *testing.T) {
 	tests := []struct {
 		failures int
 		want     time.Duration
-	}{{1, 2 * time.Hour}, {2, 5 * time.Hour}, {3, 5 * time.Hour}, {20, 5 * time.Hour}}
+	}{
+		{0, 10 * time.Minute}, {1, 10 * time.Minute}, {2, 20 * time.Minute}, {3, 30 * time.Minute},
+		{4, time.Hour}, {5, 2 * time.Hour}, {6, 3 * time.Hour}, {7, 5 * time.Hour}, {20, 5 * time.Hour},
+	}
 	for _, test := range tests {
 		if got := recoveryBackoff(test.failures); got != test.want {
 			t.Fatalf("recoveryBackoff(%d) = %s, want %s", test.failures, got, test.want)
+		}
+	}
+}
+
+func TestRecoveryObservationDoesNotRenewFailureEpisode(t *testing.T) {
+	now := nowForTest()
+	for _, outcome := range []string{recoveryOutcomeProgress, recoveryOutcomeNoResult} {
+		for _, progressive := range []bool{false, true} {
+			state := accountState{RecoveryFailures: 6, LastRecoveryFailureAt: timePtr(now.Add(-6 * time.Hour))}
+			recordRecoveryOutcome(&state, outcome, now.Add(-time.Minute), progressive)
+			if state.RecoveryFailures != 6 || state.LastRecoveryFailureAt == nil || !state.LastRecoveryFailureAt.Equal(now.Add(-6*time.Hour)) {
+				t.Fatalf("%s observation renewed the failure episode: %+v", outcome, state)
+			}
+			recordRecoveryOutcome(&state, recoveryOutcomeFailure, now, progressive)
+			if state.RecoveryFailures != 1 || state.RecoveryRetryAt == nil || !state.RecoveryRetryAt.Equal(now.Add(10*time.Minute)) {
+				t.Fatalf("failure after a quiet gap inherited the old tier: %+v", state)
+			}
+			recordRecoveryOutcome(&state, recoveryOutcomeSuccess, now, progressive)
+			if state.RecoveryFailures != 0 || state.LastRecoveryFailureAt != nil || state.RecoveryRetryAt != nil {
+				t.Fatalf("successful recovery retained its failure episode: %+v", state)
+			}
 		}
 	}
 }
