@@ -33,9 +33,9 @@ const (
 	costWeight             = 1.00
 	speedWeight            = 0.00
 	evaluationWeights      = "成本=100%;故障容忍约束=短样本暂停/<3%正常/3%～8%慢升/连续5次或持续>8%回退(至少2周期)"
-	strategyVersion        = "evidence-cost-v8"
+	strategyVersion        = "evidence-cost-v9"
 	decisionWindowPolicy   = "成熟30m/2h实测成本全局排序;短样本同池缓存/倍率先验仅作恢复参考;历史按24h半衰期衰减"
-	recoveryAnchorPolicy   = "倍率仅作短样本恢复参考;观察30m/50新请求;健康8点/中等错误4点;实测成熟且健康后退出恢复;健康新证据解除旧退避;故障按轮退避10m/20m/30m/1h/2h/3h/5h;间隔6h重新起算"
+	recoveryAnchorPolicy   = "倍率仅作短样本恢复参考;观察30m;不足50新请求也按4点恢复到锚点;健康8点/中等错误4点;实测成熟且健康后退出恢复;健康新证据解除旧退避;故障按轮退避10m/20m/30m/1h/2h/3h/5h;间隔6h重新起算"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
 	minimumCostAdvantage   = 0.05

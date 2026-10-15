@@ -98,46 +98,48 @@ func TestHistoricalReevaluationIsBoundedAndRecoveryCandidatesGetFairTurns(t *tes
 	}
 }
 
-func TestProgressiveRecoveryRetainsNoTrafficProgressAcrossRestart(t *testing.T) {
+func TestProgressiveRecoveryReachesAnchorWithoutTrafficAcrossRestart(t *testing.T) {
 	now := nowForTest()
 	accounts := comparableRecoveryAccounts()
+	accounts[0].CurrentPriority = 39
+	accounts[1].CurrentPriority = priorityNeutral
 	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
-	for cycle := 0; cycle < 3; cycle++ {
-		recommendations := scoreAccounts(accounts, now, 5)
-		runner.prepareExploration(accounts, recommendations, now)
-		candidate := testRecommendationByID(t, recommendations, 1)
-		if !candidate.explorationStart || candidate.RecommendedPriority != priorityUnavailable-recoveryRampStep {
-			t.Fatalf("no traffic advanced recovery beyond the first bounded step: %+v", candidate)
-		}
-		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", now)
-		accounts[0].CurrentPriority = candidate.RecommendedPriority
-		if len(updates) != 1 {
-			t.Fatalf("no-result retry wrote another priority step: %d", len(updates))
-		}
-		// Restart in the middle of a lease, including its written position.
-		if err := saveState(runner.config.StateFile, runner.state); err != nil {
+	runner.source = &recoveryObservationSource{fakeMetricsSource: fakeMetricsSource{accounts: accounts}, observation: AccountMetrics{ID: 1}}
+	failureAt := now.Add(-3 * time.Hour)
+	runner.state.Strategy = strategyVersion
+	runner.state.Accounts[1] = accountState{RecoveryFailures: 2, LastRecoveryFailureAt: timePtr(failureAt),
+		LastReliabilityRollbackAt: timePtr(failureAt), RecoveryRetryAt: timePtr(now.Add(-time.Hour))}
+	lastWrite := now.Add(-recoveryDuration)
+	for cycle := 0; cycle <= 21; cycle++ {
+		at := now.Add(time.Duration(cycle) * defaultInterval)
+		previous := accounts[0].CurrentPriority
+		if err := runner.RunOnce(context.Background(), at); err != nil {
 			t.Fatal(err)
+		}
+		if len(updates) > 0 {
+			priority := <-updates
+			step := recoverySlowRampStep
+			if cycle == 0 {
+				step = recoveryRampStep
+			}
+			if len(updates) != 0 || priority != max(priorityBest, previous-step) || at.Sub(lastWrite) < recoveryDuration {
+				t.Fatalf("no-traffic recovery skipped an observation or overshot its anchor: cycle=%d %d->%d", cycle, previous, priority)
+			}
+			accounts[0].CurrentPriority = priority
+			lastWrite = at
+		}
+		state := runner.state.Accounts[1]
+		if state.RecoveryFailures != 2 || state.LastRecoveryFailureAt == nil || !state.LastRecoveryFailureAt.Equal(failureAt) {
+			t.Fatalf("no traffic was treated as a new failure or proven health: %+v", state)
 		}
 		loaded, err := loadState(runner.config.StateFile)
 		if err != nil {
 			t.Fatal(err)
 		}
 		runner.state = loaded
-		now = now.Add(recoveryDuration)
-		recommendations = scoreAccounts(accounts, now, 5)
-		runner.prepareExploration(accounts, recommendations, now)
-		candidate = testRecommendationByID(t, recommendations, 1)
-		if !candidate.explorationEnd || candidate.recoveryOutcome != recoveryOutcomeNoResult || candidate.RecommendedPriority != accounts[0].CurrentPriority {
-			t.Fatalf("no traffic reverted progress or counted as success: %+v", candidate)
-		}
-		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", now)
-		if runner.state.Exploration != nil || runner.state.Accounts[1].RecoveryFailures != 0 || len(updates) != 1 {
-			t.Fatalf("no traffic changed failure state or priority: %+v, writes=%d", runner.state, len(updates))
-		}
-		now = now.Add(recoveryDuration)
 	}
-	if <-updates != priorityUnavailable-recoveryRampStep {
-		t.Fatal("first recovery step exceeded the eight-point limit")
+	if accounts[0].CurrentPriority != priorityBest || runner.state.Exploration != nil {
+		t.Fatalf("no traffic stranded recovery before its anchor: %+v", runner.state)
 	}
 }
 
@@ -149,11 +151,11 @@ func TestProgressiveRecoveryUsesFreshTimestampsRatherThanRollingCounts(t *testin
 		wantPriority, wantFailures int
 		wantOutcome                string
 	}{
-		{"old failure", timePtr(now.Add(-time.Minute)), nil, 670, 0, recoveryOutcomeNoResult},
+		{"old failure", timePtr(now.Add(-time.Minute)), nil, 666, 0, recoveryOutcomeProgress},
 		{"isolated new failure", timePtr(now.Add(time.Minute)), nil, 670, 0, recoveryOutcomeNoResult},
 		{"five new failures", timePtr(now.Add(time.Minute)), nil, priorityUnavailable, 1, recoveryOutcomeUnreliable},
-		{"old success", nil, timePtr(now.Add(-time.Minute)), 670, 0, recoveryOutcomeNoResult},
-		{"one new success", nil, timePtr(now.Add(time.Minute)), 670, 0, recoveryOutcomeNoResult},
+		{"old success", nil, timePtr(now.Add(-time.Minute)), 666, 0, recoveryOutcomeProgress},
+		{"one new success", nil, timePtr(now.Add(time.Minute)), 666, 0, recoveryOutcomeProgress},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -361,7 +363,7 @@ func TestProgressiveRecoveryDryRunDoesNotConsumeFreshEvidence(t *testing.T) {
 	}
 }
 
-func TestProgressiveRecoveryRequiresFreshSamplesAndUsesFailureRateBoundaries(t *testing.T) {
+func TestProgressiveRecoveryUsesSlowStepsForSparseSamplesAndFailureRateBoundaries(t *testing.T) {
 	now := nowForTest()
 	for _, test := range []struct {
 		name                string
@@ -370,15 +372,17 @@ func TestProgressiveRecoveryRequiresFreshSamplesAndUsesFailureRateBoundaries(t *
 		wantPriority        int
 		wantOutcome         string
 	}{
-		{"one new success", 1, 0, false, 60, recoveryOutcomeNoResult},
-		{"forty-nine requests", 49, 0, false, 60, recoveryOutcomeNoResult},
+		{"no requests", 0, 0, false, 56, recoveryOutcomeProgress},
+		{"one new success", 1, 0, false, 56, recoveryOutcomeProgress},
+		{"forty-nine requests", 49, 0, false, 56, recoveryOutcomeProgress},
+		{"fresh error in short sample pauses", 1, 1, false, 60, recoveryOutcomeNoResult},
 		{"fifty healthy requests", 50, 0, false, 52, recoveryOutcomeSuccess},
 		{"isolated error below three percent", 99, 1, false, 52, recoveryOutcomeSuccess},
 		{"exactly three percent", 97, 3, false, 56, recoveryOutcomeProgress},
 		{"exactly eight percent", 92, 8, false, 56, recoveryOutcomeProgress},
 		{"above eight percent waits for confirmation", 91, 9, false, 60, ""},
 		{"fifty requests above eight percent waits for confirmation", 45, 5, false, 60, ""},
-		{"no fresh priced success", 50, 0, true, 60, recoveryOutcomeNoResult},
+		{"no fresh priced success", 50, 0, true, 56, recoveryOutcomeProgress},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			accounts := comparableRecoveryAccounts()
@@ -448,6 +452,41 @@ func TestRecoveryPromotionAPIFailureDoesNotConsumeSamples(t *testing.T) {
 	}
 }
 
+func TestSparseRecoveryFailedWriteAndDryRunKeepProgress(t *testing.T) {
+	now := nowForTest()
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry_run=%t", dryRun), func(t *testing.T) {
+			accounts := comparableRecoveryAccounts()
+			accounts[0].CurrentPriority = 60
+			accounts[1].CurrentPriority = priorityNeutral
+			runner, updates := progressiveRecoveryRunner(t, http.StatusBadGateway)
+			runner.config.DryRun = dryRun
+			runner.source = &recoveryObservationSource{fakeMetricsSource: fakeMetricsSource{accounts: accounts}, observation: AccountMetrics{ID: 1}}
+			runner.state.Strategy = strategyVersion
+			failureAt := now.Add(-3 * time.Hour)
+			runner.state.Accounts[1] = accountState{LastSeenAt: timePtr(now), RecoveryOriginalPriority: 65,
+				LastAppliedAt: timePtr(now.Add(-recoveryDuration)), LastApplied: 60,
+				RecoveryFailures: 2, LastRecoveryFailureAt: timePtr(failureAt), LastReliabilityRollbackAt: timePtr(failureAt)}
+			runner.state.Exploration = &explorationState{AccountID: 1, OriginalPriority: 65, Recovery: true,
+				RecoveryProgressive: true, RecoveryPriority: 60, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now.Add(-recoveryDuration))}
+			before := cloneSyncState(runner.state)
+			if err := runner.RunOnce(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(runner.state.Accounts[1], before.Accounts[1]) || !reflect.DeepEqual(runner.state.Exploration, before.Exploration) {
+				t.Fatalf("failed sparse recovery consumed progress or reset its timer: %+v", runner.state)
+			}
+			if dryRun {
+				if len(updates) != 0 || !reflect.DeepEqual(runner.state, before) {
+					t.Fatal("sparse dry-run changed live state or wrote a priority")
+				}
+			} else if len(updates) != 1 || <-updates != 56 {
+				t.Fatal("sparse recovery did not attempt the bounded step")
+			}
+		})
+	}
+}
+
 type recoveryObservationSource struct {
 	fakeMetricsSource
 	observation AccountMetrics
@@ -508,7 +547,7 @@ func TestRecoveryObservationReadFailureKeepsLease(t *testing.T) {
 	}
 }
 
-func TestInsufficientRecoverySamplesAccumulateAtSamePriorityAcrossRestart(t *testing.T) {
+func TestInsufficientRecoverySamplesRestartObservationAfterSlowStep(t *testing.T) {
 	now := nowForTest()
 	accounts := comparableRecoveryAccounts()
 	accounts[0].CurrentPriority = 60
@@ -524,28 +563,37 @@ func TestInsufficientRecoverySamplesAccumulateAtSamePriorityAcrossRestart(t *tes
 	if err := runner.RunOnce(context.Background(), now.Add(recoveryDuration)); err != nil {
 		t.Fatal(err)
 	}
-	if runner.state.Exploration != nil || len(updates) != 0 {
-		t.Fatal("twenty-five new samples advanced priority")
+	if runner.state.Exploration != nil || len(updates) != 1 || <-updates != 56 {
+		t.Fatal("twenty-five new samples did not allow a slow recovery step")
 	}
 	loaded, err := loadState(runner.config.StateFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runner.state = loaded
-	source.accounts[0].LastPricedSuccessAt = timePtr(now.Add(59 * time.Minute))
+	source.accounts[0].CurrentPriority = 56
+	source.accounts[0].LastPricedSuccessAt = timePtr(now.Add(39 * time.Minute))
 	source.observation.SuccessfulRequests = 50
+	source.observation.LastPricedSuccessAt = source.accounts[0].LastPricedSuccessAt
+	if err := runner.RunOnce(context.Background(), now.Add(recoveryDuration+defaultInterval)); err != nil {
+		t.Fatal(err)
+	}
+	if runner.state.Exploration == nil || !runner.state.Exploration.StartedAt.Equal(now.Add(recoveryDuration)) || len(updates) != 0 {
+		t.Fatalf("restarted lease skipped the new position's observation period: %+v", runner.state)
+	}
+	if err := runner.RunOnce(context.Background(), now.Add(2*recoveryDuration-defaultInterval)); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 0 {
+		t.Fatal("healthy samples skipped the new position's thirty-minute observation")
+	}
+	source.accounts[0].LastPricedSuccessAt = timePtr(now.Add(59 * time.Minute))
 	source.observation.LastPricedSuccessAt = source.accounts[0].LastPricedSuccessAt
 	if err := runner.RunOnce(context.Background(), now.Add(2*recoveryDuration)); err != nil {
 		t.Fatal(err)
 	}
-	if runner.state.Exploration == nil || !runner.state.Exploration.StartedAt.Equal(now) || len(updates) != 0 {
-		t.Fatalf("no-result retry discarded the same-priority observation start: %+v", runner.state)
-	}
-	if err := runner.RunOnce(context.Background(), now.Add(2*recoveryDuration+defaultInterval)); err != nil {
-		t.Fatal(err)
-	}
-	if source.window != 2*recoveryDuration+defaultInterval || len(updates) != 1 || <-updates != 52 || runner.state.Accounts[1].RecoveryOriginalPriority != 60 {
-		t.Fatalf("unconsumed trial samples were lost or reused for multiple steps: window=%s state=%+v", source.window, runner.state)
+	if source.window != recoveryDuration || len(updates) != 1 || <-updates != 48 || runner.state.Accounts[1].RecoveryOriginalPriority != 56 {
+		t.Fatalf("slow step reused evidence from the prior position or failed to resume healthy recovery: window=%s state=%+v", source.window, runner.state)
 	}
 }
 
@@ -618,9 +666,9 @@ func TestMatureRecoveryNeedsFiftyFreshRequestsToGraduate(t *testing.T) {
 		RecoveryProgressive: true, RecoveryPriority: 60, RecoveryTargetPriority: priorityBest, StartedAt: timePtr(now.Add(-recoveryDuration))}
 	recommendations := scoreAccounts([]AccountMetrics{account}, now, 5)
 	runner.prepareExploration([]AccountMetrics{account}, recommendations, now)
-	if got := recommendations[0]; got.CostEvidenceWeight != 1 || got.RecommendedPriority != 60 ||
-		got.recoveryCompleted || got.recoveryOutcome != recoveryOutcomeNoResult {
-		t.Fatalf("mature rolling costs bypassed insufficient fresh recovery evidence: %+v", got)
+	if got := recommendations[0]; got.CostEvidenceWeight != 1 || got.RecommendedPriority != 56 ||
+		got.recoveryCompleted || got.recoveryOutcome != recoveryOutcomeProgress {
+		t.Fatalf("mature rolling costs bypassed the sparse-sample step limit: %+v", got)
 	}
 }
 

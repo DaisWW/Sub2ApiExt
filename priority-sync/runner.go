@@ -161,8 +161,8 @@ func (r *Runner) prepareStrategyState(now time.Time) {
 		state.CandidatePriority = 0
 		state.CandidateCount = 0
 		state.PromotionFrozenCycles = 0
-		// v6 and v7 already use the current failure observation window.
-		if r.state.Strategy != "evidence-cost-v6" && r.state.Strategy != "evidence-cost-v7" {
+		// v6 through v8 already use the current failure observation window.
+		if r.state.Strategy != "evidence-cost-v6" && r.state.Strategy != "evidence-cost-v7" && r.state.Strategy != "evidence-cost-v8" {
 			state.ReliabilityHighSince = nil
 		}
 		if state.RecoveryFailures > 0 && state.LastRecoveryFailureAt == nil {
@@ -508,22 +508,27 @@ func (r *Runner) prepareProgressiveRecovery(account AccountMetrics, recommendati
 	if snapshot != nil {
 		samples = maxInt64(snapshot.SuccessfulRequests, 0) + maxInt64(snapshot.TerminalFailures, 0)
 	}
-	if samples < recoveryMinimumSamples {
-		recommendation.recoveryOutcome = recoveryOutcomeNoResult
-		recommendation.Reason = fmt.Sprintf("本步新增请求 %d/%d，样本不足，保留恢复进度 %d", samples, recoveryMinimumSamples, recommendation.CurrentPriority)
-		return
+	var failureRate float64
+	if samples > 0 {
+		failureRate = float64(maxInt64(snapshot.TerminalFailures, 0)) / float64(samples)
 	}
-	failureRate := float64(maxInt64(snapshot.TerminalFailures, 0)) / float64(samples)
-	if failureRate > recoveryUnreliableFailureRate {
+	if samples >= recoveryMinimumSamples && failureRate > recoveryUnreliableFailureRate {
 		// Keep the trial lease while prepareReliability confirms persistence.
 		recommendation.explorationEnd = false
 		recommendation.ApplyStatus = "recovery-testing"
 		recommendation.Reason = fmt.Sprintf("本步新增请求失败率 %.1f%%，等待持续观察确认，保留恢复进度 %d", failureRate*100, recommendation.CurrentPriority)
 		return
 	}
-	if snapshot.LastPricedSuccessAt == nil || exploration.StartedAt == nil || !snapshot.LastPricedSuccessAt.After(*exploration.StartedAt) {
+	if samples < recoveryMinimumSamples || snapshot.LastPricedSuccessAt == nil || exploration.StartedAt == nil || !snapshot.LastPricedSuccessAt.After(*exploration.StartedAt) {
 		recommendation.recoveryOutcome = recoveryOutcomeNoResult
-		recommendation.Reason = fmt.Sprintf("本步无新计费请求，保留恢复进度 %d", recommendation.CurrentPriority)
+		recommendation.Reason = fmt.Sprintf("本步新增请求 %d/%d，样本或计费证据不足，保留恢复进度 %d", samples, recoveryMinimumSamples, recommendation.CurrentPriority)
+		if !account.recoveryPlaceholder && recommendation.AnchorPriority > 0 && recommendation.AnchorPriority < recommendation.CurrentPriority {
+			// Low priority can prevent new traffic; time-based progress must
+			// not require the requests it is meant to restore.
+			recommendation.RecommendedPriority = recoveryRampPriority(recommendation.CurrentPriority, recommendation.AnchorPriority, false)
+			recommendation.recoveryOutcome = recoveryOutcomeProgress
+			recommendation.Reason = fmt.Sprintf("本步新增请求 %d/%d，样本或计费证据不足，向参考目标 %d 缓慢恢复到 %d 以重新获取请求", samples, recoveryMinimumSamples, recommendation.AnchorPriority, recommendation.RecommendedPriority)
+		}
 		return
 	}
 	if failureRate < recoveryHealthyFailureRate && recoveryCostMature(recommendation, r.state.Accounts[account.ID], now) {

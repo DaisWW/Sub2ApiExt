@@ -167,9 +167,10 @@ func TestStrategyUpgradeRestartsLegacyBackoffAtFirstTierAcrossRestart(t *testing
 
 func TestStrategyUpgradePreservesTimedFailuresAndNoResultWait(t *testing.T) {
 	now := nowForTest()
-	state := &syncState{Strategy: "evidence-cost-v7", Accounts: map[int64]accountState{
+	state := &syncState{Strategy: "evidence-cost-v8", Accounts: map[int64]accountState{
 		1: {RecoveryRetryAt: timePtr(now.Add(recoveryDuration))},
-		2: {RecoveryFailures: 5, LastRecoveryFailureAt: timePtr(now), RecoveryRetryAt: timePtr(now.Add(2 * time.Hour))},
+		2: {RecoveryFailures: 5, LastRecoveryFailureAt: timePtr(now), RecoveryRetryAt: timePtr(now.Add(2 * time.Hour)),
+			LastReliabilityRollbackAt: timePtr(now), ReliabilityHighSince: timePtr(now)},
 	}}
 	want := cloneSyncState(state)
 	runner := &Runner{state: state}
