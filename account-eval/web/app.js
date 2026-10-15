@@ -11,6 +11,7 @@ const statusLabels = { active: '正常', inactive: '停用', error: '错误', ra
 const accountFilterIDs = ['platform-filter', 'type-filter', 'status-filter', 'privacy-filter', 'group-filter', 'account-search'];
 let savedSettings = {}; try { savedSettings = JSON.parse(localStorage.getItem('account_eval_settings') || '{}'); } catch {}
 const manualModels = new Map();
+let manualReasoning = '';
 let noticeTimer;
 function notice(message, error = false) { $('#notice').textContent = message; $('#notice').className = error ? 'error' : ''; $('#notice').hidden = false; clearTimeout(noticeTimer); noticeTimer = setTimeout(() => { $('#notice').hidden = true; }, error ? 15000 : 5000); }
 async function api(path, options = {}) {
@@ -119,13 +120,15 @@ function renderModels() {
   renderReasoning();
 }
 function renderReasoning() {
-  const select = $('#reasoning'), current = savedSettings.reasoning || '', accounts = selectedAccounts().filter((a) => ['openai', 'openai_compatible'].includes(a.platform));
+  const select = $('#reasoning'), current = manualReasoning || 'max', accounts = selectedAccounts().filter((a) => ['openai', 'openai_compatible'].includes(a.platform));
   $('#reasoning-label').hidden = state.selected.size > 0 && !accounts.length; $('#reasoning-hint').hidden = $('#reasoning-label').hidden;
   let levels = Object.keys(reasoningLabels), known = 0;
   for (const a of accounts) { const info = a.model_metadata?.[savedSettings.models[a.platform]]; if (!info) continue; const supported = info.reasoning === false ? [] : info.supported_reasoning_levels?.length ? info.supported_reasoning_levels : null; if (!supported) continue; levels = known ? levels.filter((level) => supported.includes(level)) : supported; known++; }
-  select.replaceChildren(el('option', { value: '' }, '模型默认')); for (const level of levels) select.append(el('option', { value: level }, `${level}${reasoningLabels[level] ? `（${reasoningLabels[level]}）` : ''}`));
-  select.value = levels.includes(current) ? current : ''; savedSettings.reasoning = select.value;
-  $('#reasoning-hint').textContent = known ? `已按 ${known} 个账户的模型能力筛选推理等级。${current && !levels.includes(current) ? '原等级不适用于此范围，已切回模型默认。' : ''}` : '包含 max；主站未提供模型能力时，以账户实际支持的等级为准。';
+  select.replaceChildren(); for (const level of levels) select.append(el('option', { value: level }, `${level}${reasoningLabels[level] ? `（${reasoningLabels[level]}）` : ''}`));
+  if (!levels.length) select.append(el('option', { value: '' }, '无可用推理等级')); select.disabled = !levels.length;
+  const highest = Object.keys(reasoningLabels).reverse().find((level) => levels.includes(level)) || levels.at(-1) || '';
+  select.value = levels.includes(current) ? current : highest;
+  $('#reasoning-hint').textContent = !levels.length ? '所选模型没有共同可用的推理等级，本次不发送推理参数。' : known ? `已按 ${known} 个账户的模型能力筛选推理等级，默认选择最高可用等级。` : '默认 max（最高）；主站未提供模型能力时，以账户实际支持的等级为准。';
 }
 function estimate() { const count = state.selected.size * (testSuite()?.questions.length || 0); $('#run-estimate').textContent = `${state.selected.size} 个账户 × ${testSuite()?.questions.length || 0} 道题 = ${count} 次请求`; $('#start-run').disabled = state.busy || !state.selected.size || !testSuite(); }
 async function refreshRuns() {
@@ -228,7 +231,7 @@ $('#add-question').onclick = () => { state.suite.questions.push({ name: `问题 
 $('#save-suite').onclick = guard(async () => { await saveSuite(); notice('题组已保存，下次可以直接使用'); });
 $('#use-suite').onclick = guard(async () => { const suite = await saveSuite(); state.testSuiteID = suite.id; fillSuites(); tab('compose'); notice('题组已保存，选择账户后即可开始测试'); });
 $('#test-suite').onchange = () => { state.testSuiteID = $('#test-suite').value; renderTestSuite(); };
-$('#reasoning').onchange = () => { savedSettings.reasoning = $('#reasoning').value; };
+$('#reasoning').onchange = () => { manualReasoning = $('#reasoning').value; };
 $('#open-library').onclick = () => tab('library');
 $('#edit-test-suite').onclick = () => { if (testSuite()) editSuite(testSuite()); tab('library'); };
 $('#back-to-test').onclick = () => tab('compose');
