@@ -239,6 +239,10 @@ a { color: var(--blue); }
   #runs { max-height: 180px; }
   .history-columns .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+@media (min-width: 861px) and (max-height: 600px) {
+  .panel.history-list { position: static; max-height: none; }
+  #runs { max-height: 320px; }
+}
 @media (max-width: 720px) {
   .topbar { padding: 0 18px; }
   main { padding: 12px 16px 48px; }
