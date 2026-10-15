@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	_ "modernc.org/sqlite"
 )
 
 type Store struct{ db *sql.DB }
+
+var errRunActive = errors.New("请等待所选任务结束后再删除")
 
 func openStore(ctx context.Context, path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -118,6 +121,33 @@ func (s *Store) run(ctx context.Context, id string) (Run, error) {
 	err = json.Unmarshal([]byte(raw), &r)
 	r.Status = status
 	return r, err
+}
+
+func (s *Store) deleteRuns(ctx context.Context, ids []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id=?`, id).Scan(&status); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return fmt.Errorf("读取待删除任务: %w", err)
+		}
+		if status == "queued" || status == "running" || status == "cancelling" {
+			return errRunActive
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM results WHERE run_id=?`, id); err != nil {
+			return fmt.Errorf("删除任务结果: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM runs WHERE id=?`, id); err != nil {
+			return fmt.Errorf("删除任务: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) results(ctx context.Context, id string, full bool) ([]Result, error) {

@@ -88,6 +88,8 @@ func (s *Server) handler() http.Handler {
 	})
 	api.HandleFunc("POST /api/runs", s.createRun)
 	api.HandleFunc("GET /api/runs/{id}", s.runDetail)
+	api.HandleFunc("DELETE /api/runs/{id}", s.deleteRuns)
+	api.HandleFunc("POST /api/runs/delete", s.deleteRuns)
 	api.HandleFunc("POST /api/runs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.engine.cancelRun(r.Context(), r.PathValue("id")); err != nil {
 			bad(w, 409, "任务不存在或已经结束")
@@ -294,6 +296,36 @@ func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonReply(w, 200, map[string]any{"run": v, "results": results})
+}
+
+func (s *Server) deleteRuns(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []string `json:"run_ids"`
+	}
+	if r.Method == http.MethodDelete {
+		req.IDs = []string{r.PathValue("id")}
+	} else if !decode(w, r, &req) {
+		return
+	}
+	if len(req.IDs) == 0 {
+		bad(w, 400, "请选择要删除的历史批次")
+		return
+	}
+	for _, id := range req.IDs {
+		if !validID.MatchString(id) {
+			bad(w, 400, "任务 ID 无效")
+			return
+		}
+	}
+	if err := s.store.deleteRuns(r.Context(), req.IDs); err != nil {
+		if errors.Is(err, errRunActive) {
+			bad(w, 409, err.Error())
+		} else {
+			bad(w, 500, "删除历史记录失败，未删除任何批次")
+		}
+		return
+	}
+	jsonReply(w, 200, map[string]bool{"ok": true})
 }
 
 func (s *Server) retryRun(w http.ResponseWriter, r *http.Request) {

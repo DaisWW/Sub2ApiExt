@@ -2,7 +2,7 @@
 document.documentElement.classList.toggle('iframe-embedded', window.self !== window.top);
 const $ = (s) => document.querySelector(s);
 const el = (tag, attrs = {}, text = '') => { const n = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) { if (k === 'class') n.className = v; else n.setAttribute(k, v); } if (text) n.textContent = text; return n; };
-const state = { suites: [], accounts: [], groups: [], selected: new Set(), suite: null, testSuiteID: '', runs: [], selectedRuns: { compose: localStorage.getItem('account_eval_current_run') || '', history: '' }, detail: null, detailView: '', cache: new Map(), resultLimit: 24, icon: '', busy: false, refreshing: false, tab: 'compose' };
+const state = { suites: [], accounts: [], groups: [], selected: new Set(), suite: null, testSuiteID: '', runs: [], markedRuns: new Set(), deletingRuns: false, selectedRuns: { compose: localStorage.getItem('account_eval_current_run') || '', history: '' }, detail: null, detailView: '', cache: new Map(), resultLimit: 24, icon: '', busy: false, refreshing: null, tab: 'compose' };
 const labels = { queued: '排队中', running: '执行中', cancelling: '正在取消', cancelled: '已取消', interrupted: '已中断', completed: '完成', completed_with_errors: '部分失败', failed: '失败', incomplete: '未完整输出', pass: '通过', fail: '不通过', review: '待复核' };
 const reasoningLabels = { none: '不推理', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '更高', max: '最高' };
 const platformLabels = { openai: 'OpenAI', anthropic: 'Anthropic', claude: 'Claude', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', kimi: 'Kimi', zhipu: 'Zhipu GLM', deepseek: 'DeepSeek', minimax: 'MiniMax', opencode_go: 'OpenCode', openai_compatible: 'OpenAI Compatible', xai: 'XAI' };
@@ -12,6 +12,7 @@ const accountFilterIDs = ['platform-filter', 'type-filter', 'status-filter', 'pr
 let savedSettings = {}; try { savedSettings = JSON.parse(localStorage.getItem('account_eval_settings') || '{}'); } catch {}
 const manualModels = new Map();
 let manualReasoning = '';
+let pendingDeleteRuns = [];
 let noticeTimer;
 function notice(message, error = false) { $('#notice').textContent = message; $('#notice').className = error ? 'error' : ''; $('#notice').hidden = false; clearTimeout(noticeTimer); noticeTimer = setTimeout(() => { $('#notice').hidden = true; }, error ? 15000 : 5000); }
 async function api(path, options = {}) {
@@ -131,33 +132,70 @@ function renderReasoning() {
   $('#reasoning-hint').textContent = !levels.length ? '所选模型没有共同可用的推理等级，本次不发送推理参数。' : known ? `已按 ${known} 个账户的模型能力筛选推理等级，默认选择最高可用等级。` : '默认 max（最高）；主站未提供模型能力时，以账户实际支持的等级为准。';
 }
 function estimate() { const count = state.selected.size * (testSuite()?.questions.length || 0); $('#run-estimate').textContent = `${state.selected.size} 个账户 × ${testSuite()?.questions.length || 0} 道题 = ${count} 次请求`; $('#start-run').disabled = state.busy || !state.selected.size || !testSuite(); }
-async function refreshRuns() {
-  if (state.refreshing) return;
-  state.refreshing = true;
-  try {
+function isActiveRun(run) { return ['queued', 'running', 'cancelling'].includes(run.status); }
+function refreshRuns() {
+  if (state.deletingRuns) return Promise.resolve();
+  if (state.refreshing) return state.refreshing;
+  state.refreshing = (async () => {
     state.runs = await api('runs');
-    const active = state.runs.filter((r) => ['queued', 'running', 'cancelling'].includes(r.status)); $('#running-count').textContent = active.length ? `(${active.length})` : '';
+    const active = state.runs.filter(isActiveRun); $('#running-count').textContent = active.length ? `(${active.length})` : '';
     for (const view of ['compose', 'history']) {
       if (!state.runs.some((r) => r.id === state.selectedRuns[view])) state.selectedRuns[view] = (view === 'history' ? (state.tab === 'history' ? state.runs[0] : null) : active[0])?.id || '';
     }
     renderRunList($('#runs'), state.runs, 'history');
+    updateRunSelection();
     const other = active.filter((r) => r.id !== state.selectedRuns.compose); $('#active-runs').hidden = !other.length; renderRunList($('#active-runs'), other, 'compose');
     if (state.tab !== 'compose' && state.tab !== 'history') return;
     const view = state.tab, id = state.selectedRuns[view];
     $('#live-empty').hidden = !!state.selectedRuns.compose; $('#history-empty').hidden = !!state.selectedRuns.history;
     if (!id) { $('#run-detail').hidden = true; $('#live-empty').textContent = '选择题组和账户后开始测试，结果会显示在这里。'; $('#history-empty').textContent = '选择一个历史批次查看结果。'; return; }
     if (state.detail?.run.id !== id || state.detailView !== view) await selectRun(id, view); else await refreshDetail();
-  } finally { state.refreshing = false; }
+  })().finally(() => { state.refreshing = null; });
+  return state.refreshing;
+}
+function updateRunSelection() {
+  const available = new Set(state.runs.filter((r) => !isActiveRun(r)).map((r) => r.id));
+  for (const id of state.markedRuns) if (!available.has(id)) state.markedRuns.delete(id);
+  for (const input of document.querySelectorAll('#runs input[type="checkbox"]')) { input.checked = state.markedRuns.has(input.dataset.runId); input.disabled = state.deletingRuns || !available.has(input.dataset.runId); }
+  const select = $('#select-all-runs'); select.disabled = state.deletingRuns || !available.size; select.checked = available.size > 0 && state.markedRuns.size === available.size; select.indeterminate = state.markedRuns.size > 0 && !select.checked;
+  $('#run-selection-count').textContent = `已选 ${state.markedRuns.size} 个批次`; $('#delete-selected-runs').disabled = state.deletingRuns || !state.markedRuns.size;
+  $('#delete-run').disabled = state.deletingRuns;
+}
+function confirmRunDeletion(runs) {
+  if (state.deletingRuns || !runs.length) return;
+  if (runs.some(isActiveRun)) throw new Error('请等待所选任务结束后再删除');
+  pendingDeleteRuns = runs.map((r) => r.id);
+  $('#delete-runs-count').textContent = `即将删除 ${runs.length} 个历史批次：`;
+  $('#delete-runs-list').replaceChildren(...runs.map((r) => el('li', {}, `${r.name} · ${new Date(r.created_at).toLocaleString()}`)));
+  const dialog = $('#delete-runs-dialog'); dialog.returnValue = ''; dialog.showModal();
+}
+async function deleteRuns(ids) {
+  if (state.deletingRuns || !ids.length) return;
+  state.deletingRuns = true; updateRunSelection();
+  try {
+    await state.refreshing;
+    await api(ids.length === 1 ? `runs/${ids[0]}` : 'runs/delete', { method: ids.length === 1 ? 'DELETE' : 'POST', ...(ids.length === 1 ? {} : { body: JSON.stringify({ run_ids: ids }) }) });
+    for (const id of ids) state.markedRuns.delete(id);
+    for (const view of ['compose', 'history']) if (ids.includes(state.selectedRuns[view])) state.selectedRuns[view] = '';
+    if (ids.includes(localStorage.getItem('account_eval_current_run'))) localStorage.removeItem('account_eval_current_run');
+    if (ids.includes(state.detail?.run.id)) { state.detail = null; state.cache.clear(); $('#run-detail').hidden = true; $('#results').replaceChildren(); $('#results').dataset.revision = ''; }
+    state.runs = state.runs.filter((r) => !ids.includes(r.id)); renderRunList($('#runs'), state.runs, 'history');
+    state.deletingRuns = false; await refreshRuns(); notice(`已删除 ${ids.length} 个历史批次`);
+  } finally { state.deletingRuns = false; updateRunSelection(); }
 }
 function renderRunList(box, runs, view) {
   const revision = `${state.selectedRuns[view]}:${runs.map((r) => `${r.id}:${r.status}:${r.done}`).join('|')}`;
   if (box.dataset.revision === revision) return;
   box.dataset.revision = revision; box.replaceChildren();
   if (view === 'compose' && runs.length) box.append(el('p', { class: 'hint' }, '其他正在执行或等待的批次'));
-  for (const r of runs) { const button = el('button', { class: `run-row${state.selectedRuns[view] === r.id ? ' selected' : ''}` }); const title = el('span', { class: 'run-title' }, r.name); title.append(el('small', {}, `${new Date(r.created_at).toLocaleString()} · ${r.accounts.length} 个账户 · ${r.suite.questions.length} 道题`)); button.append(title, el('span', { class: `badge ${r.status}` }, labels[r.status] || r.status), el('progress', { max: r.total || 1, value: r.done }), el('span', { class: 'muted' }, `${r.done}/${r.total}`)); button.onclick = guard(async () => { await selectRun(r.id, view); await refreshRuns(); }); box.append(button); }
+  for (const r of runs) {
+    const button = el('button', { class: `run-row${state.selectedRuns[view] === r.id ? ' selected' : ''}` }); const title = el('span', { class: 'run-title' }, r.name); title.append(el('small', {}, `${new Date(r.created_at).toLocaleString()} · ${r.accounts.length} 个账户 · ${r.suite.questions.length} 道题`)); button.append(title, el('span', { class: `badge ${r.status}` }, labels[r.status] || r.status), el('progress', { max: r.total || 1, value: r.done }), el('span', { class: 'muted' }, `${r.done}/${r.total}`)); button.onclick = guard(async () => { if (state.deletingRuns) return; await selectRun(r.id, view); await refreshRuns(); });
+    if (view === 'history') { const item = el('div', { class: 'history-run' }), check = el('input', { type: 'checkbox', 'data-run-id': r.id, 'aria-label': `选择批次 ${r.name} · ${new Date(r.created_at).toLocaleString()}` }); check.checked = state.markedRuns.has(r.id); check.disabled = isActiveRun(r) || state.deletingRuns; check.onchange = () => { check.checked ? state.markedRuns.add(r.id) : state.markedRuns.delete(r.id); updateRunSelection(); }; item.append(check, button); box.append(item); } else box.append(button);
+  }
   if (view === 'history' && !runs.length) box.append(el('div', { class: 'empty' }, '还没有历史记录。开始测试后会自动保存。'));
 }
 async function selectRun(id, view = state.tab) {
+  if (state.deletingRuns) return;
   state.selectedRuns[view] = id;
   if (view === 'compose') localStorage.setItem('account_eval_current_run', id);
   if (state.tab === view) { $('#run-detail').hidden = true; const empty = $(`#${view === 'compose' ? 'live' : 'history'}-empty`); empty.textContent = '正在加载批次结果…'; empty.hidden = false; }
@@ -175,7 +213,7 @@ async function renderDetail() {
   const { run } = state.detail; $('#run-detail').hidden = false; $('#detail-title').textContent = run.name;
   $('#detail-meta').textContent = `${labels[run.status] || run.status} · ${run.done}/${run.total} · 并发 ${run.settings.concurrency} · 单题 ${run.settings.timeout_seconds}s${run.parent_id ? ' · 失败项重试批次' : ''}`;
   $('#run-snapshot').textContent = JSON.stringify({ questions: run.suite.questions, settings: run.settings, accounts: run.accounts }, null, 2);
-  const active = ['queued', 'running', 'cancelling'].includes(run.status); $('#cancel-run').hidden = !active; $('#cancel-run').disabled = run.status === 'cancelling'; $('#retry-run').hidden = active || !state.detail.results.some((r) => r.status !== 'completed');
+  const active = isActiveRun(run); $('#cancel-run').hidden = !active; $('#cancel-run').disabled = run.status === 'cancelling'; $('#retry-run').hidden = active || !state.detail.results.some((r) => r.status !== 'completed'); $('#delete-run').hidden = state.tab !== 'history' || active;
   $('#detail-progress').max = run.total || 1; $('#detail-progress').value = run.done; $('#detail-progress-text').textContent = `${run.done} / ${run.total} 完成`;
   const counts = { queued: 0, running: 0, completed: 0, failed: 0 }; for (const r of state.detail.results) counts[r.status in counts ? r.status : 'failed']++;
   $('#result-counts').replaceChildren(); for (const [status, label] of [['queued', '等待'], ['running', '执行中'], ['completed', '完成'], ['failed', '失败 / 中断']]) { const count = el('div', { class: `count ${status}` }); count.append(el('strong', {}, String(counts[status])), el('span', {}, label)); $('#result-counts').append(count); }
@@ -245,6 +283,10 @@ $('#select-visible').onclick = () => { visibleAccounts().forEach((a) => state.se
 $('#clear-selection').onclick = () => { state.selected.clear(); renderAccounts(); selectionChanged(); };
 $('#start-run').onclick = guard(async () => { if (state.busy) return; if (!state.selected.size) throw new Error('请先选择账户'); const suite = testSuite(); if (!suite) throw new Error('请先到题库保存并选择一个题组'); state.busy = true; estimate(); try { const settings = settingsFromForm(); const run = await api('runs', { method: 'POST', body: JSON.stringify({ suite_id: suite.id, account_ids: [...state.selected], settings }) }); localStorage.setItem('account_eval_settings', JSON.stringify(settings)); tab('compose'); await selectRun(run.id, 'compose'); await refreshRuns(); $('#live-section').scrollIntoView({ behavior: 'smooth', block: 'start' }); notice('任务已加入队列，下方会自动更新进度和结果'); } finally { state.busy = false; estimate(); } });
 $('#refresh-runs').onclick = guard(refreshRuns);
+$('#select-all-runs').onchange = () => { state.markedRuns = new Set($('#select-all-runs').checked ? state.runs.filter((r) => !isActiveRun(r)).map((r) => r.id) : []); updateRunSelection(); };
+$('#delete-selected-runs').onclick = guard(() => confirmRunDeletion(state.runs.filter((r) => state.markedRuns.has(r.id))));
+$('#delete-run').onclick = guard(() => confirmRunDeletion([state.detail.run]));
+$('#delete-runs-dialog').addEventListener('close', guard(async () => { const ids = pendingDeleteRuns; pendingDeleteRuns = []; if ($('#delete-runs-dialog').returnValue === 'delete') await deleteRuns(ids); }));
 $('#cancel-run').onclick = guard(async () => { await api(`runs/${state.detail.run.id}/cancel`, { method: 'POST' }); await refreshRuns(); });
 $('#retry-run').onclick = guard(async () => { const button = $('#retry-run'); button.disabled = true; try { const run = await api(`runs/${state.detail.run.id}/retry`, { method: 'POST' }); tab('compose'); await selectRun(run.id, 'compose'); await refreshRuns(); $('#live-section').scrollIntoView({ behavior: 'smooth', block: 'start' }); } finally { button.disabled = false; } });
 $('#export-run').onclick = guard(async () => { const detail = state.detail; const results = []; for (const r of detail.results) results.push(await api(`results/${r.id}`)); download(`${detail.run.name}.json`, JSON.stringify({ run: detail.run, results }, null, 2), 'application/json'); });

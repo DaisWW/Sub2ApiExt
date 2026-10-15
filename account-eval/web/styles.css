@@ -78,11 +78,23 @@ small, .muted, .hint { color: var(--muted); }
 .history-columns { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 20px; align-items: start; }
 .history-list { position: sticky; top: 145px; max-height: calc(100vh - 168px); overflow: auto; padding: 16px; }
 .history-list h2 { margin: 0 0 14px; font-size: 14px; }
+.history-tools { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.history-tools label { display: flex; align-items: center; gap: 8px; }
+.history-tools .row { justify-content: space-between; font-size: 11px; }
+.history-tools input, .history-run > input { flex: 0 0 auto; width: 16px; height: 16px; min-height: 0; margin: 0; }
+.history-run { display: grid; grid-template-columns: 16px minmax(0, 1fr); align-items: start; gap: 8px; }
+.history-run > input { margin-top: 23px; }
 .history-list .run-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; padding: 12px; }
 .history-list .run-title { grid-column: 1 / -1; font-size: 12px; }
 .history-list .run-row progress { grid-row: 3; width: 100%; }
 .history-list .run-row > .muted { grid-column: 2; grid-row: 3; font-size: 11px; }
 .history-columns .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+#delete-runs-dialog { width: min(520px, calc(100vw - 32px)); padding: 24px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text); box-shadow: 0 20px 80px #0008; }
+#delete-runs-dialog::backdrop { background: #0009; }
+#delete-runs-dialog p, #delete-runs-list { color: var(--soft); font-size: 13px; }
+#delete-runs-list { max-height: 220px; overflow: auto; padding-left: 22px; overflow-wrap: anywhere; }
+#delete-runs-list li { margin: 8px 0; }
+#delete-runs-dialog .row { justify-content: flex-end; margin-top: 24px; }
 .panel { min-width: 0; padding: 22px; margin-bottom: 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .row, .heading, .launch { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .heading, .launch { justify-content: space-between; }
