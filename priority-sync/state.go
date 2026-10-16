@@ -33,6 +33,7 @@ type explorationState struct {
 type accountState struct {
 	CandidatePriority         int        `json:"candidate_priority,omitempty"`
 	CandidateCount            int        `json:"candidate_count,omitempty"`
+	CandidateSince            *time.Time `json:"candidate_since,omitempty"`
 	LastSeenAt                *time.Time `json:"last_seen_at,omitempty"`
 	LastAppliedAt             *time.Time `json:"last_applied_at,omitempty"`
 	LastApplied               int        `json:"last_applied_priority,omitempty"`
@@ -67,6 +68,7 @@ func cloneSyncState(source *syncState) *syncState {
 		clone.Accounts[id] = accountState{
 			CandidatePriority:         account.CandidatePriority,
 			CandidateCount:            account.CandidateCount,
+			CandidateSince:            cloneTimePtr(account.CandidateSince),
 			LastSeenAt:                cloneTimePtr(account.LastSeenAt),
 			LastAppliedAt:             cloneTimePtr(account.LastAppliedAt),
 			LastApplied:               account.LastApplied,

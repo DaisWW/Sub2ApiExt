@@ -12,7 +12,7 @@ func TestStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	want := &syncState{Accounts: map[int64]accountState{
-		42: {CandidatePriority: 120, CandidateCount: 2, LastAppliedAt: &now, LastApplied: 120,
+		42: {CandidatePriority: 120, CandidateCount: 2, CandidateSince: &now, LastAppliedAt: &now, LastApplied: 120,
 			LastReliabilityFailureAt: &now, LastReliabilityRollbackAt: &now, ReliabilityHighSince: &now},
 	}}
 	if err := saveState(path, want); err != nil {
@@ -22,7 +22,8 @@ func TestStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Accounts[42].CandidatePriority != 120 || got.Accounts[42].CandidateCount != 2 || got.Accounts[42].LastApplied != 120 {
+	if got.Accounts[42].CandidatePriority != 120 || got.Accounts[42].CandidateCount != 2 || got.Accounts[42].LastApplied != 120 ||
+		got.Accounts[42].CandidateSince == nil || !got.Accounts[42].CandidateSince.Equal(now) {
 		t.Fatalf("state = %+v", got)
 	}
 	account := got.Accounts[42]
@@ -167,7 +168,7 @@ func TestStrategyUpgradeRestartsLegacyBackoffAtFirstTierAcrossRestart(t *testing
 
 func TestStrategyUpgradePreservesTimedFailuresAndNoResultWait(t *testing.T) {
 	now := nowForTest()
-	for _, strategy := range []string{"evidence-cost-v8", "evidence-cost-v9"} {
+	for _, strategy := range []string{"evidence-cost-v8", "evidence-cost-v9", "evidence-cost-v10"} {
 		t.Run(strategy, func(t *testing.T) {
 			state := &syncState{Strategy: strategy, Accounts: map[int64]accountState{
 				1: {RecoveryRetryAt: timePtr(now.Add(recoveryDuration))},
@@ -193,6 +194,7 @@ func TestCloneSyncStateIsIndependent(t *testing.T) {
 			7: {
 				CandidatePriority:        30,
 				CandidateCount:           2,
+				CandidateSince:           timePtr(started),
 				LastAppliedAt:            timePtr(started),
 				LastExploredAt:           timePtr(started),
 				RecoveryFailures:         2,
@@ -211,6 +213,10 @@ func TestCloneSyncStateIsIndependent(t *testing.T) {
 	}
 	clone := cloneSyncState(state)
 	cloned := clone.Accounts[7]
+	*cloned.CandidateSince = started.Add(time.Hour)
+	if !state.Accounts[7].CandidateSince.Equal(started) {
+		t.Fatal("clone mutation changed source cost observation time")
+	}
 	*cloned.LastRecoveryFailureAt = started.Add(time.Hour)
 	*cloned.LastReliabilityFailureAt = started.Add(time.Hour)
 	*cloned.LastReliabilityRollbackAt = started.Add(time.Hour)

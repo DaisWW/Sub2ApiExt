@@ -143,6 +143,8 @@ func tableActionLabel(value string) string {
 		return "已更新"
 	case "pending":
 		return "待确认"
+	case "cost-observing":
+		return "成本观察中"
 	case "cooldown":
 		return "冷却中"
 	case "exploring":

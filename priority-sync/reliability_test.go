@@ -109,11 +109,13 @@ func TestCostWriteDoesNotConsumeObservedReliabilityFailure(t *testing.T) {
 	now := nowForTest()
 	account := reliabilityAccount(90, 10, 0, now.Add(-time.Minute))
 	account.CurrentPriority = priorityBest
+	account.Window2h.LastPricedSuccessAt = timePtr(now.Add(-time.Minute))
 	peer := comparableCostAccount(2, 0.05, 0.9, 100, 5_000_000, 90)
 	peer.CurrentPriority = priorityBest
 	runner, updates := progressiveRecoveryRunner(t, http.StatusOK)
 	lastFailure := now.Add(-6 * time.Hour)
 	runner.state.Accounts[1] = accountState{LastAppliedAt: timePtr(now.Add(-time.Hour)),
+		CandidatePriority: priorityPoor, CandidateCount: 1, CandidateSince: timePtr(now.Add(-costDegradationGrace - time.Minute)),
 		RecoveryFailures: 2, LastRecoveryFailureAt: timePtr(lastFailure)}
 	for cycle := 0; cycle < 3; cycle++ {
 		at := now.Add(time.Duration(cycle) * defaultInterval)
@@ -127,7 +129,7 @@ func TestCostWriteDoesNotConsumeObservedReliabilityFailure(t *testing.T) {
 		if cycle == 1 && candidate.ReliabilityAction != "observe" {
 			t.Fatalf("ordinary cost write ended the two-cycle observation early: %+v", candidate)
 		}
-		if cycle == 2 && (candidate.ReliabilityAction != "rollback" || candidate.RecommendedPriority != priorityDegraded) {
+		if cycle == 2 && (candidate.ReliabilityAction != "rollback" || candidate.RecommendedPriority != priorityNeutral) {
 			t.Fatalf("ordinary cost write swallowed the persistent failure: %+v", candidate)
 		}
 		runner.applyRecommendations(context.Background(), []Recommendation{candidate}, "secret", at)

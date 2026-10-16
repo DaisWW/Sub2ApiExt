@@ -33,8 +33,8 @@ const (
 	costWeight             = 1.00
 	speedWeight            = 0.00
 	evaluationWeights      = "成本=100%;故障容忍约束=短样本暂停/<3%正常/3%～8%慢升/连续5次或持续>8%回退(至少2周期)"
-	strategyVersion        = "evidence-cost-v10"
-	decisionWindowPolicy   = "成熟30m/2h实测成本全局排序;短样本同池缓存/倍率先验仅作恢复参考;历史按24h半衰期衰减"
+	strategyVersion        = "evidence-cost-v11"
+	decisionWindowPolicy   = "成熟30m/2h实测成本全局排序;纯成本降级观察30m并等待期后新计费请求;短样本同池缓存/倍率先验仅作恢复参考;历史按24h半衰期衰减"
 	recoveryAnchorPolicy   = "倍率仅作短样本恢复参考;观察10m;不足50新请求也按8点恢复到锚点;健康16点/中等错误8点;实测成熟且健康后退出恢复;健康新证据解除旧退避;故障按轮退避10m/20m/30m/1h/2h/3h/5h;间隔6h重新起算"
 	durationWeight         = 0.70
 	firstTokenWeight       = 0.30
@@ -45,6 +45,7 @@ const (
 	promotionFreezeCycles  = 2
 	shrinkTokens           = 20_000_000
 	stateRetentionDuration = 24 * time.Hour
+	costDegradationGrace   = 30 * time.Minute
 )
 
 // 优先级数值越小越优先。正式评分使用 10..90，探索档位 20 保留给

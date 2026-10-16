@@ -166,6 +166,7 @@ func scoreAccounts(accounts []AccountMetrics, now time.Time, minSamples int) []R
 			recoveryReevaluation:      useEstimate[index] && estimates[index].Reevaluate && anchorPriority != priorityForScore(score),
 		}
 		if costEvidence[index].Valid {
+			recommendation.scoringLastSuccessAt = cloneTimePtr(costEvidence[index].Snapshot.LastPricedSuccessAt)
 			recommendation.CostPerMillionTokens = costValues[index]
 			recommendation.ObservedCostPerMillion = costEvidence[index].CostPerMillion
 			recommendation.CacheHitRate = costEvidence[index].CacheHitRate

@@ -160,9 +160,10 @@ func (r *Runner) prepareStrategyState(now time.Time) {
 	for id, state := range r.state.Accounts {
 		state.CandidatePriority = 0
 		state.CandidateCount = 0
+		state.CandidateSince = nil
 		state.PromotionFrozenCycles = 0
-		// v6 through v9 already use the current failure observation window.
-		if r.state.Strategy != "evidence-cost-v6" && r.state.Strategy != "evidence-cost-v7" && r.state.Strategy != "evidence-cost-v8" && r.state.Strategy != "evidence-cost-v9" {
+		// v6 through v10 already use the current failure observation window.
+		if r.state.Strategy != "evidence-cost-v6" && r.state.Strategy != "evidence-cost-v7" && r.state.Strategy != "evidence-cost-v8" && r.state.Strategy != "evidence-cost-v9" && r.state.Strategy != "evidence-cost-v10" {
 			state.ReliabilityHighSince = nil
 		}
 		if state.RecoveryFailures > 0 && state.LastRecoveryFailureAt == nil {
@@ -544,6 +545,10 @@ func (r *Runner) prepareProgressiveRecovery(account AccountMetrics, recommendati
 		target := recommendation.AnchorPriority
 		recommendation.RecommendedPriority = recoveryRampPriority(recommendation.CurrentPriority, target, failureRate < recoveryHealthyFailureRate)
 	}
+	if recommendation.RecommendedPriority > recommendation.CurrentPriority {
+		// A cost increase during recovery needs the same warmup tolerance.
+		recommendation.applyImmediately = false
+	}
 	recommendation.recoveryOutcome = recoveryOutcomeSuccess
 	if failureRate >= recoveryHealthyFailureRate {
 		recommendation.recoveryOutcome = recoveryOutcomeProgress
@@ -715,6 +720,7 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 			recordReliabilityObservation(&state, recommendation, now)
 			state.CandidatePriority = 0
 			state.CandidateCount = 0
+			state.CandidateSince = nil
 			if isActiveExploration && recommendation.explorationEnd {
 				r.finishExploration(recommendation, &state, now)
 				activeExplorationID = 0
@@ -762,6 +768,25 @@ func (r *Runner) applyRecommendations(ctx context.Context, recommendations []Rec
 		} else {
 			state.CandidatePriority = recommendation.RecommendedPriority
 			state.CandidateCount = 1
+			state.CandidateSince = timePtr(now)
+		}
+		if direction > 0 && hasReliableCost(recommendation) {
+			if state.CandidateSince == nil {
+				state.CandidateSince = timePtr(now)
+			}
+			deadline := state.CandidateSince.Add(costDegradationGrace)
+			if now.Before(deadline) || recommendation.scoringLastSuccessAt == nil || recommendation.scoringLastSuccessAt.Before(deadline) {
+				recommendation.ApplyStatus = "cost-observing"
+				recommendation.Reason += "；纯成本降级至少观察30分钟，等待观察期后的新增计费请求"
+				// Holding for cost must not postpone fault observation or consume
+				// a recovery graduation that still needs a successful write.
+				observation := *recommendation
+				observation.recoveryCompleted = false
+				recordReliabilityObservation(&state, &observation, now)
+				pending++
+				r.state.Accounts[recommendation.ID] = state
+				continue
+			}
 		}
 		if state.CandidateCount < r.config.Confirmations {
 			recommendation.ApplyStatus = "pending"
@@ -980,6 +1005,7 @@ func (r *Runner) applyPriorityUpdate(ctx context.Context, recommendation *Recomm
 	state.LastApplied = priority
 	state.CandidatePriority = 0
 	state.CandidateCount = 0
+	state.CandidateSince = nil
 	recommendation.ApplyStatus = "updated"
 	return true
 }

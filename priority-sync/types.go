@@ -207,6 +207,7 @@ type Recommendation struct {
 	ApplyStatus                  string                  `json:"apply_status,omitempty"`
 	Reason                       string                  `json:"reason"`
 	applyImmediately             bool
+	scoringLastSuccessAt         *time.Time
 	costAdvantageKnown           bool
 	explorationStart             bool
 	explorationEnd               bool

@@ -873,8 +873,13 @@ func TestRunnerAllowsDowngradeDuringPromotionFreeze(t *testing.T) {
 	runner.tableWriter = io.Discard
 	recommendation := Recommendation{ID: 1, Name: "degrade", CurrentPriority: priorityBest, RecommendedPriority: priorityPoor,
 		CostPerMillionTokens: 1, CostAdvantage: 0, PoolCount: 1}
-	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", nowForTest()); changed != 1 || pending != 0 {
-		t.Fatalf("downgrade was blocked during freeze: changed=%d pending=%d", changed, pending)
+	start := nowForTest()
+	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", start); changed != 0 || pending != 1 {
+		t.Fatalf("cost downgrade skipped warmup: changed=%d pending=%d", changed, pending)
+	}
+	recommendation.scoringLastSuccessAt = timePtr(start.Add(costDegradationGrace))
+	if changed, pending := runner.applyRecommendations(context.Background(), []Recommendation{recommendation}, "secret", start.Add(costDegradationGrace)); changed != 1 || pending != 0 {
+		t.Fatalf("confirmed downgrade was blocked by legacy freeze: changed=%d pending=%d", changed, pending)
 	}
 	if got := <-updates; got != priorityGood {
 		t.Fatalf("downgrade step = %d, want %d", got, priorityGood)
