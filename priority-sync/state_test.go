@@ -167,16 +167,22 @@ func TestStrategyUpgradeRestartsLegacyBackoffAtFirstTierAcrossRestart(t *testing
 
 func TestStrategyUpgradePreservesTimedFailuresAndNoResultWait(t *testing.T) {
 	now := nowForTest()
-	state := &syncState{Strategy: "evidence-cost-v8", Accounts: map[int64]accountState{
-		1: {RecoveryRetryAt: timePtr(now.Add(recoveryDuration))},
-		2: {RecoveryFailures: 5, LastRecoveryFailureAt: timePtr(now), RecoveryRetryAt: timePtr(now.Add(2 * time.Hour)),
-			LastReliabilityRollbackAt: timePtr(now), ReliabilityHighSince: timePtr(now)},
-	}}
-	want := cloneSyncState(state)
-	runner := &Runner{state: state}
-	runner.prepareStrategyState(now)
-	if !reflect.DeepEqual(state.Accounts, want.Accounts) {
-		t.Fatalf("upgrade changed a non-failure wait or an already timed failure: %+v", state.Accounts)
+	for _, strategy := range []string{"evidence-cost-v8", "evidence-cost-v9"} {
+		t.Run(strategy, func(t *testing.T) {
+			state := &syncState{Strategy: strategy, Accounts: map[int64]accountState{
+				1: {RecoveryRetryAt: timePtr(now.Add(recoveryDuration))},
+				2: {RecoveryFailures: 5, LastRecoveryFailureAt: timePtr(now), RecoveryRetryAt: timePtr(now.Add(2 * time.Hour)),
+					LastReliabilityRollbackAt: timePtr(now), ReliabilityHighSince: timePtr(now)},
+			}, Exploration: &explorationState{AccountID: 1, OriginalPriority: 65, Recovery: true,
+				RecoveryProgressive: true, RecoveryPriority: 60, RecoveryTargetPriority: 30, StartedAt: timePtr(now.Add(-15 * time.Minute))}}
+			want := cloneSyncState(state)
+			want.Strategy = strategyVersion
+			runner := &Runner{state: state}
+			runner.prepareStrategyState(now)
+			if !reflect.DeepEqual(state, want) || !explorationExpired(state.Exploration, now) {
+				t.Fatalf("upgrade lost recovery evidence or restarted the elapsed observation: %+v", state)
+			}
+		})
 	}
 }
 

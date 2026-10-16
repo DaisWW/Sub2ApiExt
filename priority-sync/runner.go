@@ -161,8 +161,8 @@ func (r *Runner) prepareStrategyState(now time.Time) {
 		state.CandidatePriority = 0
 		state.CandidateCount = 0
 		state.PromotionFrozenCycles = 0
-		// v6 through v8 already use the current failure observation window.
-		if r.state.Strategy != "evidence-cost-v6" && r.state.Strategy != "evidence-cost-v7" && r.state.Strategy != "evidence-cost-v8" {
+		// v6 through v9 already use the current failure observation window.
+		if r.state.Strategy != "evidence-cost-v6" && r.state.Strategy != "evidence-cost-v7" && r.state.Strategy != "evidence-cost-v8" && r.state.Strategy != "evidence-cost-v9" {
 			state.ReliabilityHighSince = nil
 		}
 		if state.RecoveryFailures > 0 && state.LastRecoveryFailureAt == nil {
