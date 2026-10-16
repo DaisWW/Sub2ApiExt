@@ -43,6 +43,7 @@ type requestModel struct {
 type policyHandler struct {
 	proxy        *httputil.ReverseProxy
 	evalProxy    *httputil.ReverseProxy
+	monitorProxy *httputil.ReverseProxy
 	rules        []compiledRule
 	maxBodyBytes int64
 }
@@ -93,9 +94,19 @@ func main() {
 	evalProxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
 		http.Error(w, "account evaluation service unavailable", http.StatusBadGateway)
 	}
+	monitorTarget, err := url.Parse(envOrDefault("POLICY_MONITORING_UPSTREAM", "http://sub2api-monitoring:8090"))
+	if err != nil || (monitorTarget.Scheme != "http" && monitorTarget.Scheme != "https") || monitorTarget.Host == "" || monitorTarget.User != nil {
+		log.Fatal("invalid POLICY_MONITORING_UPSTREAM")
+	}
+	monitorProxy := httputil.NewSingleHostReverseProxy(monitorTarget)
+	monitorProxy.Transport = transport
+	monitorProxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+		http.Error(w, "monitoring service unavailable", http.StatusBadGateway)
+	}
 	handler := &policyHandler{
 		proxy:        proxy,
 		evalProxy:    evalProxy,
+		monitorProxy: monitorProxy,
 		rules:        rules,
 		maxBodyBytes: maxBodyBytes,
 	}
@@ -211,6 +222,14 @@ func (h *policyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.evalProxy.ServeHTTP(w, r)
+		return
+	}
+	if r.URL.Path == "/monitoring" || strings.HasPrefix(r.URL.Path, "/monitoring/") {
+		if h.monitorProxy == nil {
+			http.Error(w, "monitoring service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		h.monitorProxy.ServeHTTP(w, r)
 		return
 	}
 	userAgent := r.Header.Get("User-Agent")

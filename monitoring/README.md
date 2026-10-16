@@ -1,6 +1,6 @@
 # Sub2API Pulse 监控服务
 
-`monitoring/` 是独立的监控 Worker 和匿名只读 Web 面板，用于查看 Sub2API 账户、分组、延迟、错误、历史记录和 Tokens 用量。
+`monitoring/` 是独立的监控 Worker 和按主站分组权限提供数据的只读 Web 面板，用于查看 Sub2API 账户、分组、延迟、错误、历史记录和 Tokens 用量。
 
 服务从 PostgreSQL 自动发现账户及其真实分组关系，优先分析已有请求；只有记录到渠道错误时，才对支持的账户发送最小化恢复探测，复用一份账户结果生成所属分组的聚合检查，并将监控历史写入自己的 `monitoring_*` 表。分组不会重复发送模型请求：分组可用性复用成员账户聚合结果，任一账户可用就视为分组可用；卡片延迟和请求质量只依据本组实际请求。实时状态面板展示可调度账户、可调度的错误账户及 `status=active` 的分组；未分组、停用账户和停用分组不会生成实时展示对象。用量统计独立按所选时间窗口内的有效消费记录计算，不因账户或分组后来被停用、设为不可调度或软删除而移除历史消费。可调度的错误账户保留为红色诊断对象；有当前窗口健康证据时仍纳入实时健康统计，但不会进入启用分组候选；只有同时存在渠道错误证据时才进入恢复探测。探测失败不会修改 `accounts.status`、`accounts.schedulable` 或任何网关路由状态。
 
@@ -83,13 +83,24 @@ GET /api/v1/monitor/activity
 
 `MONITORING_CONCURRENCY_SLOT_TTL` 默认 `30m`，应与 Sub2API 的 `gateway.concurrency_slot_ttl_minutes` 保持一致；默认上游配置无需修改。
 
-## 内网安全
+## 访问权限与内网安全
 
-面板不需要账号、密码或 API Token。一键部署默认发布到 `0.0.0.0:18090`，同一局域网可通过 `http://<主机名或主机 IP>:18090` 访问；部署脚本会校验或创建仅允许 `Domain/Private` 配置文件和 `LocalSubnet` 来源的 Windows 防火墙规则，无法安全配置时会停止部署。面板包含账户名、Tokens 和成本信息，只应运行在可信局域网，不应发布到公网；用量接口不返回用户排行、用户名、余额或用户级额度明细。若只需本机访问，可在安装目录 `.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1` 后重新运行部署脚本。
+推荐从与主站同源的 `/monitoring/` 打开面板，复用主站登录状态、域名和 HTTPS。服务端通过 `/api/v1/auth/me` 验证用户身份，普通用户的分组范围直接使用 `/api/v1/groups/available`，沿用主站专属分组授权、有效订阅和公开组限制规则（已核对 Sub2API v0.2.16）。
+
+- 未登录：仅能查看当前启用、非专属、非订阅的公开分组。
+- 普通用户：仅能查看主站当前返回的可用分组；没有授权时不会回退为所有公开组。
+- 管理员：可查看全部监控对象和历史消费，包括后来停用、软删除及未分组的消费。
+- 过期或停用的登录返回 401；主站验证失败或接口不兼容返回 503，不降级放行。
+
+权限同时作用于实时状态、活动、历史、告警、账户/模型/分组排行、KPI、图表和遗漏项汇总，全部先过滤再统计。非管理员的用量只包含实际 `usage_logs.group_id` 属于可见分组的记录；历史同样以当前可用分组为边界。共享账户用量只统计可见组的份额。账户整体状态、历史、告警及当前并发仅在其所有所属分组均可见时展示；分组接口不向非管理员返回无法归属到本组的共享账户并发。账户的全局渠道错误水位不向非管理员公开，真实请求指标仍按可见组计算。主站登录、退出或切换账号会刷新同源监控页面，避免继续显示上一身份的数据。
+
+代码按三个职责组织：`access.Authorizer` 只向固定主站验证身份与授权，不自行解码 JWT 或缓存权限；不可变的 `access.Scope` 表示单次请求的权限，零值不授权；`store.Reader` 是带范围的只读查询入口，使用参数化 CTE 在同一条 SQL 中限制原始数据，再复用现有统计。新增面板读取必须通过 Reader；Worker 继续使用 Store 采集完整数据，不持有访问者权限，也不因页面访问重复探测。
+
+独立端口仍默认发布到 `0.0.0.0:18090`，用于可信局域网访问；不同域名或端口不会继承主站登录，通常只能看到公开组，应把菜单迁移到主站同源入口。部署脚本继续校验仅允许 `Domain/Private` 配置文件和 `LocalSubnet` 来源的 Windows 防火墙规则。面板包含账户名、Tokens 和成本信息，仍应运行在可信访问边界内；接口不返回用户排行、用户名、余额或用户级额度明细。若只需本机访问，可在安装目录 `.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1` 后重新部署。
 
 ## 一键部署
 
-先启动现有 Sub2API 和 PostgreSQL。部署全部扩展可在仓库根目录双击：
+先启动现有 Sub2API、PostgreSQL 和主站 policy-gateway。部署全部扩展可在仓库根目录双击：
 
 ```bat
 一键部署.bat
@@ -101,7 +112,7 @@ GET /api/v1/monitor/activity
 deploy.bat
 ```
 
-安装器只读取现有 Sub2API 的 Docker 网络、PostgreSQL 和 Redis 连接信息，不会重建主服务、数据库或 Redis。它会构建 `sub2api-ext-monitoring:local`，并把独立 Compose、设置及数据库/Redis 运行环境安装到 `C:\ProgramData\Sub2API\extensions\monitoring`。账户凭据只在当前探测请求的内存中使用，不由监控服务另行持久化。
+安装器读取现有 Sub2API 的 Docker 网络、PostgreSQL 和 Redis 连接信息，并更新 policy-gateway 的 `/monitoring/` 路由；保留网关在 ProgramData 中的规则配置，不重建主服务、数据库或 Redis。它会构建 `sub2api-ext-monitoring:local`，并把独立 Compose、设置及数据库/Redis 运行环境安装到 `C:\ProgramData\Sub2API\extensions\monitoring`。账户凭据只在当前探测请求的内存中使用，不由监控服务另行持久化。
 
 部署脚本不会修改 Sub2API 的菜单或其他系统设置。“渠道监控”菜单请在 Sub2API 中手动添加。监控部署和根目录的一键部署会自动运行 `fix-monitoring-access.ps1`：它读取 Sub2API PostgreSQL 的 `frontend_url` / `api_base_url`、Docker 实际端口以及监控 `.env` / `settings.env`，合并 iframe 白名单，校验绑定地址和 Windows 防火墙，并在配置改变时重启监控；不会调用 Admin API，也不会回写网关数据库。
 
@@ -111,17 +122,14 @@ deploy.bat
 fix-monitoring-access.bat
 ```
 
-有域名的机器建议使用同为 HTTPS 的站点和监控域名；在 Sub2API 自定义菜单中手动填写：
+“渠道监控”菜单应使用浏览器登录主站时的同一来源，并追加 `/monitoring/`：
 
-```powershell
-https://monitor.example.com
+```text
+https://sub2api.example.com/monitoring/
+http://192.168.1.20:18080/monitoring/
 ```
 
-没有域名的机器使用该机可被局域网访问的 IP，在 Sub2API 自定义菜单中手动填写：
-
-```powershell
-http://192.168.1.20:18090
-```
+已有独立监控域名或 `18090` 端口的菜单需要手动更新。外部反向代理应将 `/monitoring/` 一并转发到主站现有网关；`fix-monitoring-access.bat` 只修复原有 iframe/端口访问，不会替换菜单或安装新网关代码，升级使用 `deploy.bat`。
 
 没有域名的机器建议做 DHCP 保留或设置静态 IP；如果 IP 变更，重新运行 `fix-monitoring-access.bat`，并同步修改 Sub2API 菜单 URL。也可以使用公司内网 DNS/稳定主机名替代 IP。
 
@@ -165,6 +173,7 @@ MONITORING_COST_EMAIL_TO=admin@example.com
 | `MONITORING_BIND_HOST` | `0.0.0.0` | 安装目录 `.env` 中的主机绑定地址；默认允许局域网访问 |
 | `MONITORING_PORT` | `18090` | 安装目录 `.env` 中的主机端口 |
 | `MONITORING_LISTEN_ADDR` | `:8090` | 容器内 HTTP 监听地址 |
+| `MONITORING_SUB2API_URL` | `http://sub2api:8080` | 固定主站认证地址，仅允许无凭据的 HTTP(S) 来源；不经过浏览器传入 |
 | `MONITORING_INTERVAL` | `60s` | 后台数据库扫描周期；仅渠道错误会触发上游请求 |
 | `MONITORING_REQUEST_TIMEOUT` | `30s` | 单次请求超时 |
 | `MONITORING_PROBE_CONCURRENCY` | `8` | 账户探测并发数 |
@@ -191,3 +200,15 @@ MONITORING_COST_EMAIL_TO=admin@example.com
 | `MONITORING_COST_EMAIL_TIMEOUT` | `15s` | 单次 SMTP 连接和发送超时 |
 
 支持的 OAuth 账户会读取现有访问令牌，并使用与主网关一致的提供商端点和认证形状。API Key 账户的 `base_url` / `endpoint`、`monitor_model` 和兼容字段 `model` 会被尊重。令牌刷新仍由主网关负责；监控不会回写账户凭据或路由状态。
+
+## 权限验证
+
+```powershell
+go test ./...
+node --experimental-vm-modules --test internal/web/access.test.mjs
+# 使用独立测试 PostgreSQL；fixture 仅创建连接内临时表，不使用生产连接。
+$env:MONITORING_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5432/monitoring_test?sslmode=disable'
+go test ./internal/store -run 'TestReaderPermissionsPostgres|TestDashboardRequestWindowsPostgres|TestUsageCostBasisPostgres' -v
+```
+
+权限用例覆盖匿名、管理员、普通授权、公开组限制、有效订阅、空权限、授权撤回、共享账户、汇总和历史直查，以及同仓库主站网关的路由测试。主站接口或数据库结构升级后，仍需验证该版本的认证和分组返回契约。
