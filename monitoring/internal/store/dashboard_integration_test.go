@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/access"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 	_ "github.com/lib/pq"
 )
@@ -75,7 +76,7 @@ SELECT 1, 20, 40000, 30000, NOW() - n * INTERVAL '10 seconds', 'slow-' || n FROM
 `)
 	load := func() map[string]model.DashboardTarget {
 		t.Helper()
-		dashboard, err := New(db).Dashboard(ctx, 2*time.Minute, 60)
+		dashboard, err := New(db).Read(access.Administrator()).Dashboard(ctx, 2*time.Minute, 60)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/access"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/config"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/monitor"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/store"
@@ -40,8 +41,13 @@ func main() {
 	if err := repository.EnsureSchema(context.Background()); err != nil {
 		panic(err)
 	}
+	authorizer, err := access.NewAuthorizer(cfg.Sub2APIURL)
+	if err != nil {
+		panic(err)
+	}
+	defer authorizer.Close()
 	service := monitor.New(cfg, repository, slog.New(slog.NewTextHandler(os.Stdout, nil)))
-	if err := http.ListenAndServe(":8091", web.New(service, cfg.FrameAncestors).Handler()); err != nil {
+	if err := http.ListenAndServe(":8091", web.New(service, authorizer, cfg.FrameAncestors).Handler()); err != nil {
 		panic(err)
 	}
 }

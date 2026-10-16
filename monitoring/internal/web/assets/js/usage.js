@@ -125,6 +125,7 @@ export class UsagePanel {
       this.render();
     } catch (error) {
       if (!this.#requests.isCurrent(requestId)) return;
+      this.usage = null;
       const message = error?.message || '用量读取失败';
       showUsageError(message);
       toast(message);

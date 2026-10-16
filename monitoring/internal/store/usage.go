@@ -27,7 +27,7 @@ type usageBounds struct {
 	end    time.Time
 }
 
-func (s *Store) UsageRanking(ctx context.Context, period string, limit int) (model.UsageRanking, error) {
+func (s *Reader) UsageRanking(ctx context.Context, period string, limit int) (model.UsageRanking, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
@@ -60,7 +60,7 @@ func newUsageRanking(bounds usageBounds) model.UsageRanking {
 	}
 }
 
-func (s *Store) loadUsageOverview(ctx context.Context, result *model.UsageRanking, bounds usageBounds) error {
+func (s *Reader) loadUsageOverview(ctx context.Context, result *model.UsageRanking, bounds usageBounds) error {
 	if err := s.loadUsageSummary(ctx, &result.Summary, bounds); err != nil {
 		return fmt.Errorf("load usage summary: %w", err)
 	}
@@ -72,7 +72,7 @@ func (s *Store) loadUsageOverview(ctx context.Context, result *model.UsageRankin
 	return nil
 }
 
-func (s *Store) loadUsageRanks(ctx context.Context, result *model.UsageRanking, bounds usageBounds, limit int) error {
+func (s *Reader) loadUsageRanks(ctx context.Context, result *model.UsageRanking, bounds usageBounds, limit int) error {
 	totalTokens := result.Summary.TotalTokens
 	var err error
 	result.Accounts, result.DimensionMeta.Accounts, err = s.loadAccountUsageRanks(ctx, bounds, limit, totalTokens)
@@ -115,13 +115,13 @@ func parseUsagePeriod(value string) (usagePeriod, error) {
 	}
 }
 
-func (s *Store) usageBounds(ctx context.Context, value string) (usageBounds, error) {
+func (s *Reader) usageBounds(ctx context.Context, value string) (usageBounds, error) {
 	period, err := parseUsagePeriod(value)
 	if err != nil {
 		return usageBounds{}, err
 	}
 	var now, todayStart, yesterdayStart time.Time
-	if err := s.db.QueryRowContext(ctx, `SELECT NOW(), CURRENT_DATE::timestamptz, (CURRENT_DATE - 1)::timestamptz`).Scan(&now, &todayStart, &yesterdayStart); err != nil {
+	if err := s.queryRow(ctx, `SELECT NOW(), CURRENT_DATE::timestamptz, (CURRENT_DATE - 1)::timestamptz`).Scan(&now, &todayStart, &yesterdayStart); err != nil {
 		return usageBounds{}, err
 	}
 	return resolveUsageBounds(period, now, todayStart, yesterdayStart), nil
@@ -167,10 +167,10 @@ SELECT COUNT(*)::bigint,
  FROM usage_logs ul
  WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.actual_cost > 0`
 
-func (s *Store) loadUsageSummary(ctx context.Context, summary *model.UsageSummary, bounds usageBounds) error {
+func (s *Reader) loadUsageSummary(ctx context.Context, summary *model.UsageSummary, bounds usageBounds) error {
 	var cacheCreate, cacheRead int64
 	var baseCost, actualCost float64
-	if err := s.db.QueryRowContext(ctx, usageSummaryQuery, bounds.start, bounds.end).Scan(
+	if err := s.queryRow(ctx, usageSummaryQuery, bounds.start, bounds.end).Scan(
 		&summary.Requests, &summary.TotalTokens, &summary.InputTokens, &summary.OutputTokens,
 		&cacheCreate, &cacheRead, &baseCost, &summary.InputCost, &summary.OutputCost,
 		&summary.CacheCreationCost, &summary.CacheReadCost, &actualCost,
@@ -238,7 +238,7 @@ FROM buckets
 LEFT JOIN usage USING (start_at)
 ORDER BY buckets.start_at, usage.channel_name`
 
-func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]model.UsageBucket, error) {
+func (s *Reader) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]model.UsageBucket, error) {
 	step := "1 hour"
 	if bounds.bucket == "minute" {
 		step = "1 minute"
@@ -247,7 +247,7 @@ func (s *Store) loadUsageTimeline(ctx context.Context, bounds usageBounds) ([]mo
 		step = "1 day"
 	}
 	query := fmt.Sprintf(usageTimelineQuery, bounds.bucket, bounds.bucket, step, bounds.bucket)
-	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end)
+	rows, err := s.query(ctx, query, bounds.start, bounds.end)
 	if err != nil {
 		return nil, err
 	}

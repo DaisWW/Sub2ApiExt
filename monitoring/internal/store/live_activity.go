@@ -76,8 +76,8 @@ type liveActivityRow struct {
 	generatedAt time.Time
 }
 
-func (s *Store) LiveActivity(ctx context.Context) (model.LiveActivity, error) {
-	rows, err := s.db.QueryContext(ctx, liveActivityQuery, int64(liveActivityWindow/time.Second))
+func (s *Reader) LiveActivity(ctx context.Context) (model.LiveActivity, error) {
+	rows, err := s.query(ctx, liveActivityQuery, int64(liveActivityWindow/time.Second))
 	if err != nil {
 		return model.LiveActivity{}, fmt.Errorf("load live activity: %w", err)
 	}
@@ -116,21 +116,26 @@ func (s *Store) LiveActivity(ctx context.Context) (model.LiveActivity, error) {
 	return activity, nil
 }
 
-func (s *Store) addCurrentConcurrency(ctx context.Context, activity *model.LiveActivity) error {
-	if s.redis == nil {
+func (s *Reader) addCurrentConcurrency(ctx context.Context, activity *model.LiveActivity) error {
+	if s.store.redis == nil {
 		return fmt.Errorf("Redis is not configured")
 	}
-	ttl := s.concurrencySlotTTL
+	ttl := s.store.concurrencySlotTTL
 	if ttl <= 0 {
 		ttl = 30 * time.Minute
 	}
-	now, err := s.redis.Time(ctx).Result()
+	now, err := s.store.redis.Time(ctx).Result()
 	if err != nil {
 		return fmt.Errorf("read Redis time: %w", err)
 	}
-	groupAccounts, err := s.loadActiveGroupAccounts(ctx)
-	if err != nil {
-		return err
+	// Group concurrency cannot be attributed to one group when an account is
+	// shared. Only administrators may receive the legacy global aggregate.
+	groupAccounts := map[int64][]int64{}
+	if s.scope.IsAdmin() {
+		groupAccounts, err = s.loadActiveGroupAccounts(ctx)
+		if err != nil {
+			return err
+		}
 	}
 
 	accountIDs := make([]int64, 0, len(activity.Targets))
@@ -161,7 +166,7 @@ func (s *Store) addCurrentConcurrency(ctx context.Context, activity *model.LiveA
 
 	regularCutoff := strconv.FormatInt(now.Add(-ttl).Unix(), 10)
 	liveCutoff := strconv.FormatInt(now.Add(-time.Minute).Unix(), 10)
-	pipe := s.redis.Pipeline()
+	pipe := s.store.redis.Pipeline()
 	type commands struct {
 		regular *redis.IntCmd
 		live    *redis.IntCmd
@@ -199,8 +204,8 @@ func (s *Store) addCurrentConcurrency(ctx context.Context, activity *model.LiveA
 	return nil
 }
 
-func (s *Store) loadActiveGroupAccounts(ctx context.Context) (map[int64][]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *Reader) loadActiveGroupAccounts(ctx context.Context) (map[int64][]int64, error) {
+	rows, err := s.query(ctx, `
 SELECT ag.group_id, ag.account_id
 FROM account_groups ag
 JOIN accounts a ON a.id = ag.account_id

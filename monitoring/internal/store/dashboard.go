@@ -9,8 +9,8 @@ import (
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 )
 
-func (s *Store) Dashboard(ctx context.Context, staleAfter time.Duration, intervalSec int) (model.Dashboard, error) {
-	rows, err := s.db.QueryContext(ctx, dashboardQuery)
+func (s *Reader) Dashboard(ctx context.Context, staleAfter time.Duration, intervalSec int) (model.Dashboard, error) {
+	rows, err := s.query(ctx, dashboardQuery)
 	if err != nil {
 		return model.Dashboard{}, fmt.Errorf("load dashboard: %w", err)
 	}

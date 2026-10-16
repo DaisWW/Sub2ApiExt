@@ -66,7 +66,7 @@ SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'account:unknown' END AS enti
  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank, priority_rank),
           token_rank, cost_rank, unit_cost_rank, cache_context_rank, priority_rank`
 
-func (s *Store) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+func (s *Reader) loadAccountUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	return s.loadDimensionRanks(ctx, accountUsageRankQuery, model.KindAccount, bounds, limit, totalTokens)
 }
 
@@ -123,7 +123,7 @@ SELECT entity_id, CASE WHEN entity_id IS NULL THEN 'group:unassigned' END AS ent
  ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank, cache_context_rank),
           token_rank, cost_rank, unit_cost_rank, cache_context_rank`
 
-func (s *Store) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+func (s *Reader) loadGroupUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	return s.loadDimensionRanks(ctx, groupUsageRankQuery, model.KindGroup, bounds, limit, totalTokens)
 }
 
@@ -175,12 +175,12 @@ SELECT entity_id, entity_key, name, context, platform, priority,
  WHERE token_rank <= $3 OR cost_rank <= $3 OR unit_cost_rank <= $3
   ORDER BY LEAST(token_rank, cost_rank, unit_cost_rank), token_rank, cost_rank, unit_cost_rank`
 
-func (s *Store) loadModelUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+func (s *Reader) loadModelUsageRanks(ctx context.Context, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
 	return s.loadDimensionRanks(ctx, modelUsageRankQuery, model.KindModel, bounds, limit, totalTokens)
 }
 
-func (s *Store) loadDimensionRanks(ctx context.Context, query, kind string, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
-	rows, err := s.db.QueryContext(ctx, query, bounds.start, bounds.end, limit)
+func (s *Reader) loadDimensionRanks(ctx context.Context, query, kind string, bounds usageBounds, limit int, totalTokens int64) ([]model.UsageRankItem, model.UsageDimensionMeta, error) {
+	rows, err := s.query(ctx, query, bounds.start, bounds.end, limit)
 	if err != nil {
 		return nil, model.UsageDimensionMeta{}, err
 	}

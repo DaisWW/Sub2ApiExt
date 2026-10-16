@@ -71,8 +71,14 @@ export class AlertCenter {
       this.#remember(items);
       this.#initialized = true;
       this.#setStatus(`${formatTime(new Date())} 更新`);
-    } catch {
+    } catch (error) {
       if (!this.#requests.isCurrent(requestId)) return;
+      if (error.status === 401) {
+        this.#initialized = false;
+        $('#alertList').innerHTML = `<div class="empty-state">${escapeHTML(error.message)}</div>`;
+        this.#setStatus('请重新登录', true);
+        return;
+      }
       this.#setStatus(this.#initialized ? '更新失败 · 保留旧数据' : '读取失败', true);
     }
   }

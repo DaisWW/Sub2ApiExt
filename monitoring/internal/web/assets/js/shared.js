@@ -20,13 +20,36 @@ export class LatestRequest {
   }
 }
 
-export async function api(path) {
-  const response = await fetch(path);
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || `HTTP ${response.status}`);
+export class APIError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
   }
-  return response.json();
+}
+
+export async function api(path) {
+  const token = authToken();
+  const url = new URL(path.replace(/^\//, ''), new URL('../', import.meta.url));
+  const response = await fetch(url, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    cache: 'no-store',
+  });
+  const payload = response.ok ? await response.json() : await response.json().catch(() => ({}));
+  if (token !== authToken()) {
+    throw new APIError(401, '登录状态已变化，请刷新页面');
+  }
+  if (!response.ok) {
+    throw new APIError(response.status, payload.error || `HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+function authToken() {
+  try {
+    return localStorage.getItem('auth_token') || '';
+  } catch {
+    return ''; // An old cross-origin iframe can still show the public view.
+  }
 }
 
 export function escapeHTML(value) {

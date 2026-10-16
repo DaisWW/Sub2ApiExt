@@ -14,6 +14,7 @@ import (
 
 type Config struct {
 	ListenAddr         string
+	Sub2APIURL         string
 	DatabaseURL        string
 	RedisAddr          string
 	RedisPassword      string
@@ -65,6 +66,7 @@ func Load() (Config, error) {
 	}
 	c := Config{
 		ListenAddr:         envString("MONITORING_LISTEN_ADDR", ":8090"),
+		Sub2APIURL:         envString("MONITORING_SUB2API_URL", "http://sub2api:8080"),
 		DatabaseURL:        envString("MONITORING_DATABASE_URL", ""),
 		RedisAddr:          buildRedisAddr(),
 		RedisPassword:      os.Getenv("REDIS_PASSWORD"),

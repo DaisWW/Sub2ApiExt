@@ -6,6 +6,11 @@ import { $, activateToggle } from './js/shared.js';
 
 document.documentElement.classList.toggle('iframe-embedded', window.self !== window.top);
 
+// Main-site login/logout also reaches same-origin monitoring iframes.
+window.addEventListener('storage', (event) => {
+  if (event.key === 'auth_token' || event.key === null) location.reload();
+});
+
 let dashboard;
 const history = new HistoryDialog();
 dashboard = new DashboardPanel((target, name) => history.open(target, name));
