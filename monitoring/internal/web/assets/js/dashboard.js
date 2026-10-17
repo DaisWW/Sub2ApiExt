@@ -101,7 +101,7 @@ export class DashboardPanel {
       this.render();
     } catch (error) {
       if (!this.#requests.isCurrent(requestId)) return;
-      this.#showError(error);
+      $('#targetGrid').innerHTML = `<div class="empty-state">${escapeHTML(error.message)}</div>`;
       toast(error.message);
     }
   }
@@ -133,18 +133,8 @@ export class DashboardPanel {
       this.render();
     } catch (error) {
       if (!this.#activityRequests.isCurrent(requestId)) return;
-      if (error.status === 401) this.#showError(error);
       if (!silent) toast(error.message || '实时活动读取失败');
     }
-  }
-
-  #showError(error) {
-    this.dashboard = null;
-    $('#overallTitle').textContent = '监控读取失败';
-    $('#overallMeta').textContent = error.message;
-    $('#sectionMeta').textContent = '';
-    this.platformFilter = renderPlatformFilters($('#dashboardPlatformFilter'), [], this.platformFilter);
-    $('#targetGrid').innerHTML = `<div class="empty-state">${escapeHTML(error.message)}</div>`;
   }
 
   render() {

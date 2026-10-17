@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/access"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 	_ "github.com/lib/pq"
 )
@@ -53,7 +52,7 @@ VALUES (1, 10, 1000000, 100, 100, 10, 100, 0.2);
 `)
 	load := func(limit int) model.UsageRanking {
 		t.Helper()
-		ranking, err := New(db).Read(access.Administrator()).UsageRanking(ctx, "24h", limit)
+		ranking, err := New(db).UsageRanking(ctx, "24h", limit)
 		if err != nil {
 			t.Fatal(err)
 		}

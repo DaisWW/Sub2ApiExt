@@ -5,7 +5,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\scripts\deploy-common.ps1')
-. (Join-Path $PSScriptRoot '..\deploy\windows\modules\Common.ps1')
 
 $runtimeRoot = Get-ExtensionRuntimeRoot -Service 'monitoring'
 $elevatedExit = Invoke-ExtensionElevated -ScriptPath $PSCommandPath -ProbePath $runtimeRoot
@@ -50,12 +49,6 @@ if ($needsFirewallChange) {
 
 Assert-ExtensionDocker
 $sub2api = Get-Sub2ApiDockerContext
-$mainContext = New-Sub2ApiContext
-if (-not (Test-Sub2ApiDeploymentExists -Context $mainContext) -or
-        -not (Test-Sub2ApiPolicyGatewayEnabled -Context $mainContext) -or
-        -not (Test-ExtensionContainerExists -Name 'sub2api-policy-gateway')) {
-    throw '请先运行根目录的一键部署，监控需要主站网关提供 /monitoring/ 同源登录入口。'
-}
 $application = Get-ExtensionContainerInspect -Name 'sub2api'
 $redis = Get-ExtensionContainerInspect -Name 'sub2api-redis'
 if (-not $redis.State.Running) {
@@ -164,18 +157,6 @@ if ($needsFirewallChange) {
 Start-ExtensionCompose -RuntimeRoot $runtimeRoot
 Wait-ExtensionContainer -Name 'sub2api-monitoring'
 
-# Update gateway code while preserving its ProgramData rules and configuration.
-$gatewaySource = Join-Path $PSScriptRoot '..\deploy\windows\policy-gateway'
-foreach ($name in @('Dockerfile', 'go.mod', 'main.go')) {
-    Copy-Item -LiteralPath (Join-Path $gatewaySource $name) -Destination (Join-Path $mainContext.PolicyGatewayRuntimeRoot $name) -Force
-}
-Invoke-Sub2ApiCompose -Context $mainContext -Arguments @('up', '-d', '--no-deps', '--build', 'policy-gateway')
-Wait-ExtensionContainer -Name 'sub2api-policy-gateway'
-$monitorHealth = (Invoke-ExtensionDocker -Arguments @('exec', 'sub2api-policy-gateway', 'wget', '-q', '-T', '5', '-O', '-', 'http://127.0.0.1:8080/monitoring/healthz') -Capture | Out-String) | ConvertFrom-Json
-if ($monitorHealth.status -ne 'ok' -or $monitorHealth.service -ne 'sub2api-monitoring') {
-    throw '主站网关的监控入口健康检查失败。'
-}
-
 # Retire the original-workspace deployment only after the independent
 # ProgramData deployment is healthy, so two workers do not probe in parallel.
 if (Test-ExtensionContainerExists -Name 'sub2api-monitoring-standalone') {
@@ -185,7 +166,6 @@ if (Test-ExtensionContainerExists -Name 'sub2api-monitoring-standalone') {
 
 Write-Host ''
 Write-Host 'Monitoring deployment completed.' -ForegroundColor Green
-Write-Host 'Authenticated dashboard: <main-site-origin>/monitoring/ (use this URL in the Sub2API menu)'
 Write-Host "Dashboard (this PC): http://localhost:$port"
 if ($lanBind) {
     $hostName = [Net.Dns]::GetHostName()

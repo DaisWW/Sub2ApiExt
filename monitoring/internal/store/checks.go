@@ -226,9 +226,9 @@ func (s *Store) Prune(ctx context.Context, before time.Time) error {
 	return tx.Commit()
 }
 
-func (s *Reader) History(ctx context.Context, key string, limit int) ([]model.ProbeResult, error) {
+func (s *Store) History(ctx context.Context, key string, limit int) ([]model.ProbeResult, error) {
 	limit = normalizeHistoryLimit(limit)
-	rows, err := s.query(ctx, historyQuery, key, limit)
+	rows, err := s.db.QueryContext(ctx, historyQuery, key, limit)
 	if err != nil {
 		return nil, err
 	}

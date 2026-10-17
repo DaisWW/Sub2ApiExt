@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/access"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/config"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/notify"
@@ -79,8 +78,8 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	return s.runCycle(ctx)
 }
 
-func (s *Service) Dashboard(ctx context.Context, scope access.Scope) (model.Dashboard, error) {
-	dashboard, err := s.store.Read(scope).Dashboard(ctx, s.cfg.Interval*2, int(s.cfg.Interval/time.Second))
+func (s *Service) Dashboard(ctx context.Context) (model.Dashboard, error) {
+	dashboard, err := s.store.Dashboard(ctx, s.cfg.Interval*2, int(s.cfg.Interval/time.Second))
 	if err != nil {
 		return model.Dashboard{}, err
 	}
@@ -89,8 +88,8 @@ func (s *Service) Dashboard(ctx context.Context, scope access.Scope) (model.Dash
 	return dashboard, nil
 }
 
-func (s *Service) LiveActivity(ctx context.Context, scope access.Scope) (model.LiveActivity, error) {
-	return s.store.Read(scope).LiveActivity(ctx)
+func (s *Service) LiveActivity(ctx context.Context) (model.LiveActivity, error) {
+	return s.store.LiveActivity(ctx)
 }
 
 func (s *Service) setNextProbe(value time.Time) {
@@ -106,16 +105,16 @@ func (s *Service) nextProbeAt() *time.Time {
 	return &next
 }
 
-func (s *Service) History(ctx context.Context, scope access.Scope, key string, limit int) ([]model.ProbeResult, error) {
-	return s.store.Read(scope).History(ctx, key, limit)
+func (s *Service) History(ctx context.Context, key string, limit int) ([]model.ProbeResult, error) {
+	return s.store.History(ctx, key, limit)
 }
 
-func (s *Service) UsageRanking(ctx context.Context, scope access.Scope, period string, limit int) (model.UsageRanking, error) {
-	return s.store.Read(scope).UsageRanking(ctx, period, limit)
+func (s *Service) UsageRanking(ctx context.Context, period string, limit int) (model.UsageRanking, error) {
+	return s.store.UsageRanking(ctx, period, limit)
 }
 
-func (s *Service) Alerts(ctx context.Context, scope access.Scope, limit int) ([]model.Alert, error) {
-	return s.store.Read(scope).Alerts(ctx, limit)
+func (s *Service) Alerts(ctx context.Context, limit int) ([]model.Alert, error) {
+	return s.store.Alerts(ctx, limit)
 }
 
 func accountIsActive(account model.Account) bool {

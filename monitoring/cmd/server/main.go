@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/access"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/config"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/monitor"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/store"
@@ -68,16 +67,10 @@ func main() {
 		logger.Error("ensure monitoring schema failed", "error", err)
 		os.Exit(1)
 	}
-	authorizer, err := access.NewAuthorizer(cfg.Sub2APIURL)
-	if err != nil {
-		logger.Error("invalid monitoring authentication configuration", "error", err)
-		os.Exit(1)
-	}
-	defer authorizer.Close()
 	service := monitor.New(cfg, repository, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           web.New(service, authorizer, cfg.FrameAncestors).Handler(),
+		Handler:           web.New(service, cfg.FrameAncestors).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,

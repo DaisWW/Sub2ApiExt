@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/monitor"
 )
 
 func TestValidTargetKeyRejectsMalformedValues(t *testing.T) {
@@ -21,7 +23,7 @@ func TestValidTargetKeyRejectsMalformedValues(t *testing.T) {
 }
 
 func TestMonitoringWebServiceRejectsMutatingMethods(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	for _, path := range []string{"/", "/api/v1/monitor/probe", "/api/v1/monitor/activity", "/api/v1/monitor/alerts/1/ack"} {
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		response := httptest.NewRecorder()
@@ -36,7 +38,7 @@ func TestMonitoringWebServiceRejectsMutatingMethods(t *testing.T) {
 }
 
 func TestRemovedWriteAPIsAreNotExposed(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	for _, path := range []string{"/api/v1/monitor/probe", "/api/v1/monitor/alerts/1/ack"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
@@ -59,7 +61,7 @@ func TestBoundedQueryIntClampsValues(t *testing.T) {
 }
 
 func TestStaticResponsesSetContentSecurityPolicy(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -82,7 +84,7 @@ func TestStaticResponsesSetContentSecurityPolicy(t *testing.T) {
 }
 
 func TestUsageShareControlsExcludeUnitCost(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -105,7 +107,7 @@ func TestUsageShareControlsExcludeUnitCost(t *testing.T) {
 }
 
 func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	for path, markers := range map[string][]string{
 		"/": {
 			`<option value="priority" hidden disabled>账户优先级</option>`,
@@ -148,7 +150,7 @@ func TestUsageCardsExposePrioritySortAndBadge(t *testing.T) {
 }
 
 func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/usage.js", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -167,7 +169,7 @@ func TestUsageShareUsesFilledSvgPaths(t *testing.T) {
 }
 
 func TestUsageShareDonutSlicesAreInteractive(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/usage.js", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -226,7 +228,7 @@ func TestUsageShareDonutSlicesAreInteractive(t *testing.T) {
 }
 
 func TestEmbeddedToolbarReservesParentControlSpace(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	for path, marker := range map[string]string{
 		"/app.js":     "document.documentElement.classList.toggle('iframe-embedded', window.self !== window.top);",
 		"/styles.css": "html.iframe-embedded .top-actions { margin-right: 96px; }",
@@ -244,7 +246,7 @@ func TestEmbeddedToolbarReservesParentControlSpace(t *testing.T) {
 }
 
 func TestDashboardHidesGroupConcurrencyMetric(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -266,7 +268,7 @@ func TestDashboardHidesGroupConcurrencyMetric(t *testing.T) {
 }
 
 func TestDashboardSortsAccountsByPriorityAndShowsBadge(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -289,7 +291,7 @@ func TestDashboardSortsAccountsByPriorityAndShowsBadge(t *testing.T) {
 }
 
 func TestDashboardPlatformFilterControls(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -389,7 +391,7 @@ func TestDashboardPlatformFilterControls(t *testing.T) {
 }
 
 func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	for path, markers := range map[string][]string{
 		"/": {
 			"id=\"historyAccountHeader\"",
@@ -437,7 +439,7 @@ func TestGroupHistoryShowsRequestAccountColumn(t *testing.T) {
 }
 
 func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
-	server := New(nil, nil)
+	server := New((*monitor.Service)(nil))
 	request := httptest.NewRequest(http.MethodGet, "/js/dashboard.js", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -478,7 +480,7 @@ func TestDashboardLabelsCurrentHealthWindow(t *testing.T) {
 }
 
 func TestStaticResponsesUseConfiguredFrameAncestors(t *testing.T) {
-	server := New(nil, nil, "'self' https://dashboard.example.test:8443")
+	server := New((*monitor.Service)(nil), "'self' https://dashboard.example.test:8443")
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
@@ -492,7 +494,7 @@ func TestStaticResponsesUseConfiguredFrameAncestors(t *testing.T) {
 }
 
 func TestNewRejectsWildcardFrameAncestors(t *testing.T) {
-	server := New(nil, nil, "*")
+	server := New((*monitor.Service)(nil), "*")
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)

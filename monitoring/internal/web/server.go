@@ -1,7 +1,6 @@
 package web
 
 import (
-	"context"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -9,10 +8,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/access"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/model"
+	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/monitor"
 	"github.com/DaisWW/Sub2ApiExt/monitoring/internal/store"
 )
 
@@ -20,30 +18,16 @@ import (
 var assets embed.FS
 
 type Server struct {
-	service        MonitorService
-	authorizer     ScopeResolver
+	service        *monitor.Service
 	frameAncestors string
 }
 
-type ScopeResolver interface {
-	Resolve(context.Context, http.Header) (access.Scope, error)
-}
-
-// MonitorService requires a grant at every read entry point.
-type MonitorService interface {
-	Dashboard(context.Context, access.Scope) (model.Dashboard, error)
-	LiveActivity(context.Context, access.Scope) (model.LiveActivity, error)
-	UsageRanking(context.Context, access.Scope, string, int) (model.UsageRanking, error)
-	History(context.Context, access.Scope, string, int) ([]model.ProbeResult, error)
-	Alerts(context.Context, access.Scope, int) ([]model.Alert, error)
-}
-
-func New(service MonitorService, authorizer ScopeResolver, frameAncestors ...string) *Server {
+func New(service *monitor.Service, frameAncestors ...string) *Server {
 	policy := "'self'"
 	if len(frameAncestors) > 0 {
 		policy = normalizeFrameAncestors(frameAncestors[0])
 	}
-	return &Server{service: service, authorizer: authorizer, frameAncestors: policy}
+	return &Server{service: service, frameAncestors: policy}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -51,44 +35,15 @@ func (s *Server) Handler() http.Handler {
 	staticFS, _ := fs.Sub(assets, "assets")
 	mux.Handle("/", spaFiles(staticFS))
 	mux.HandleFunc("/healthz", s.health)
-	mux.HandleFunc("/api/v1/monitor/dashboard", s.authorized(s.dashboard))
-	mux.HandleFunc("/api/v1/monitor/activity", s.authorized(s.activity))
-	mux.HandleFunc("/api/v1/monitor/usage-ranking", s.authorized(s.usageRanking))
-	mux.HandleFunc("/api/v1/monitor/history", s.authorized(s.history))
-	mux.HandleFunc("/api/v1/monitor/alerts", s.authorized(s.alerts))
+	mux.HandleFunc("/api/v1/monitor/dashboard", s.dashboard)
+	mux.HandleFunc("/api/v1/monitor/activity", s.activity)
+	mux.HandleFunc("/api/v1/monitor/usage-ranking", s.usageRanking)
+	mux.HandleFunc("/api/v1/monitor/history", s.history)
+	mux.HandleFunc("/api/v1/monitor/alerts", s.alerts)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})
-	root := http.NewServeMux()
-	root.HandleFunc("/monitoring", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/monitoring/", http.StatusPermanentRedirect)
-	})
-	root.Handle("/monitoring/", http.StripPrefix("/monitoring", mux))
-	root.Handle("/", mux)
-	return s.withSecurityHeaders(readOnly(root))
-}
-
-func (s *Server) authorized(next func(http.ResponseWriter, *http.Request, access.Scope)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		defer cancel()
-		if s.authorizer == nil {
-			writeError(w, http.StatusServiceUnavailable, access.ErrUnavailable.Error())
-			return
-		}
-		scope, err := s.authorizer.Resolve(ctx, r.Header)
-		if err != nil {
-			status := http.StatusServiceUnavailable
-			message := access.ErrUnavailable.Error()
-			if errors.Is(err, access.ErrUnauthenticated) {
-				status = http.StatusUnauthorized
-				message = access.ErrUnauthenticated.Error()
-			}
-			writeError(w, status, message)
-			return
-		}
-		next(w, r.WithContext(ctx), scope)
-	}
+	return s.withSecurityHeaders(readOnly(mux))
 }
 
 func spaFiles(files fs.FS) http.Handler {
@@ -116,8 +71,8 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "sub2api-monitoring"})
 }
 
-func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, scope access.Scope) {
-	dashboard, err := s.service.Dashboard(r.Context(), scope)
+func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
+	dashboard, err := s.service.Dashboard(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "监控面板暂时不可用")
 		return
@@ -125,8 +80,8 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request, scope access.
 	writeJSON(w, http.StatusOK, dashboard)
 }
 
-func (s *Server) activity(w http.ResponseWriter, r *http.Request, scope access.Scope) {
-	activity, err := s.service.LiveActivity(r.Context(), scope)
+func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
+	activity, err := s.service.LiveActivity(r.Context())
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "实时活动数据暂时不可用")
 		return
@@ -134,12 +89,12 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request, scope access.S
 	writeJSON(w, http.StatusOK, activity)
 }
 
-func (s *Server) usageRanking(w http.ResponseWriter, r *http.Request, scope access.Scope) {
+func (s *Server) usageRanking(w http.ResponseWriter, r *http.Request) {
 	period := strings.TrimSpace(r.URL.Query().Get("period"))
 	if period == "" {
 		period = "24h"
 	}
-	ranking, err := s.service.UsageRanking(r.Context(), scope, period, boundedQueryInt(r, "limit", 10, 1, 50))
+	ranking, err := s.service.UsageRanking(r.Context(), period, boundedQueryInt(r, "limit", 10, 1, 50))
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidUsagePeriod) {
 			writeError(w, http.StatusBadRequest, "period must be 1h, 24h, today, yesterday, 7d, 15d, or 30d")
@@ -151,14 +106,14 @@ func (s *Server) usageRanking(w http.ResponseWriter, r *http.Request, scope acce
 	writeJSON(w, http.StatusOK, ranking)
 }
 
-func (s *Server) history(w http.ResponseWriter, r *http.Request, scope access.Scope) {
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	key := strings.TrimSpace(r.URL.Query().Get("target"))
 	if !validTargetKey(key) {
 		writeError(w, http.StatusBadRequest, "target must be account:<id> or group:<id>")
 		return
 	}
 	limit := boundedQueryInt(r, "limit", 240, 1, 1000)
-	items, err := s.service.History(r.Context(), scope, key, limit)
+	items, err := s.service.History(r.Context(), key, limit)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "历史数据暂时不可用")
 		return
@@ -166,8 +121,8 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request, scope access.Sc
 	writeJSON(w, http.StatusOK, map[string]any{"target": key, "items": items})
 }
 
-func (s *Server) alerts(w http.ResponseWriter, r *http.Request, scope access.Scope) {
-	items, err := s.service.Alerts(r.Context(), scope, boundedQueryInt(r, "limit", 50, 1, 200))
+func (s *Server) alerts(w http.ResponseWriter, r *http.Request) {
+	items, err := s.service.Alerts(r.Context(), boundedQueryInt(r, "limit", 50, 1, 200))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "告警数据暂时不可用")
 		return

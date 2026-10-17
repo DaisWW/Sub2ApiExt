@@ -65,24 +65,24 @@ C:\ProgramData\Sub2API\
 
 账户测评通过主站现有网关的 `/account-eval/` 路径接入，复用主站登录、域名和 HTTPS，不额外开放端口。安装器通过 Admin API 合并“仅管理员可见”的额外入口，并内置 SVG 图标；题库和结果使用独立持久化数据卷，重复部署保留配置及数据。已有管理员密码变化、验证码或 2FA 导致自动注册不可用时，脚本会明确报告菜单未完成；登录主站后打开该路径即可手动安装入口。详细协议支持和部署契约见 [账户测评说明](account-eval/README.md)。
 
-监控面板通过主站现有网关的 `/monitoring/` 同源路径复用主站登录，普通用户按主站现有分组授权查看，管理员可查看全部。独立端口 `0.0.0.0:18090` 继续提供局域网访问，但不同来源不会继承主站登录，通常仅显示公开分组。权限及共享账户边界见 [监控说明](monitoring/README.md#访问权限与内网安全)。部署脚本会校验或创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则，无法安全配置时会停止部署；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再重新运行部署脚本。
+监控面板默认监听 `0.0.0.0:18090`，部署完成后可从同一局域网通过主机名或 IP 访问。部署脚本会校验或创建仅允许 Domain/Private 配置文件和本地子网的 Windows 防火墙规则，无法安全配置时会停止部署；如只需本机访问，可在安装后的 `monitoring\.env` 中把 `MONITORING_BIND_HOST` 改为 `127.0.0.1`，再重新运行部署脚本。
 
 监控部署和根目录的一键部署都会自动运行本地访问修复脚本。脚本读取 Sub2API PostgreSQL 中的 `frontend_url` / `api_base_url`、Docker 实际端口、监控 `.env` 和 `settings.env`，合并 `MONITORING_FRAME_ANCESTORS`，校验局域网绑定/防火墙并在需要时重启监控。它不会调用 Sub2API Admin API，不会创建或修改 Sub2API 菜单，也不会回写网关数据库设置。
 
-监控部署会更新现有网关代码以提供同源入口，并保留 ProgramData 中的规则配置。“渠道监控”菜单请你在 Sub2API 中手动配置为主站同源的 `/monitoring/` 地址。配置完成后，可随时单独运行：
+“渠道监控”菜单请你在 Sub2API 中手动配置。配置完成后，可随时单独运行：
 
 ```bat
 monitoring\fix-monitoring-access.bat
 ```
 
-两台机器的菜单 URL 使用各自主站登录地址，并追加 `/monitoring/`：
+两台机器的菜单 URL 分别填写实际可访问的监控地址：
 
 ```powershell
 # 有域名的机器（建议 HTTPS）
-# 在 Sub2API 自定义菜单中填写：https://sub2api.example.com/monitoring/
+# 在 Sub2API 自定义菜单中填写：https://monitor.example.com
 
 # 没有域名的机器（使用局域网 IP）
-# 在 Sub2API 自定义菜单中填写：http://192.168.1.20:18080/monitoring/
+# 在 Sub2API 自定义菜单中填写：http://192.168.1.20:18090
 ```
 
 无域名机器建议做 DHCP 保留或设置静态 IP；如果 IP 变更，重新运行 `monitoring\fix-monitoring-access.bat`，并同步修改 Sub2API 菜单 URL。也可以使用公司内网 DNS/稳定主机名替代 IP。
